@@ -1,0 +1,12 @@
+# Stricter than the default: an SDK that ships into banks' apps should not
+# carry an implicit cast or a missing type anywhere.
+analyzer:
+  language:
+    strict-casts: true
+    strict-raw-types: true
+  errors:
+    # A deprecation is a warning here, so `flutter analyze` fails on one.
+    deprecated_member_use: warning
+    deprecated_member_use_from_same_package: warning
+  exclude:
+    - build/**

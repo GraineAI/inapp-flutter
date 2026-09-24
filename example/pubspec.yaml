@@ -1,0 +1,20 @@
+name: graine_inapp_example
+description: The Graine in-app agent SDK, end to end — the bar, a component area, a text field for the keyboard lift, and a persisted drag offset.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  graine_inapp:
+    path: ../
+  # The app asks for the microphone; the SDK grants it to the engine page.
+  permission_handler: ^11.0.0
+  # Where the customer left the bar, across launches.
+  shared_preferences: ^2.2.0
+
+flutter:
+  uses-material-design: true
