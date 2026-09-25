@@ -280,6 +280,39 @@ void main() {
     await finish(tester, g);
   });
 
+  testWidgets('back in the foreground, an idle engine is warmed again; a page not ready, or a call, never is',
+      (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+
+    // Not ready yet: graine:ready will warm it; before that a warm goes nowhere.
+    g.setForegroundForTesting(false);
+    g.setForegroundForTesting(true);
+    expect(page.types, isNot(contains('graine:warm')));
+
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    expect(page.types.where((String t) => t == 'graine:warm').length, 1);
+    page.clear();
+
+    // The phone dropped the idle SIP socket while the app slept: warm again.
+    g.setForegroundForTesting(false);
+    g.setForegroundForTesting(true);
+    expect(page.types, <String>['graine:warm']);
+    page.clear();
+
+    // During a call a warm would replace the registration carrying it.
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
+    page.clear();
+    g.setForegroundForTesting(false);
+    g.setForegroundForTesting(true);
+    expect(page.types, isNot(contains('graine:warm')));
+    page.say(<String, Object?>{'type': 'graine:ended'});
+    await finish(tester, g);
+  });
+
   testWidgets('leaving the app ends a live call after two seconds; coming back inside them does not',
       (WidgetTester tester) async {
     final g = app(tester);

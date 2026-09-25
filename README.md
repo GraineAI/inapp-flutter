@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.1.0
+  graine_inapp: ^0.1.1
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 

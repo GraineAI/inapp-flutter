@@ -655,6 +655,15 @@ class GraineVoice extends ChangeNotifier implements GraineCallState {
         final frame = _graine._currentContextFrame();
         if (frame != null) _postContext(frame);
       }
+      // And idle: the page keeps a SIP registration warm so a tap costs only
+      // the INVITE, but a phone drops that idle socket while the app sleeps,
+      // and the page's own visibilitychange is not reliably what wakes it in
+      // a web view a pixel wide. The app knows it is back, so it says so —
+      // only when the page can hear it, never during a call. The same rule as
+      // the React Native launcher and the native SDKs' Warm.onForeground.
+      if (_ready && !_startedCall && !_connected && !_connecting) {
+        _post(Protocol.out(ProtocolOut.warm));
+      }
       return;
     }
     // Confirmed after two seconds: a permission dialog or the app switcher
