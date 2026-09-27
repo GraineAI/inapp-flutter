@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.1.1
+  graine_inapp: ^0.2.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -78,7 +78,8 @@ void main() {
 Other options: `transport` (force `Transport.webrtc` / `.websocket`; default
 is the dashboard's Call audio setting), `endOnBackground` (default true: a
 call ends two seconds after the app leaves the foreground), `timing` (load
-watchdog and retry ladder), `friction` (your layer of the stuck-customer rules).
+watchdog and retry ladder), `friction` (your layer of the stuck-customer rules),
+`fonts` (the font families your app bundles — see Design below).
 
 ## 3. Place the engine and the bar — once, around the navigator
 
@@ -112,7 +113,8 @@ at mount, so a tap is an INVITE away rather than a page load away.
   that already resized, so never a double lift);
 - shows the live caption, and the agent's components above itself
   (`showComponents: false` to draw them elsewhere with `GraineWidgetView`);
-- looks as the dashboard's Appearance says (accent, heading, logo,
+- looks as the brand's design says (see Design below), or — from a server
+  that predates designs — as Appearance says (accent, heading, logo,
   light/dark/auto, radius); `accent`, `name`, `avatarUrl`, `scheme`, `radius`
   override one thing each.
 
@@ -174,7 +176,37 @@ where a component will appear, for at least 450 ms; the answer stays as one
 line until the agent replies. A component's `on_select` runs your registered
 action (or `open_screen` with a `path`) first.
 
-## 7. Listen
+## 7. Design
+
+The brand chooses how the agent looks in the dashboard (Web components →
+Design): a design philosophy and a few knobs. The session carries it already
+resolved — every colour, size, radius, shadow and glyph, for light and dark —
+and the SDK draws those tokens, so a new design reaches your installed app
+without a release. The bar, components and loaders follow it; so do two
+optional widgets:
+
+- `GraineLauncher` — a floating button in the design's shape (circle,
+  squircle, rounded square, square, or a pill with a label) and glyph; a tap
+  starts the call, or runs `onPressed`.
+- `GraineTranscriptView` — the conversation so far as the design's chat
+  window, in its bubble style (filled, outline, minimal).
+
+Light or dark follows the brand's choice, else the device, and switches with
+it. The platform's reduce-motion setting always wins over the design's motion.
+
+Fonts: a design may name a font family. The SDK uses it only if your app
+bundles it and says so, otherwise the platform font — never a download,
+never an error:
+
+```dart
+GraineInApp.init(GraineConfig(baseUrl: …, publishableKey: …, fonts: const ['Inter']));
+```
+
+Drawing your own UI? `GraineInApp.instance.tokens` is the set to draw with
+right now (`tokensListenable` to redraw when the device switches);
+`Design.glyphUrl(...)` builds the launcher glyph as an image.
+
+## 8. Listen
 
 ```dart
 class Analytics with GraineListener {
@@ -195,9 +227,10 @@ flutter test          # core, contract (contract/*.json), the call on a fake pag
 flutter analyze
 ```
 
-`test/contract_test.dart` walks up to `contract/fixtures.json` and
-`contract/rn-parity.json` and must reproduce every answer the React Native
-SDK produced; a missing file fails, it is never skipped. `lib/src/core/` is
+`test/contract_test.dart` walks up to `contract/fixtures.json`,
+`contract/rn-parity.json` and `contract/design.json` and must reproduce every
+answer the React Native SDK produced; a missing file fails, it is never
+skipped. `lib/src/core/` is
 pure Dart (a test holds it to that).
 
 ## Example

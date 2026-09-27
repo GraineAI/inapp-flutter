@@ -398,6 +398,7 @@ class GraineInApp with WidgetsBindingObserver {
     if (s != null) return Future<SessionConfig?>.value(s);
     return _sessionLoad ??= _fetchSession().then<SessionConfig?>((SessionConfig s) {
       _session.value = s;
+      _pickTokens();
       _variables.setDashboardDefaults(s.variables);
       _friction.configure(
           Friction.resolve(<FrictionConfig?>[FrictionConfig.fromJson(s.friction), _appFriction]));
@@ -439,6 +440,42 @@ class GraineInApp with WidgetsBindingObserver {
     final err = SessionConfig.errorFor(res.statusCode, data);
     if (err != null) throw GraineException(err);
     return SessionConfig.fromJson(data);
+  }
+
+  // ── how it looks ────────────────────────────────────────────────────────
+
+  final ValueNotifier<ThemeTokens?> _tokens = ValueNotifier<ThemeTokens?>(null);
+
+  /// The design the brand chose in the dashboard — both token sets. Null
+  /// until the session loads, and from a server that predates designs.
+  ResolvedDesign? get design => _session.value?.design;
+
+  /// The tokens to draw with right now: the brand's fixed scheme, else the
+  /// device's light or dark, re-picked when the device switches. Null without
+  /// a [design]. For a host drawing its own UI; the SDK's widgets pick for
+  /// themselves from their `MediaQuery`.
+  ThemeTokens? get tokens => _tokens.value;
+
+  /// [tokens], for a widget that redraws when they change.
+  ValueListenable<ThemeTokens?> get tokensListenable => _tokens;
+
+  /// The device switched between light and dark.
+  @override
+  void didChangePlatformBrightness() => _pickTokens();
+
+  void _pickTokens() {
+    final d = design;
+    if (d == null) {
+      _tokens.value = null;
+      return;
+    }
+    bool? dark;
+    try {
+      dark = WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark;
+    } catch (_) {
+      dark = null; // no binding yet: the device has not said, which is light
+    }
+    _tokens.value = d.pick(deviceDark: dark);
   }
 
   // ── the app's lifecycle ─────────────────────────────────────────────────

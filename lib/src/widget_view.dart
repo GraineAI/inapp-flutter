@@ -47,6 +47,15 @@ class GraineWidgetTheme {
 /// with "None of these", a screen with "Still listening"): place it where
 /// the component should appear — [GraineAgentBar] mounts one above itself.
 /// State comes from [components] (default: [GraineInApp.components]).
+///
+/// With a design (contract/DESIGN.md, "Components") the chrome is
+/// `surfaceRaised` with a `borderWidth` outline, `radius.lg` corners,
+/// `spacing.cardPadding` inside and `spacing.gap` between items, the card
+/// shadow (or the hard offset); titles in the heading font at the title size,
+/// meta in `textMuted` at the caption size, primary buttons `accent` at
+/// `radius.md`, chips on `accentSoft`. What the component chose for itself —
+/// its accent, radius, platform, density — still wins; the design supplies
+/// the rest.
 class GraineWidgetView extends StatefulWidget {
   const GraineWidgetView({
     super.key,
@@ -56,6 +65,7 @@ class GraineWidgetView extends StatefulWidget {
     this.scheme,
     this.theme,
     this.appearance,
+    this.design,
     this.maxHeight = 460,
   });
 
@@ -68,12 +78,16 @@ class GraineWidgetView extends StatefulWidget {
   /// Corner rounding. Default: the component's own, then a pinned platform's, then the dashboard's.
   final double? radius;
 
-  /// "light", "dark" or "auto" (the device). Default: the dashboard's theme.
+  /// "light", "dark" or "auto" (the device). Default: the design's, else the dashboard's theme.
   final String? scheme;
   final GraineWidgetTheme? theme;
 
   /// The dashboard's Appearance. Default: the session's.
   final Map<String, Object?>? appearance;
+
+  /// The design. Default: the session's ([GraineInApp.design]); with none,
+  /// components look as they did before designs.
+  final ResolvedDesign? design;
 
   /// The most height the component may take; its body scrolls inside.
   final double maxHeight;
@@ -101,6 +115,9 @@ class _Skin {
     required this.loaderColor,
     required this.logoUrl,
     required this.dark,
+    required this.explicitPlatform,
+    required this.soft,
+    this.tokens,
   });
 
   factory _Skin.resolve(BuildContext context, GraineWidgetView w, WidgetLook? look) {
@@ -110,10 +127,14 @@ class _Skin {
         accent: Appearance.defaultAccent, heading: '', origin: app?.config.baseUrl);
     final os = defaultTargetPlatform == TargetPlatform.android ? 'android' : 'ios';
     final grammar = Widgets.grammar[Widgets.resolvePlatform(look?.platform ?? 'auto', os)]!;
-    final accentHex = (w.accent != null && Appearance.argb(w.accent) != null) ? w.accent! : (look?.accent ?? dash.accent);
+    final explicitPlatform = look != null && look.platform != 'auto';
+    final tokens = tokensFor(context, design: w.design, scheme: w.scheme);
+    // An accent the host or the component chose — which beats the design's.
+    final ownAccent = (w.accent != null && Appearance.argb(w.accent) != null) ? w.accent! : look?.accent;
+    final accentHex = ownAccent ?? tokens?.colors.accent ?? dash.accent;
     final radius = w.radius ??
         look?.radius?.toDouble() ??
-        ((look != null && look.platform != 'auto') ? grammar.radius.toDouble() : dash.radius);
+        (explicitPlatform ? grammar.radius.toDouble() : (tokens?.shape.radius.lg ?? dash.radius));
     final palette = Appearance.palette(
       w.scheme != null ? <String, Object?>{'theme': w.scheme} : appearance,
       deviceDark: deviceDark(context),
@@ -122,20 +143,30 @@ class _Skin {
     final loader = Loaders.resolve(appearance?['loader']);
     final accent = colorOf(accentHex) ?? colorOf(Appearance.defaultAccent)!;
     final t = w.theme;
+    final c = tokens?.colors;
+    final surface = t?.surface ?? colorOf(c?.surfaceRaised ?? palette.surface)!;
     return _Skin(
       accent: accent,
-      surface: t?.surface ?? colorOf(palette.surface)!,
-      border: t?.border ?? colorOf(palette.border)!,
-      text: t?.text ?? colorOf(palette.text)!,
-      muted: t?.muted ?? colorOf(palette.muted)!,
-      onAccent: t?.onAccent ?? colorOf(palette.onAccent)!,
+      surface: surface,
+      border: t?.border ?? colorOf(c?.border ?? palette.border)!,
+      text: t?.text ?? colorOf(c?.text ?? palette.text)!,
+      muted: t?.muted ?? colorOf(c?.textMuted ?? palette.muted)!,
+      // The design's onAccent was chosen for the design's accent; any other gets ink by luminance.
+      onAccent: t?.onAccent ?? colorOf(ownAccent == null && c != null ? c.onAccent : palette.onAccent)!,
       radius: radius,
       grammar: grammar,
       loader: loader,
       // The loader's own colour, else the DASHBOARD's accent — as the RN GraineLoader draws it.
-      loaderColor: colorOf(loader.color) ?? colorOf(dash.accent) ?? accent,
+      loaderColor: colorOf(loader.color) ?? colorOf(c?.accent ?? dash.accent) ?? accent,
       logoUrl: dash.logoUrl,
-      dark: palette.mode == 'dark',
+      dark: tokens != null ? tokens.dark : palette.mode == 'dark',
+      explicitPlatform: explicitPlatform,
+      // The design's accentSoft; for an accent of the component's own, the
+      // same mix the design makes — the accent a little way into the surface.
+      soft: c == null
+          ? fade(accent, 0.15)
+          : (ownAccent == null ? colorOf(c.accentSoft)! : Color.lerp(surface, accent, tokens!.dark ? 0.22 : 0.12)!),
+      tokens: tokens,
     );
   }
 
@@ -152,8 +183,79 @@ class _Skin {
   final String? logoUrl;
   final bool dark;
 
+  /// The component named a platform, whose grammar then sets the shapes.
+  final bool explicitPlatform;
+
+  /// Chips and badges: `accentSoft`, or the accent at low strength before designs.
+  final Color soft;
+
+  /// Null before designs: every value below is then exactly what it was.
+  final ThemeTokens? tokens;
+
   Color tint(double a) => fade(accent, a);
   Color borderTint(double a) => fade(border, a);
+
+  double get borderWidth => tokens?.shape.borderWidth ?? 1;
+
+  /// The chrome's shadow: the card elevation, or the solid offset.
+  List<BoxShadow> get shadows {
+    final t = tokens;
+    if (t == null) return const <BoxShadow>[BoxShadow(color: Color(0x2E000000), blurRadius: 12, offset: Offset(0, 4))];
+    final hard = t.elevation.hardOffset;
+    if (hard != null) return <BoxShadow>[hardShadowOf(hard, text)];
+    return shadowsOf(t.elevation.card);
+  }
+
+  /// Inside the chrome: `spacing.cardPadding`, else [before].
+  double pad(double before) => tokens?.spacing.cardPadding ?? before;
+
+  /// Between rows: `spacing.gap` — unless the component chose compact.
+  double rowGap(WidgetLook look) =>
+      look.density == 'compact' ? 6.0 : (tokens?.spacing.gap ?? 10.0);
+
+  /// A pill-or-button's corners: the component's platform grammar, else
+  /// `radius.md`, else the phone's grammar as before.
+  double get buttonRadius => (tokens != null && !explicitPlatform)
+      ? tokens!.shape.radius.md
+      : (grammar.pillButtons ? 999 : grammar.buttonRadius.toDouble());
+
+  /// A full-width button's corners.
+  double get wideButtonRadius =>
+      (tokens != null && !explicitPlatform) ? tokens!.shape.radius.md : grammar.buttonRadius.toDouble();
+
+  /// A title: the heading font at the title size and weight — or [size]/[weight] before designs.
+  TextStyle title(double size, {int weight = 800}) {
+    final t = tokens;
+    if (t == null) return textStyle(text, size, weight: weight);
+    final f = t.font;
+    return textStyle(text, f.scale.title,
+        weight: f.weights.title,
+        height: f.lineHeight.title,
+        letterSpacing: f.letterSpacing.title * f.scale.title,
+        family: familyOf(f.heading));
+  }
+
+  /// Meta — prompts, notes: `textMuted` at the caption size.
+  TextStyle meta(double size, {int weight = 400, double? height}) {
+    final t = tokens;
+    if (t == null) return textStyle(muted, size, weight: weight, height: height);
+    return textStyle(muted, t.font.scale.caption, weight: math.max(weight, t.font.weights.body));
+  }
+
+  /// Body text at the body size.
+  TextStyle body(double size, {double? height}) {
+    final t = tokens;
+    if (t == null) return textStyle(text, size, height: height);
+    final f = t.font;
+    return textStyle(text, f.scale.body,
+        weight: f.weights.body, height: f.lineHeight.body, letterSpacing: f.letterSpacing.body * f.scale.body);
+  }
+
+  /// The body family every other line inherits; null is the platform's font.
+  String? get family {
+    final t = tokens;
+    return t == null ? null : familyOf(t.font.body);
+  }
 }
 
 class _GraineWidgetViewState extends State<GraineWidgetView> {
@@ -194,15 +296,42 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
       final line = _answeredLine(c, answered, s);
       if (line != null) children.add(line);
     }
+    Widget? main;
+    Key? mainKey;
     if (w != null && content != null && look != null) {
-      children.add(Flexible(child: _component(c, w, content, look, s)));
+      main = _component(c, w, content, look, s);
+      mainKey = ValueKey<String>('graine-shown-${w.id}');
     } else {
       final pending = c.loading;
-      if (pending != null) children.add(_pending(c, pending, s));
+      if (pending != null) {
+        main = _pending(c, pending, s);
+        mainKey = const ValueKey<String>('graine-shown-pending');
+      }
+    }
+    if (main != null) {
+      final motion = motionOf(context, s.tokens);
+      if (motion == Duration.zero) {
+        children.add(w != null && content != null && look != null ? Flexible(child: main) : main);
+      } else {
+        // The loader giving way to the component, and one component to the
+        // next, cross-fade at the design's pace.
+        children.add(Flexible(
+          child: AnimatedSwitcher(
+            duration: motion,
+            switchInCurve: curveOf(s.tokens),
+            switchOutCurve: Curves.easeOut,
+            layoutBuilder: (Widget? current, List<Widget> previous) => Stack(
+              alignment: Alignment.bottomCenter,
+              children: <Widget>[...previous, if (current != null) current],
+            ),
+            child: KeyedSubtree(key: mainKey, child: main),
+          ),
+        ));
+      }
     }
     if (children.isEmpty) return const SizedBox.shrink();
     return DefaultTextStyle(
-      style: textStyle(s.text, 14),
+      style: textStyle(s.text, 14, family: s.family),
       child: ConstrainedBox(
         constraints: BoxConstraints(maxHeight: widget.maxHeight),
         child: Column(
@@ -228,7 +357,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
       decoration: BoxDecoration(
         color: s.surface,
         borderRadius: BorderRadius.circular(s.radius),
-        border: Border.all(color: s.border),
+        border: Border.all(color: s.border, width: s.borderWidth),
       ),
       child: Row(
         children: <Widget>[
@@ -292,7 +421,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
     return Container(
       key: const ValueKey<String>('graine-pending'),
       margin: const EdgeInsets.only(bottom: 8),
-      padding: EdgeInsets.symmetric(horizontal: 14, vertical: surface == 'card' ? 14 : 24),
+      padding: EdgeInsets.symmetric(horizontal: s.pad(14), vertical: surface == 'card' ? s.pad(14) : 24),
       decoration: _boxDecoration(s),
       child: Stack(
         children: <Widget>[
@@ -362,8 +491,8 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
   BoxDecoration _boxDecoration(_Skin s, {BorderRadius? radius}) => BoxDecoration(
         color: s.surface,
         borderRadius: radius ?? BorderRadius.circular(s.radius),
-        border: Border.all(color: s.border),
-        boxShadow: const <BoxShadow>[BoxShadow(color: Color(0x2E000000), blurRadius: 12, offset: Offset(0, 4))],
+        border: Border.all(color: s.border, width: s.borderWidth),
+        boxShadow: s.shadows,
       );
 
   Widget _closeButton(GraineComponents c, _Skin s, {double size = 44}) => Tap(
@@ -398,7 +527,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
             Padding(
-              padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+              padding: EdgeInsets.fromLTRB(s.pad(14), s.pad(12), s.pad(14), 10),
               child: Row(
                 children: <Widget>[
                   _closeButton(c, s, size: 40),
@@ -409,21 +538,20 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
                         if (title.isNotEmpty)
-                          Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: textStyle(s.text, 18, weight: 800)),
+                          Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: s.title(18)),
                         if (prompt.isNotEmpty)
-                          Text(prompt,
-                              maxLines: 1, overflow: TextOverflow.ellipsis, style: textStyle(s.muted, 12.5, weight: 600)),
+                          Text(prompt, maxLines: 1, overflow: TextOverflow.ellipsis, style: s.meta(12.5, weight: 600)),
                       ],
                     ),
                   ),
                 ],
               ),
             ),
-            Flexible(child: Padding(padding: const EdgeInsets.symmetric(horizontal: 14), child: body)),
+            Flexible(child: Padding(padding: EdgeInsets.symmetric(horizontal: s.pad(14)), child: body)),
             Container(
               margin: const EdgeInsets.only(top: 10),
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
-              decoration: BoxDecoration(border: Border(top: BorderSide(color: s.border))),
+              padding: EdgeInsets.fromLTRB(s.pad(14), 10, s.pad(14), s.pad(12)),
+              decoration: BoxDecoration(border: Border(top: BorderSide(color: s.border, width: s.borderWidth))),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
@@ -431,7 +559,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
                   Text('STILL LISTENING', style: textStyle(s.muted, 10.5, weight: 800, letterSpacing: 0.4)),
                   const SizedBox(height: 2),
                   Text(prompt.isNotEmpty ? prompt : 'Tap one, or just say it.',
-                      maxLines: 1, overflow: TextOverflow.ellipsis, style: textStyle(s.text, 13.5)),
+                      maxLines: 1, overflow: TextOverflow.ellipsis, style: s.body(13.5)),
                 ],
               ),
             ),
@@ -446,7 +574,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
       return Container(
         key: const ValueKey<String>('graine-surface-sheet'),
         margin: const EdgeInsets.only(bottom: 8),
-        padding: const EdgeInsets.fromLTRB(18, 10, 18, 16),
+        padding: EdgeInsets.fromLTRB(s.pad(18), 10, s.pad(18), s.pad(16)),
         decoration: _boxDecoration(s, radius: BorderRadius.only(topLeft: top, topRight: top,
             bottomLeft: Radius.circular(s.radius), bottomRight: Radius.circular(s.radius))),
         child: Column(
@@ -461,10 +589,10 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
               ),
             ),
             const SizedBox(height: 14),
-            if (title.isNotEmpty) Text(title, style: textStyle(s.text, 18, weight: 800)),
+            if (title.isNotEmpty) Text(title, style: s.title(18)),
             if (prompt.isNotEmpty) ...<Widget>[
               const SizedBox(height: 6),
-              Text(prompt, style: textStyle(s.muted, 13, height: 18 / 13)),
+              Text(prompt, style: s.meta(13, height: 18 / 13)),
             ],
             const SizedBox(height: 14),
             Flexible(child: body),
@@ -492,18 +620,18 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
     return Container(
       key: const ValueKey<String>('graine-surface-card'),
       margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
+      padding: EdgeInsets.fromLTRB(s.pad(14), s.pad(12), s.pad(14), 4),
       decoration: _boxDecoration(s),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
           if (title.isNotEmpty) ...<Widget>[
-            Text(title, style: textStyle(s.text, 14.5, weight: 800)),
+            Text(title, style: s.title(14.5)),
             const SizedBox(height: 2),
           ],
           if (prompt.isNotEmpty) ...<Widget>[
-            Text(prompt, style: textStyle(s.muted, 12.5, height: 17 / 12.5)),
+            Text(prompt, style: s.meta(12.5, height: 17 / 12.5)),
             const SizedBox(height: 8),
           ] else
             const SizedBox(height: 6),
@@ -532,7 +660,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
     // A kind this build does not draw: the sentence the agent would have said instead.
     return Text(
       w.fallbackText.isNotEmpty ? w.fallbackText : 'The assistant has something to show you.',
-      style: textStyle(s.text, 14, height: 20 / 14),
+      style: s.body(14, height: 20 / 14),
     );
   }
 
@@ -542,7 +670,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
         if (content.note.isNotEmpty) ...<Widget>[
-          Text(content.note, style: textStyle(s.muted, 12.5, height: 18 / 12.5)),
+          Text(content.note, style: s.meta(12.5, height: 18 / 12.5)),
           const SizedBox(height: 12),
         ],
         for (final day in content.days) ...<Widget>[
@@ -560,7 +688,9 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
                   child: Container(
                     constraints: const BoxConstraints(minHeight: 44),
                     padding: const EdgeInsets.symmetric(horizontal: 14),
-                    decoration: BoxDecoration(border: Border.all(color: s.border), borderRadius: BorderRadius.circular(11)),
+                    decoration: BoxDecoration(
+                        border: Border.all(color: s.border, width: s.borderWidth),
+                        borderRadius: BorderRadius.circular(s.tokens?.shape.radius.md ?? 11)),
                     child: Center(widthFactor: 1, child: Text(slot, style: textStyle(s.text, 13.5, weight: 600))),
                   ),
                 ),
@@ -585,8 +715,11 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
             child: Container(
               constraints: const BoxConstraints(minHeight: 44),
               padding: const EdgeInsets.symmetric(horizontal: 16),
-              decoration: BoxDecoration(color: s.accent, borderRadius: BorderRadius.circular(999)),
-              child: Center(widthFactor: 1, child: Text(chip.label, style: textStyle(s.onAccent, 13.5, weight: 700))),
+              // Before designs a chip is the accent; with one, `accentSoft` with the text on it.
+              decoration: BoxDecoration(color: s.tokens == null ? s.accent : s.soft, borderRadius: BorderRadius.circular(999)),
+              child: Center(
+                  widthFactor: 1,
+                  child: Text(chip.label, style: textStyle(s.tokens == null ? s.onAccent : s.text, 13.5, weight: 700))),
             ),
           ),
       ],
@@ -594,7 +727,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
   }
 
   Widget _products(GraineComponents c, WidgetContent content, WidgetLook look, _Skin s, bool many) {
-    final gap = look.density == 'compact' ? 6.0 : 10.0;
+    final gap = s.rowGap(look);
     Widget draw(int i, String variant) {
       final row = content.rows[i];
       return _row(
@@ -674,7 +807,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
             alignment: Alignment.center,
             decoration: BoxDecoration(
               color: ready ? s.accent : s.borderTint(0.5),
-              borderRadius: BorderRadius.circular(s.grammar.pillButtons ? 999 : s.grammar.buttonRadius.toDouble()),
+              borderRadius: BorderRadius.circular(s.buttonRadius),
             ),
             child: Text(label, style: textStyle(ready ? s.onAccent : s.muted, 14.5, weight: 700)),
           ),
@@ -774,7 +907,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
             alignment: Alignment.centerLeft,
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(color: s.tint(0.15), borderRadius: BorderRadius.circular(999)),
+              decoration: BoxDecoration(color: s.soft, borderRadius: BorderRadius.circular(999)),
               child: Text(row.subtitle.toUpperCase(), style: textStyle(s.accent, 10.5, weight: 800, letterSpacing: 0.4)),
             ),
           );
@@ -842,8 +975,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
           decoration: BoxDecoration(
             color: quiet ? null : s.accent,
             border: quiet ? Border.all(color: row.unavailable ? s.border : s.accent, width: 1.5) : null,
-            borderRadius: BorderRadius.circular(
-                wide ? s.grammar.buttonRadius.toDouble() : (s.grammar.pillButtons ? 999 : s.grammar.buttonRadius.toDouble())),
+            borderRadius: BorderRadius.circular(wide ? s.wideButtonRadius : s.buttonRadius),
           ),
           child: Center(
             widthFactor: wide ? null : 1,
@@ -875,7 +1007,9 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
 
     BoxDecoration framed() => BoxDecoration(
           borderRadius: BorderRadius.circular(r),
-          border: Border.all(color: picked == true ? s.accent : s.border, width: picked == true ? 2 : 1),
+          border: Border.all(
+              color: picked == true ? s.accent : s.border,
+              width: picked == true ? math.max(2, s.borderWidth + 1) : s.borderWidth),
         );
 
     Widget wrap(Widget child) => KeyedSubtree(
@@ -926,7 +1060,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
           constraints: const BoxConstraints(minHeight: 44),
           margin: EdgeInsets.only(left: s.grammar.separatorInset.toDouble()),
           padding: EdgeInsets.symmetric(vertical: pad, horizontal: 2),
-          decoration: BoxDecoration(border: Border(bottom: BorderSide(color: s.border))),
+          decoration: BoxDecoration(border: Border(bottom: BorderSide(color: s.border, width: s.borderWidth))),
           child: Row(
             children: <Widget>[
               if (image(t, t) != null) ...<Widget>[image(t, t)!, SizedBox(width: gap)],

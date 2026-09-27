@@ -15,8 +15,11 @@
 library;
 
 export 'src/agent_bar.dart' show GraineAgentBar;
-export 'src/core/core.dart' hide Js, SocketTrace;
+export 'src/core/core.dart'
+    hide Js, SocketTrace, SvgPath, PathCommand, PathMoveTo, PathLineTo, PathCubicTo, PathQuadTo, PathArcTo, PathClose;
 export 'src/engine.dart' show GraineEngine, WebViewEnginePage;
 export 'src/graine.dart';
+export 'src/launcher.dart' show GraineLauncher;
 export 'src/loader_view.dart' show GraineLoaderView;
+export 'src/transcript_view.dart' show GraineTranscriptView;
 export 'src/widget_view.dart' show GraineWidgetTheme, GraineWidgetView;

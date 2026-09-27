@@ -1,7 +1,8 @@
 // The pure core, proven without a device, a WebView or Flutter: every rule
 // the Android SDK's CoreTest and WidgetTest pin, ported case for case, plus
 // the Dart-side pieces (the action registry, session parsing, captions, the
-// bar's status word). Imports ONLY lib/src/core — no package:flutter.
+// bar's status word, design tokens and the glyph path reader). Imports ONLY
+// lib/src/core — no package:flutter.
 import 'dart:async';
 import 'dart:convert';
 
@@ -41,6 +42,8 @@ void main() {
   appearanceTests();
   loaderTests();
   barTests();
+  designTests();
+  svgPathTests();
 }
 
 void protocolTests() {
@@ -1081,6 +1084,237 @@ void barTests() {
       expect(status(connected: true, agentSpeaking: true), 'speaking');
       expect(status(connected: true, quality: ConnectionQuality.good), 'listening');
       expect(status(), 'tap to talk');
+    });
+  });
+}
+
+/// One scheme's tokens, as a session might send them — only what a test needs.
+Map<String, Object?> tokensJson(String scheme, {String accent = '#7C3AED', Map<String, Object?> extra = const <String, Object?>{}}) =>
+    <String, Object?>{
+      'v': 1,
+      'preset': 'graine-classic',
+      'scheme': scheme,
+      'colors': <String, Object?>{'accent': accent, 'surface': scheme == 'dark' ? '#101010' : '#FAFAFA'},
+      ...extra,
+    };
+
+void designTests() {
+  group('Design tokens', () {
+    test('no design, or not one: null — and the SDK draws from appearance as before', () {
+      for (final raw in <Object?>[
+        null,
+        'graine-classic',
+        5,
+        const <Object?>[],
+        const <String, Object?>{},
+        const <String, Object?>{'light': 'x', 'dark': 7},
+        // Tokens without colours are too little to call a design.
+        const <String, Object?>{'light': <String, Object?>{'preset': 'x'}},
+      ]) {
+        expect(ResolvedDesign.fromJson(raw), isNull, reason: '$raw');
+      }
+    });
+
+    test('unknown keys, at every level, change nothing', () {
+      final plain = ResolvedDesign.fromJson(<String, Object?>{
+        'config': <String, Object?>{'preset': 'graine-classic'},
+        'light': tokensJson('light'),
+        'dark': tokensJson('dark'),
+      })!;
+      final noisy = ResolvedDesign.fromJson(<String, Object?>{
+        'config': <String, Object?>{'preset': 'graine-classic'},
+        'future': <String, Object?>{'a': 1},
+        'light': tokensJson('light', extra: <String, Object?>{
+          'sparkle': true,
+          'colors': <String, Object?>{'accent': '#7C3AED', 'surface': '#FAFAFA', 'hologram': '#123456'},
+          'shape': <String, Object?>{'launcher': 'circle', 'wobble': 3},
+        }),
+        'dark': tokensJson('dark', extra: <String, Object?>{'motion': <String, Object?>{'durationMs': 200, 'jitter': 2}}),
+      })!;
+      expect(noisy.light.toJson(), plain.light.toJson());
+      expect(noisy.dark.toJson(), plain.dark.toJson());
+    });
+
+    test('a token that is missing or wrong draws as Graine Classic; numbers are clamped', () {
+      final t = ThemeTokens.fromJson(<String, Object?>{
+        'colors': <String, Object?>{'accent': 'abc', 'text': 'red', 'surface': '#12345'},
+        'font': <String, Object?>{'weights': <String, Object?>{'body': 1000, 'title': 'bold'}, 'scale': <String, Object?>{'body': -3}},
+        'shape': <String, Object?>{'launcher': 'blob', 'radius': <String, Object?>{'sm': -4, 'lg': 30}, 'borderWidth': '2'},
+        'elevation': <String, Object?>{'card': 'soft', 'floating': null},
+        'motion': <String, Object?>{'durationMs': -1, 'easing': 'wiggle'},
+        'glass': <String, Object?>{'surfaceOpacity': 3},
+        'bubbles': 'bubbly',
+      }, scheme: 'dark')!;
+      expect(t.scheme, 'dark');
+      expect(t.colors.accent, '#AABBCC', reason: '#rgb is a colour');
+      expect(t.colors.text, '#F5F5F4', reason: "not a colour: the classic dark text");
+      expect(t.colors.surface, '#17181B');
+      expect(t.font.weights.body, 900);
+      expect(t.font.weights.title, 600);
+      expect(t.font.scale.body, 1);
+      expect(t.shape.launcher, 'circle');
+      expect(t.shape.radius.sm, 0);
+      expect(t.shape.radius.lg, 30);
+      expect(t.shape.borderWidth, 1, reason: 'a string is not a number');
+      expect(t.elevation.card, isNull, reason: 'present and not a shadow: none');
+      expect(t.elevation.floating, isNull, reason: 'present and null: none');
+      expect(t.motion.durationMs, 0);
+      expect(t.motion.none, isTrue);
+      expect(t.motion.easing, 'standard');
+      expect(t.glass!.surfaceOpacity, 1);
+      expect(t.glass!.blur, 20);
+      expect(t.bubbles, 'filled');
+      expect(t.icons.launcher?.id, 'waveform', reason: 'absent: the classic glyph');
+    });
+
+    test('one readable set stands in for both', () {
+      final d = ResolvedDesign.fromJson(<String, Object?>{'dark': tokensJson('dark'), 'light': 'broken'})!;
+      expect(d.light.scheme, 'dark');
+      expect(d.pick(deviceDark: false).colors.surface, '#101010');
+    });
+
+    test("the brand's scheme, else the device's, else light; a host's scheme wins", () {
+      ResolvedDesign design(Object? scheme) => ResolvedDesign.fromJson(<String, Object?>{
+            'config': <String, Object?>{'preset': 'graine-classic', if (scheme != null) 'scheme': scheme},
+            'light': tokensJson('light'),
+            'dark': tokensJson('dark'),
+          })!;
+      expect(design(null).pick(deviceDark: true).scheme, 'dark');
+      expect(design(null).pick(deviceDark: false).scheme, 'light');
+      expect(design(null).pick().scheme, 'light');
+      expect(design('auto').pick(deviceDark: true).scheme, 'dark');
+      expect(design(' Dark ').pick(deviceDark: false).scheme, 'dark');
+      expect(design('light').pick(deviceDark: true).scheme, 'light');
+      expect(design('sepia').pick(deviceDark: true).scheme, 'dark', reason: 'unknown is auto');
+      expect(design('light').pick(deviceDark: false, scheme: 'dark').scheme, 'dark');
+      expect(design('light').pick(deviceDark: true, scheme: 'auto').scheme, 'dark');
+      expect(design('dark').pick(scheme: 'nonsense').scheme, 'dark');
+    });
+
+    test('a design font only when the app bundles it; system is always the platform font', () {
+      expect(Design.fontFamily('system', const <String>['system']), isNull);
+      expect(Design.fontFamily(null, const <String>['Inter']), isNull);
+      expect(Design.fontFamily('Inter', const <String>[]), isNull);
+      expect(Design.fontFamily('inter', const <String>[' Inter ']), 'Inter');
+      expect(Design.fontFamily('Playfair Display', const <String>['Inter']), isNull);
+    });
+
+    test("the launcher's corners by shape, never past half its height", () {
+      const r = ThemeRadius(sm: 8, md: 12, lg: 36, xl: 48);
+      expect(Design.launcherRadius('circle', r, 56), 28);
+      expect(Design.launcherRadius('pill', r, 56), 28);
+      expect(Design.launcherRadius('squircle', r, 56), closeTo(16.8, 1e-9));
+      expect(Design.launcherRadius('rounded-square', r, 56), 28);
+      expect(Design.launcherRadius('rounded-square', const ThemeRadius(sm: 0, md: 0, lg: 18, xl: 0), 56), 18);
+      expect(Design.launcherRadius('square', r, 56), 8);
+    });
+
+    test('glyph URLs: clamped, quartered, encoded as the React Native SDK builds them', () {
+      expect(Design.glyphUrl(null, 'Mic', '#fff', 0, 0),
+          'https://www.graine.ai/api/embed/glyph?id=mic&c=FFFFFF&s=96&w=2&v=2');
+      expect(Design.glyphUrl('https://x.test//', ' a b ', 'nope', double.nan, 2.6),
+          'https://x.test/api/embed/glyph?id=a%20b&c=FFFFFF&s=96&w=2.5&v=2');
+      expect(Design.glyphUrl('https://x.test', 'waveform', '101318', 10, 0.1),
+          'https://x.test/api/embed/glyph?id=waveform&c=101318&s=16&w=0.5&v=2');
+      expect(Design.glyphUrl('https://x.test', 'waveform', '#318ce7', 76.5, 2.63),
+          'https://x.test/api/embed/glyph?id=waveform&c=318CE7&s=77&w=2.75&v=2');
+    });
+  });
+}
+
+void svgPathTests() {
+  group('SvgPath', () {
+    test('the waveform glyph: moves and relative verticals', () {
+      expect(SvgPath.parse('M2 10v3M6 6v11M10 3v18M14 8v7M18 5v13M22 10v3'), const <PathCommand>[
+        PathMoveTo(2, 10), PathLineTo(2, 13),
+        PathMoveTo(6, 6), PathLineTo(6, 17),
+        PathMoveTo(10, 3), PathLineTo(10, 21),
+        PathMoveTo(14, 8), PathLineTo(14, 15),
+        PathMoveTo(18, 5), PathLineTo(18, 18),
+        PathMoveTo(22, 10), PathLineTo(22, 13),
+      ]);
+    });
+
+    test('pairs after a move are lines, relative when the move was', () {
+      expect(SvgPath.parse('m1 1 2 2 3 3'), const <PathCommand>[PathMoveTo(1, 1), PathLineTo(3, 3), PathLineTo(6, 6)]);
+      expect(SvgPath.parse('M1 1 2 2L3 3 4 4'),
+          const <PathCommand>[PathMoveTo(1, 1), PathLineTo(2, 2), PathLineTo(3, 3), PathLineTo(4, 4)]);
+    });
+
+    test('H and V, absolute and relative', () {
+      expect(SvgPath.parse('M1 2H5h2V9v-1'), const <PathCommand>[
+        PathMoveTo(1, 2), PathLineTo(5, 2), PathLineTo(7, 2), PathLineTo(7, 9), PathLineTo(7, 8),
+      ]);
+    });
+
+    test('S and T reflect the last control point; after anything else they start at the pen', () {
+      expect(SvgPath.parse('M0 0C1 1 2 2 3 3S5 5 6 6'),
+          const <PathCommand>[PathMoveTo(0, 0), PathCubicTo(1, 1, 2, 2, 3, 3), PathCubicTo(4, 4, 5, 5, 6, 6)]);
+      expect(SvgPath.parse('M0 0s1 1 2 2'), const <PathCommand>[PathMoveTo(0, 0), PathCubicTo(0, 0, 1, 1, 2, 2)]);
+      expect(SvgPath.parse('M0 0Q1 1 2 0T4 0t2 0'), const <PathCommand>[
+        PathMoveTo(0, 0), PathQuadTo(1, 1, 2, 0), PathQuadTo(3, -1, 4, 0), PathQuadTo(5, 1, 6, 0),
+      ]);
+      expect(SvgPath.parse('M0 0L1 1T3 3'), const <PathCommand>[PathMoveTo(0, 0), PathLineTo(1, 1), PathQuadTo(1, 1, 3, 3)]);
+    });
+
+    test('arcs, flags packed or not, relative end points', () {
+      expect(SvgPath.parse('M0 0a1 1 0 011 1'),
+          const <PathCommand>[PathMoveTo(0, 0), PathArcTo(1, 1, 0, false, true, 1, 1)]);
+      expect(SvgPath.parse('M12 .5a.5.5 0 0 1 0-.96A9 9 0 1 0 4 16.1'), const <PathCommand>[
+        PathMoveTo(12, 0.5),
+        PathArcTo(0.5, 0.5, 0, false, true, 12, -0.45999999999999996),
+        PathArcTo(9, 9, 0, true, false, 4, 16.1),
+      ]);
+    });
+
+    test('numbers as minifiers pack them; Z returns the pen to where the subpath began', () {
+      expect(SvgPath.parse('M.5.5l0-.96'), const <PathCommand>[PathMoveTo(.5, .5), PathLineTo(.5, -0.45999999999999996)]);
+      expect(SvgPath.parse('M1e1,2E-1'), const <PathCommand>[PathMoveTo(10, 0.2)]);
+      expect(SvgPath.parse('M1 1l1 0zl1 1'),
+          const <PathCommand>[PathMoveTo(1, 1), PathLineTo(2, 1), PathClose(), PathLineTo(2, 2)]);
+    });
+
+    test('every launcher glyph the design system ships reads', () {
+      // theme.ts LAUNCHER_ICONS, verbatim: (id, stroke, path).
+      const glyphs = <(String, bool, String)>[
+        ('waveform', true, 'M2 13a2 2 0 0 0 2 -2V7a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0V4a2 2 0 0 1 4 0v13a2 2 0 0 0 4 0v-4a2 2 0 0 1 2 -2'),
+        ('audio-lines', true, 'M2 10v3M6 6v11M10 3v18M14 8v7M18 5v13M22 10v3'),
+        ('sparkles', true, 'M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0 -1.594 1.594l-1.051 5.558a1 1 0 0 1 -1.966 0l-1.051 -5.558a2 2 0 0 0 -1.594 -1.594l-5.558 -1.051a1 1 0 0 1 0 -1.966l5.558 -1.051a2 2 0 0 0 1.594 -1.594zM20 2v4M22 4h-4M2 20a2 2 0 1 0 4 0a2 2 0 1 0 -4 0z'),
+        ('microphone', true, 'M12 19v3M19 10v2a7 7 0 0 1 -14 0v-2M12 2h0a3 3 0 0 1 3 3v7a3 3 0 0 1 -3 3h0a3 3 0 0 1 -3 -3v-7a3 3 0 0 1 3 -3z'),
+        ('message-circle', true, 'M2.992 16.342a2 2 0 0 1 0.094 1.167l-1.065 3.29a1 1 0 0 0 1.236 1.168l3.413 -0.998a2 2 0 0 1 1.099 0.092a10 10 0 1 0 -4.777 -4.719'),
+        ('headset', true, 'M3 11h3a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2H5a2 2 0 0 1 -2 -2v-5Zm0 0a9 9 0 1 1 18 0m0 0v5a2 2 0 0 1 -2 2h-1a2 2 0 0 1 -2 -2v-3a2 2 0 0 1 2 -2h3ZM21 16v2a4 4 0 0 1 -4 4h-5'),
+        ('bot', true, 'M12 8V4H8M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-8a2 2 0 0 1 2 -2zM2 14h2M20 14h2M15 13v2M9 13v2'),
+        ('phone', true, 'M13.832 16.568a1 1 0 0 0 1.213 -0.303l0.355 -0.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1 -2 2A18 18 0 0 1 2 4a2 2 0 0 1 2 -2h3a2 2 0 0 1 2 2v3a2 2 0 0 1 -0.8 1.6l-0.468 0.351a1 1 0 0 0 -0.292 1.233a14 14 0 0 0 6.392 6.384'),
+        ('zap', true, 'M15.914 4a1.5 1.5 0 0 0 -2.474 -1.561l-9 9A1.5 1.5 0 0 0 5.5 14h4.002a0.5 0.5 0 0 1 0.471 0.666L8.086 20a1.5 1.5 0 0 0 2.475 1.56l9 -9A1.5 1.5 0 0 0 18.5 10h-3.997a0.5 0.5 0 0 1 -0.472 -0.667z'),
+        ('star', true, 'M11.525 2.295a0.53 0.53 0 0 1 0.95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166 0.756a0.53 0.53 0 0 1 0.294 0.904l-3.736 3.638a2.123 2.123 0 0 0 -0.611 1.878l0.882 5.14a0.53 0.53 0 0 1 -0.771 0.56l-4.618 -2.428a2.122 2.122 0 0 0 -1.973 0L6.396 21.01a0.53 0.53 0 0 1 -0.77 -0.56l0.881 -5.139a2.122 2.122 0 0 0 -0.611 -1.879L2.16 9.795a0.53 0.53 0 0 1 0.294 -0.906l5.165 -0.755a2.122 2.122 0 0 0 1.597 -1.16z'),
+        ('orbit', true, 'M20.341 6.484A10 10 0 0 1 10.266 21.85M3.659 17.516A10 10 0 0 1 13.74 2.152M9 12a3 3 0 1 0 6 0a3 3 0 1 0 -6 0zM17 5a2 2 0 1 0 4 0a2 2 0 1 0 -4 0zM3 19a2 2 0 1 0 4 0a2 2 0 1 0 -4 0z'),
+        ('sparkle-filled', false, 'M19.5 13.5a1.479 1.479 0 0 1 -0.977 1.401L13.688 16.688l-1.781 4.839a1.492 1.492 0 0 1 -2.801 0L7.312 16.688l-4.839 -1.781a1.492 1.492 0 0 1 0 -2.801L7.312 10.312l1.781 -4.839a1.492 1.492 0 0 1 2.801 0L13.688 10.312l4.839 1.781A1.479 1.479 0 0 1 19.5 13.5ZM14.25 4.5h1.5V6a0.75 0.75 0 0 0 1.5 0V4.5h1.5a0.75 0.75 0 0 0 0 -1.5H17.25V1.5a0.75 0.75 0 0 0 -1.5 0V3H14.25a0.75 0.75 0 0 0 0 1.5Zm8.25 3h-0.75V6.75a0.75 0.75 0 0 0 -1.5 0v0.75h-0.75a0.75 0.75 0 0 0 0 1.5h0.75v0.75a0.75 0.75 0 0 0 1.5 0V9h0.75a0.75 0.75 0 0 0 0 -1.5Z'),
+        ('chat-dots-filled', false, 'M12 2.25A9.75 9.75 0 0 0 3.392 16.582L2.328 19.775a1.5 1.5 0 0 0 1.897 1.897l3.192 -1.064A9.75 9.75 0 1 0 12 2.25ZM7.875 13.125a1.125 1.125 0 1 1 1.125 -1.125A1.125 1.125 0 0 1 7.875 13.125Zm4.125 0a1.125 1.125 0 1 1 1.125 -1.125A1.125 1.125 0 0 1 12 13.125Zm4.125 0a1.125 1.125 0 1 1 1.125 -1.125A1.125 1.125 0 0 1 16.125 13.125Z'),
+        ('graphic-eq', false, 'M7 17v-10q0 -0.425 0.288 -0.713T8 6q0.425 0 0.713 0.288T9 7v10q0 0.425 -0.288 0.713T8 18q-0.425 0 -0.713 -0.288T7 17Zm4 4v-18q0 -0.425 0.288 -0.713T12 2q0.425 0 0.713 0.288T13 3v18q0 0.425 -0.288 0.713T12 22q-0.425 0 -0.713 -0.288T11 21ZM3 13v-2q0 -0.425 0.288 -0.713T4 10q0.425 0 0.713 0.288T5 11v2q0 0.425 -0.288 0.713T4 14q-0.425 0 -0.713 -0.288T3 13Zm12 4v-10q0 -0.425 0.288 -0.713T16 6q0.425 0 0.713 0.288T17 7v10q0 0.425 -0.288 0.713T16 18q-0.425 0 -0.713 -0.288T15 17Zm4 -4v-2q0 -0.425 0.288 -0.713T20 10q0.425 0 0.713 0.288T21 11v2q0 0.425 -0.288 0.713T20 14q-0.425 0 -0.713 -0.288T19 13Z'),
+      ];
+      expect(glyphs, hasLength(14));
+      for (final (id, _, d) in glyphs) {
+        final commands = SvgPath.parse(d);
+        expect(commands, isNotNull, reason: id);
+        expect(commands, isNotEmpty, reason: id);
+        expect(commands!.first, isA<PathMoveTo>(), reason: id);
+      }
+    });
+
+    test('a close then a relative move starts from where the subpath began', () {
+      // headset: "…v-5Zm0 0a9 9 0 1 1 18 0m0 0v5…"
+      expect(SvgPath.parse('M3 11h3v2h-3Zm0 0a9 9 0 1 1 18 0m0 0v5'), const <PathCommand>[
+        PathMoveTo(3, 11), PathLineTo(6, 11), PathLineTo(6, 13), PathLineTo(3, 13), PathClose(),
+        PathMoveTo(3, 11), PathArcTo(9, 9, 0, true, true, 21, 11), PathMoveTo(21, 11), PathLineTo(21, 16),
+      ]);
+    });
+
+    test('anything malformed is null, never a throw; empty is an empty path', () {
+      for (final bad in <String>['L1 1', 'M1', 'M1 1 X', 'M0 0a1 1 0 2 1 1 1', 'M0 0C1 2 3', 'M--1 0', 'M1 1e']) {
+        expect(SvgPath.parse(bad), isNull, reason: bad);
+      }
+      expect(SvgPath.parse(''), isEmpty);
+      expect(SvgPath.parse('   '), isEmpty);
     });
   });
 }

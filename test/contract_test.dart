@@ -5,60 +5,19 @@
 // means, what the engine page's URL is. Every answer must be reproduced here
 // exactly. sdk/contract/rn-parity.json (generate-rn-parity.mjs: the RN SDK's
 // answers for the component, loader, placement, appearance and friction
-// rules) is held to the same standard, every section of it.
+// rules) is held to the same standard, every section of it. So is
+// sdk/contract/design.json (generate-design.mjs: real sessions' `design`
+// objects, which set of tokens each picks, and the glyph image URLs).
 //
 // A missing file FAILS. A skipped contract is a silent pass, and a silent
 // pass is how two SDKs drift apart. Imports ONLY lib/src/core.
 import 'dart:convert';
 import 'dart:io';
-import 'dart:isolate';
 
 import 'package:graine_inapp/src/core/core.dart';
 import 'package:test/test.dart';
 
-/// Where this package really lives — through the symlinks of a harness, if
-/// the tests are being run from one — found from the core library itself.
-Future<Directory?> packageRoot() async {
-  try {
-    final uri = await Isolate.resolvePackageUri(Uri.parse('package:graine_inapp/src/core/core.dart'));
-    if (uri == null || uri.scheme != 'file') return null;
-    final core = File(File.fromUri(uri).resolveSymbolicLinksSync());
-    return core.parent.parent.parent.parent; // core → src → lib → package root
-  } catch (_) {
-    return null; // a test runner that cannot resolve packages: the working directory still works
-  }
-}
-
-/// [relative] from the repository's `sdk/` directory, or a failed test.
-Future<File> requireFile(String relative) async {
-  final f = await findUp(relative);
-  if (f == null) {
-    fail('sdk/$relative not found. Run the tests from inside the repository checkout — '
-        'this contract is never skipped.');
-  }
-  return f;
-}
-
-/// Walk up from the package (and from the working directory) until
-/// `sdk/<relative>` or `<relative>` exists.
-Future<File?> findUp(String relative) async {
-  final starts = <Directory>[];
-  final root = await packageRoot();
-  if (root != null) starts.add(root);
-  starts.add(Directory.current.absolute);
-  for (final start in starts) {
-    Directory? dir = start;
-    while (dir != null) {
-      for (final candidate in <String>['${dir.path}/sdk/$relative', '${dir.path}/$relative']) {
-        final f = File(candidate);
-        if (f.existsSync()) return f;
-      }
-      final parent = dir.parent;
-      dir = parent.path == dir.path ? null : parent;
-    }
-  }
-  return null;
-}
+import 'contract_files.dart';
 
 /// JSON and Dart values in one comparable shape: every number a double.
 Object? canon(Object? v) {
@@ -337,6 +296,89 @@ void main() {
           expect(canon(got), canon(want[i]), reason: 'script ${script['config']} op #$i $op');
         }
       }
+    });
+  });
+
+  group('sdk/contract/design.json', () {
+    late Map<String, Object?> fx;
+
+    setUpAll(() async {
+      fx = await contractJson('contract/design.json');
+    });
+
+    test('parses every token of every design, exactly', () {
+      final all = cases(fx, 'cases');
+      expect(all, isNotEmpty);
+      for (final c in all) {
+        final raw = c['design']! as Map<String, Object?>;
+        final d = ResolvedDesign.fromJson(raw);
+        expect(d, isNotNull, reason: '${c['config']}');
+        // Read back key for key: every colour, size, weight, radius, shadow,
+        // glyph and flag the server resolved, nothing dropped or renamed.
+        expect(canon(d!.light.toJson()), canon(raw['light']), reason: 'light ${c['config']}');
+        expect(canon(d.dark.toJson()), canon(raw['dark']), reason: 'dark ${c['config']}');
+        expect(canon(d.config), canon(raw['config']));
+      }
+    });
+
+    test('picks light or dark as the React Native SDK does', () {
+      for (final c in cases(fx, 'cases')) {
+        final d = ResolvedDesign.fromJson(c['design'])!;
+        final picks = c['picks']! as Map<String, Object?>;
+        expect(d.pick(deviceDark: false).scheme, picks['deviceLight'], reason: '${c['config']} on a light device');
+        expect(d.pick(deviceDark: true).scheme, picks['deviceDark'], reason: '${c['config']} on a dark device');
+        expect(d.pick().scheme, picks['deviceUnknown'], reason: '${c['config']} when the device has not said');
+      }
+    });
+
+    test('an embed that never chose a design carries its Appearance in the tokens', () {
+      final legacy = fx['legacy']! as Map<String, Object?>;
+      final appearance = legacy['appearance']! as Map<String, Object?>;
+      final d = ResolvedDesign.fromJson(legacy['design'])!;
+      expect(canon(d.light.toJson()), canon((legacy['design']! as Map<String, Object?>)['light']));
+      for (final t in <ThemeTokens>[d.light, d.dark]) {
+        expect(t.colors.accent, appearance['accent']);
+        expect(t.shape.radius.lg, n(appearance['radius']));
+      }
+      expect(d.pick(deviceDark: false).scheme, appearance['theme']);
+    });
+
+    test("every design's launcher glyph is path data this SDK can paint", () {
+      final ids = <String>{};
+      for (final c in cases(fx, 'cases')) {
+        final d = ResolvedDesign.fromJson(c['design'])!;
+        for (final t in <ThemeTokens>[d.light, d.dark]) {
+          final glyph = t.icons.launcher;
+          if (glyph == null) continue; // the brand's logo
+          ids.add(glyph.id);
+          final commands = SvgPath.parse(glyph.path);
+          expect(commands, isNotNull, reason: '${glyph.id}: ${glyph.path}');
+          expect(commands, isNotEmpty, reason: glyph.id);
+        }
+      }
+      expect(ids, isNotEmpty);
+    });
+
+    test('builds the same glyph image URLs', () {
+      final glyphs = cases(fx, 'glyphs');
+      expect(glyphs, isNotEmpty);
+      for (final g in glyphs) {
+        final a = g['args']! as List<Object?>;
+        expect(Design.glyphUrl(a[0] as String?, a[1]! as String, a[2]! as String, a[3]! as num, a[4]! as num), g['url'],
+            reason: '$a');
+      }
+    });
+
+    test('a session carries its design beside appearance', () {
+      final c = cases(fx, 'cases').first;
+      final session = SessionConfig.fromJson(<String, Object?>{
+        'agentId': 'a',
+        'appearance': <String, Object?>{'accent': '#318CE7'},
+        'design': c['design'],
+      });
+      expect(canon(session.design!.toJson()), canon(c['design']));
+      expect(SessionConfig.fromJson(const <String, Object?>{'agentId': 'a'}).design, isNull,
+          reason: 'an older server sends no design; the SDK draws from appearance');
     });
   });
 

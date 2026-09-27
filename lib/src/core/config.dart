@@ -1,3 +1,4 @@
+import 'design.dart';
 import 'friction.dart';
 import 'js.dart';
 import 'protocol.dart';
@@ -42,6 +43,7 @@ class GraineConfig {
     this.debug = false,
     this.friction,
     this.requestMicrophone,
+    this.fonts = const <String>[],
   });
 
   /// "https://www.graine.ai" unless self-hosted.
@@ -88,6 +90,15 @@ class GraineConfig {
   /// Left null, the SDK assumes the app asked already; if it did not, the page
   /// reports `graine:mic-denied` when the microphone is refused.
   final Future<bool> Function()? requestMicrophone;
+
+  /// THE FONT FAMILIES THIS APP BUNDLES, by family name as its pubspec
+  /// declares them (`fonts: - family: Inter`).
+  ///
+  /// The brand may choose a font for the agent in the dashboard. A phone has
+  /// no way to fetch it, so the SDK draws in it only when the app says it
+  /// ships it — listed here — and in the platform's own font otherwise,
+  /// silently. Empty (the default): the platform's font everywhere.
+  final List<String> fonts;
 }
 
 /// Whether the page that carries the call is actually there.
@@ -104,6 +115,7 @@ class SessionConfig {
     this.pageVersion,
     this.declaredActions = const <String>{},
     this.friction,
+    this.design,
   });
 
   final String agentId;
@@ -126,6 +138,11 @@ class SessionConfig {
 
   /// The dashboard's friction rules, as served.
   final Map<String, Object?>? friction;
+
+  /// The design the brand chose, resolved by the server into light and dark
+  /// tokens. Null from an older server — every surface then draws from
+  /// [appearance], as before.
+  final ResolvedDesign? design;
 
   /// The dashboard's Call audio setting.
   Transport get preferredTransport =>
@@ -160,6 +177,7 @@ class SessionConfig {
       pageVersion: page.isEmpty ? null : page,
       declaredActions: declared,
       friction: Js.asMap(data['friction']),
+      design: ResolvedDesign.fromJson(data['design']),
     );
   }
 

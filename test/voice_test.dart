@@ -4,6 +4,7 @@
 // watchdog and its retry ladder) on the test's fake clock.
 import 'dart:convert';
 
+import 'package:flutter/widgets.dart' show Brightness;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:graine_inapp/graine_inapp.dart';
 import 'package:http/http.dart' as http;
@@ -104,6 +105,39 @@ Future<void> finish(WidgetTester tester, GraineInApp g) async {
 }
 
 void main() {
+  testWidgets("the session's design is kept, and re-picked when the device switches light and dark",
+      (WidgetTester tester) async {
+    Map<String, Object?> tokens(String scheme, String surface) => <String, Object?>{
+          'scheme': scheme,
+          'colors': <String, Object?>{'surface': surface, 'accent': '#7C3AED'},
+        };
+    final g = app(tester,
+        client: session(body: <String, Object?>{
+          'agentId': 'agent-1',
+          'appearance': <String, Object?>{'accent': '#7C3AED'},
+          'design': <String, Object?>{
+            'config': <String, Object?>{'preset': 'graine-classic', 'scheme': 'auto'},
+            'light': tokens('light', '#FFFFFF'),
+            'dark': tokens('dark', '#17181B'),
+          },
+        }));
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+    expect(g.tokens, isNull, reason: 'nothing before the session');
+    await g.loadSession();
+    expect(g.design, isNotNull);
+    expect(g.tokens?.scheme, 'light');
+    final seen = <String?>[];
+    g.tokensListenable.addListener(() => seen.add(g.tokens?.scheme));
+
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    g.didChangePlatformBrightness();
+    expect(g.tokens?.colors.surface, '#17181B');
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
+    g.didChangePlatformBrightness();
+    expect(seen, <String?>['dark', 'light']);
+    await finish(tester, g);
+  });
+
   testWidgets('attaching loads the engine, idle, at the URL the session names', (WidgetTester tester) async {
     final g = app(tester);
     final page = FakePage();
