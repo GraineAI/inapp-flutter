@@ -1,9 +1,11 @@
 // The Flutter widgets, driven by fakes: no WebView, no network, no platform.
 // A FakeCall stands in for GraineVoice; GraineComponents runs for real on
 // the test's fake clock, so the loader's minimum time is measured, not assumed.
+import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:graine_inapp/graine_inapp.dart';
+import 'package:graine_inapp/src/sdk_icon.dart';
 
 const String base = 'https://www.graine.ai';
 
@@ -56,6 +58,35 @@ class FakeCall extends ChangeNotifier implements GraineCallState {
     notifyListeners();
   }
 }
+
+/// A call whose agent is misconfigured, as GraineVoice reports it.
+class FaultyCall extends FakeCall implements GraineCallFault {
+  @override
+  String? error = 'This agent has no WebRTC gateway configured.';
+}
+
+/// A chat the app runs itself, handed to the bar.
+class FakeChat extends ChangeNotifier implements GraineChatState {
+  @override
+  List<Caption> messages = const <Caption>[];
+  @override
+  bool connected = true;
+  final List<String> sent = <String>[];
+
+  @override
+  void send(String text) {
+    sent.add(text);
+    messages = <Caption>[...messages, Caption(Role.customer, text)];
+    notifyListeners();
+  }
+}
+
+/// The SDK icon drawn inside [within].
+SdkIconView iconIn(WidgetTester tester, Finder within) =>
+    tester.widget<SdkIconView>(find.descendant(of: within, matching: find.byType(SdkIconView)));
+
+double opacityOf(WidgetTester tester, Finder button) =>
+    tester.widget<Opacity>(find.descendant(of: button, matching: find.byType(Opacity)).first).opacity;
 
 /// A screen-sized host: the test surface is 800x600 logical pixels.
 Widget host(Widget child, {EdgeInsets viewInsets = EdgeInsets.zero}) => MediaQuery(
@@ -171,69 +202,180 @@ void main() {
       expect(barRect(tester).top, closeTo(48, 0.5));
     });
 
-    testWidgets('names the network before it lets the agent take the blame', (WidgetTester tester) async {
+    testWidgets("says the contract's words, in the contract's order: each rung beats the ones below it",
+        (WidgetTester tester) async {
       final call = FakeCall();
       await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
-      expect(find.text('tap to talk'), findsOneWidget);
+      expect(find.text('Tap to talk'), findsOneWidget);
       expect(find.byKey(GraineAgentBar.muteButtonKey), findsNothing);
+      expect(find.byKey(GraineAgentBar.meterKey), findsNothing);
 
       call.update((FakeCall c) => c.connected = true);
       await tester.pump();
-      expect(find.text('listening'), findsOneWidget);
+      expect(find.text('Listening'), findsOneWidget);
+      expect(find.byKey(GraineAgentBar.meterKey), findsOneWidget, reason: 'the meter beside "Listening"');
       expect(find.byKey(GraineAgentBar.muteButtonKey), findsOneWidget);
-
-      call.update((FakeCall c) => c.agentSpeaking = true);
-      await tester.pump();
-      expect(find.text('speaking'), findsOneWidget);
 
       call.update((FakeCall c) => c.quality = ConnectionQuality.poor);
       await tester.pump();
-      expect(find.text('weak connection'), findsOneWidget);
+      expect(find.text('Weak connection'), findsOneWidget);
+      expect(find.byKey(GraineAgentBar.meterKey), findsNothing);
+
+      call.update((FakeCall c) => c.agentSpeaking = true);
+      await tester.pump();
+      expect(find.text('Speaking'), findsOneWidget, reason: "the agent's line beats a weak network");
+      expect(find.byKey(GraineAgentBar.meterKey), findsOneWidget);
 
       call.update((FakeCall c) => c.muted = true);
       await tester.pump();
-      expect(find.text('muted'), findsOneWidget);
-
-      call.update((FakeCall c) => c.online = false);
-      await tester.pump();
-      expect(find.text('no connection'), findsOneWidget);
+      expect(find.text('Muted'), findsOneWidget);
 
       call.update((FakeCall c) {
-        c.online = true;
-        c.reconnecting = true;
-      });
-      await tester.pump();
-      expect(find.text('reconnecting…'), findsOneWidget);
-      expect(find.byType(GraineLoaderView), findsOneWidget, reason: 'while it comes back, the status line is the loader');
-
-      call.update((FakeCall c) {
-        c.reconnecting = false;
         c.connected = false;
+        c.muted = false;
+        c.agentSpeaking = false;
+        c.quality = ConnectionQuality.unknown;
         c.connecting = true;
       });
       await tester.pump();
-      expect(find.text('connecting…'), findsOneWidget);
+      expect(find.text('Connecting…'), findsOneWidget);
+      expect(find.byType(GraineLoaderView), findsOneWidget, reason: 'while it comes up, the status line is the loader');
 
       call.update((FakeCall c) {
         c.connecting = false;
         c.ready = false;
       });
       await tester.pump();
-      expect(find.text('connecting…'), findsOneWidget, reason: 'the page is not ready yet');
-
-      call.update((FakeCall c) {
-        c.ready = true;
-        c.micDenied = true;
-      });
-      await tester.pump();
-      expect(find.text('needs microphone'), findsOneWidget);
+      expect(find.text('Connecting…'), findsOneWidget, reason: 'the page is not ready yet');
 
       call.update((FakeCall c) => c.connectivity = GraineConnectivity.failed);
       await tester.pump();
-      expect(find.text("couldn't load · tap to retry"), findsOneWidget);
+      expect(find.text('Couldn’t load · tap to retry'), findsOneWidget);
       await tester.tap(find.byKey(GraineAgentBar.callButtonKey));
-      expect(call.retries, 1);
+      expect(call.retries, 1, reason: 'after a failed load the microphone retries');
       expect(call.starts, 0);
+
+      call.update((FakeCall c) => c.micDenied = true);
+      await tester.pump();
+      expect(find.text('Needs microphone'), findsOneWidget);
+
+      call.update((FakeCall c) {
+        c.connectivity = GraineConnectivity.ready;
+        c.ready = true;
+        c.reconnecting = true;
+      });
+      await tester.pump();
+      expect(find.text('Reconnecting…'), findsOneWidget);
+      expect(find.byType(GraineLoaderView), findsOneWidget);
+
+      call.update((FakeCall c) => c.online = false);
+      await tester.pump();
+      expect(find.text('No connection'), findsOneWidget, reason: 'the network is named before anything else');
+    });
+
+    testWidgets("while the agent works out its answer: the loader with the dashboard's thinking words, not the meter",
+        (WidgetTester tester) async {
+      final call = FakeCall()
+        ..connected = true
+        ..captions = const <Caption>[Caption(Role.customer, 'Which one is cheaper?')];
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      expect(find.text('Thinking…'), findsOneWidget);
+      expect(find.byType(GraineLoaderView), findsOneWidget);
+      expect(find.byKey(GraineAgentBar.meterKey), findsNothing);
+
+      // The brand's own words for the moment, from Appearance → Loading.
+      call.update((FakeCall c) => c.appearance = const <String, Object?>{
+            'loader': <String, Object?>{
+              'text': <String, Object?>{'thinking': 'One moment'},
+            },
+          });
+      await tester.pump();
+      expect(find.text('One moment'), findsOneWidget);
+
+      // Muted outranks it; the agent's answer arriving ends it.
+      call.update((FakeCall c) => c.muted = true);
+      await tester.pump();
+      expect(find.text('Muted'), findsOneWidget);
+      call.update((FakeCall c) {
+        c.muted = false;
+        c.captions = const <Caption>[
+          Caption(Role.customer, 'Which one is cheaper?'),
+          Caption(Role.agent, 'The Seltos', live: true),
+        ];
+      });
+      await tester.pump();
+      expect(find.text('Speaking'), findsOneWidget);
+      expect(find.byType(GraineLoaderView), findsNothing);
+      expect(find.byKey(GraineAgentBar.meterKey), findsOneWidget);
+    });
+
+    testWidgets('the microphone starts a call, mutes one, and cannot act while it cannot', (WidgetTester tester) async {
+      final call = FakeCall();
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      final mic = find.byKey(GraineAgentBar.callButtonKey);
+      expect(iconIn(tester, mic).name, 'mic');
+      expect(opacityOf(tester, mic), 1);
+      await tester.tap(mic);
+      expect(call.starts, 1, reason: 'off a call, the microphone starts one');
+
+      // Placing, not ready, refused: at 40% and deaf.
+      for (final blocked in <void Function(FakeCall c)>[
+        (FakeCall c) => c.connecting = true,
+        (FakeCall c) => c.ready = false,
+        (FakeCall c) => c.micDenied = true,
+      ]) {
+        call.update((FakeCall c) {
+          c.connecting = false;
+          c.ready = true;
+          c.micDenied = false;
+          blocked(c);
+        });
+        await tester.pump();
+        expect(opacityOf(tester, mic), 0.4);
+        await tester.tap(mic, warnIfMissed: false);
+        expect(call.starts, 1);
+      }
+
+      call.update((FakeCall c) {
+        c.micDenied = false;
+        c.connected = true;
+      });
+      await tester.pump();
+      final mute = find.byKey(GraineAgentBar.muteButtonKey);
+      await tester.tap(mute);
+      expect(call.mutes, <bool>[true]);
+      call.update((FakeCall c) => c.muted = true);
+      await tester.pump();
+      expect(iconIn(tester, mute).name, 'micOff');
+      expect(iconIn(tester, mute).color, const Color(0xFFFFFFFF));
+    });
+
+    testWidgets('the end button hangs up on a call and closes off one; the app hears both', (WidgetTester tester) async {
+      var closed = 0;
+      final call = FakeCall()..connected = true;
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, onClose: () => closed++)));
+      expect(iconIn(tester, find.byKey(GraineAgentBar.callButtonKey)).name, 'end');
+      await tester.tap(find.byKey(GraineAgentBar.callButtonKey));
+      expect(call.ends, 1);
+      expect(closed, 1);
+
+      call.update((FakeCall c) => c.connected = false);
+      await tester.pump();
+      final close = find.byKey(GraineAgentBar.closeButtonKey);
+      expect(iconIn(tester, close).name, 'close');
+      await tester.tap(close);
+      expect(closed, 2);
+      expect(call.ends, 2, reason: 'a call being placed is cancelled; nothing placed, nothing lost');
+    });
+
+    testWidgets('a misconfigured agent says "Unavailable" and its microphone cannot act', (WidgetTester tester) async {
+      final call = FaultyCall();
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      expect(find.text('Unavailable'), findsOneWidget);
+      expect(opacityOf(tester, find.byKey(GraineAgentBar.callButtonKey)), 0.4);
+      call.update((FakeCall c) => (c as FaultyCall).error = null);
+      await tester.pump();
+      expect(find.text('Tap to talk'), findsOneWidget);
     });
 
     testWidgets('mute and hang up act on the call; the live caption sits above the bar', (WidgetTester tester) async {
@@ -252,6 +394,103 @@ void main() {
       call.update((FakeCall c) => c.connected = false);
       await tester.pump();
       expect(find.text('Hi Asha, how can I help?'), findsNothing, reason: 'no caption outside a call');
+    });
+
+    testWidgets("the customer's own lines carry YOU; two lines at most; captions can be turned off",
+        (WidgetTester tester) async {
+      final call = FakeCall()
+        ..connected = true
+        ..captions = const <Caption>[Caption(Role.customer, 'Take me to privacy settings', live: true)];
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      expect(find.text('YOU'), findsOneWidget);
+      final line = tester.widget<Text>(find.text('Take me to privacy settings'));
+      expect(line.maxLines, 2);
+      expect(
+          tester.widget<Opacity>(find.ancestor(of: find.text('Take me to privacy settings'), matching: find.byType(Opacity)).first).opacity,
+          0.75,
+          reason: 'still arriving');
+
+      call.update((FakeCall c) => c.captions = const <Caption>[Caption(Role.agent, 'Opening privacy settings.')]);
+      await tester.pump();
+      expect(find.text('YOU'), findsNothing);
+
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, showCaptions: false)));
+      expect(find.byKey(GraineAgentBar.captionKey), findsNothing);
+    });
+
+    testWidgets('no chat: the bar is the call alone, whatever the dashboard offers', (WidgetTester tester) async {
+      final call = FakeCall()..appearance = const <String, Object?>{'mode': 'both'};
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      expect(find.byKey(GraineAgentBar.switchButtonKey), findsNothing);
+      expect(find.byKey(GraineAgentBar.callButtonKey), findsOneWidget);
+    });
+
+    testWidgets('call and chat: the switch ends the call and opens the chat window; the chevron comes back',
+        (WidgetTester tester) async {
+      final surfaces = <AgentSurface>[];
+      final call = FakeCall()
+        ..connected = true
+        ..appearance = const <String, Object?>{'mode': 'both', 'title': 'Asha'};
+      final chat = FakeChat();
+      await tester.pumpWidget(host(GraineAgentBar(
+          call: call, chat: chat, showComponents: false, onSurfaceChange: surfaces.add)));
+      final toChat = find.byKey(GraineAgentBar.switchButtonKey);
+      expect(iconIn(tester, toChat).name, 'chat');
+      expect(find.byKey(GraineAgentBar.chatKey), findsNothing);
+
+      await tester.tap(toChat);
+      await tester.pump();
+      expect(call.ends, 1, reason: 'one conversation at a time: the call ends');
+      call.update((FakeCall c) => c.connected = false); // and the page confirms it
+      await tester.pump();
+      expect(surfaces, <AgentSurface>[AgentSurface.chat]);
+      expect(find.byKey(GraineAgentBar.chatKey), findsOneWidget);
+      expect(find.text('Online'), findsNWidgets(2), reason: 'the header and the status line');
+      expect(find.byWidgetPredicate((Widget w) => w is SdkIconView && w.name == 'mic'), findsNothing,
+          reason: 'no microphone in the chat');
+      expect(find.byKey(GraineAgentBar.closeButtonKey), findsOneWidget);
+      expect(iconIn(tester, find.byKey(GraineAgentBar.switchButtonKey)).name, 'call');
+      expect(find.text('Asha can see what you’re looking at — ask it anything.'), findsOneWidget);
+
+      await tester.enterText(find.byType(EditableText), 'Show me the Creta');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey<String>('graine-chat-send')));
+      await tester.pump();
+      expect(chat.sent, <String>['Show me the Creta']);
+      expect(find.text('Show me the Creta'), findsOneWidget, reason: 'the message, as a bubble');
+
+      // Send from the keyboard too; an empty field sends nothing.
+      await tester.enterText(find.byType(EditableText), 'And the price?');
+      await tester.testTextInput.receiveAction(TextInputAction.send);
+      await tester.pump();
+      expect(FocusManager.instance.primaryFocus?.debugLabel, 'graine-chat-composer',
+          reason: 'the keyboard stays up for the next message');
+      await tester.tap(find.byKey(const ValueKey<String>('graine-chat-send')));
+      expect(chat.sent, <String>['Show me the Creta', 'And the price?']);
+
+      chat
+        ..connected = false
+        ..notifyListeners();
+      await tester.pump();
+      expect(find.text('Connecting…'), findsWidgets);
+
+      await tester.tap(find.byKey(const ValueKey<String>('graine-chat-collapse')));
+      await tester.pump();
+      expect(find.byKey(GraineAgentBar.chatKey), findsNothing);
+      expect(surfaces, <AgentSurface>[AgentSurface.chat, AgentSurface.voice]);
+    });
+
+    testWidgets('an agent that is only a chat opens in the chat, with no switch and no microphone',
+        (WidgetTester tester) async {
+      var closed = 0;
+      final call = FakeCall()..appearance = const <String, Object?>{'mode': 'chat'};
+      await tester.pumpWidget(host(GraineAgentBar(
+          call: call, chat: FakeChat(), showComponents: false, surface: AgentSurface.voice, onClose: () => closed++)));
+      expect(find.byKey(GraineAgentBar.chatKey), findsOneWidget);
+      expect(find.byKey(GraineAgentBar.switchButtonKey), findsNothing);
+      expect(find.byKey(GraineAgentBar.callButtonKey), findsNothing);
+      await tester.tap(find.byKey(const ValueKey<String>('graine-chat-collapse')));
+      expect(closed, 1, reason: 'the chevron closes a chat-only agent');
     });
 
     testWidgets('the dashboard names it and colours it; a prop overrides one thing', (WidgetTester tester) async {

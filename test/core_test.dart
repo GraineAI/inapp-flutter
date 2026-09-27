@@ -1,8 +1,9 @@
 // The pure core, proven without a device, a WebView or Flutter: every rule
 // the Android SDK's CoreTest and WidgetTest pin, ported case for case, plus
 // the Dart-side pieces (the action registry, session parsing, captions, the
-// bar's status word, design tokens and the glyph path reader). Imports ONLY
-// lib/src/core — no package:flutter.
+// voice bar's status words, phase, meter and surfaces, design tokens, the
+// design's typefaces, the SDK's icons and the glyph path reader). Imports
+// ONLY lib/src/core — no package:flutter.
 import 'dart:async';
 import 'dart:convert';
 
@@ -42,7 +43,10 @@ void main() {
   appearanceTests();
   loaderTests();
   barTests();
+  voiceBarTests();
   designTests();
+  fontTests();
+  iconTests();
   svgPathTests();
 }
 
@@ -1315,6 +1319,297 @@ void svgPathTests() {
       }
       expect(SvgPath.parse(''), isEmpty);
       expect(SvgPath.parse('   '), isEmpty);
+    });
+  });
+}
+
+void voiceBarTests() {
+  group('voiceBarStatus', () {
+    BarStatus status({
+      bool error = false,
+      bool inChat = false,
+      bool chatOnline = false,
+      bool? online,
+      bool reconnecting = false,
+      GraineConnectivity connectivity = GraineConnectivity.ready,
+      bool micDenied = false,
+      bool ready = true,
+      bool connecting = false,
+      bool muted = false,
+      bool connected = false,
+      bool thinking = false,
+      bool speaking = false,
+      ConnectionQuality quality = ConnectionQuality.unknown,
+    }) =>
+        voiceBarStatus(
+          error: error,
+          inChat: inChat,
+          chatOnline: chatOnline,
+          online: online,
+          reconnecting: reconnecting,
+          connectivity: connectivity,
+          micDenied: micDenied,
+          ready: ready,
+          connecting: connecting,
+          muted: muted,
+          connected: connected,
+          thinking: thinking,
+          speaking: speaking,
+          quality: quality,
+        );
+
+    test('each rung, in sentence case, beats every rung below it — the contract order', () {
+      // Everything that could be true at once, peeled away one rung at a time:
+      // each line proves its words win over all the ones after it.
+      var s = status(
+          error: true, online: false, reconnecting: true, micDenied: true, connectivity: GraineConnectivity.failed,
+          ready: false, connecting: true, muted: true, connected: true, thinking: true, speaking: true,
+          quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Unavailable'));
+      s = status(
+          online: false, reconnecting: true, micDenied: true, connectivity: GraineConnectivity.failed, ready: false,
+          connecting: true, muted: true, connected: true, thinking: true, speaking: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('No connection'));
+      s = status(
+          reconnecting: true, micDenied: true, connectivity: GraineConnectivity.failed, ready: false, connecting: true,
+          muted: true, connected: true, thinking: true, speaking: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Reconnecting…', waiting: 'reconnecting'));
+      s = status(
+          micDenied: true, connectivity: GraineConnectivity.failed, ready: false, connecting: true, muted: true,
+          connected: true, thinking: true, speaking: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Needs microphone'));
+      s = status(
+          connectivity: GraineConnectivity.failed, ready: false, connecting: true, muted: true, connected: true,
+          thinking: true, speaking: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Couldn’t load · tap to retry'), reason: 'a curly apostrophe, as React Native says it');
+      s = status(
+          ready: false, connecting: true, muted: true, connected: true, thinking: true, speaking: true,
+          quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Connecting…', waiting: 'connecting'));
+      s = status(muted: true, connected: true, thinking: true, speaking: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Muted'));
+      s = status(connected: true, thinking: true, speaking: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Thinking…', waiting: 'thinking'));
+      s = status(connected: true, speaking: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Speaking', meter: true));
+      s = status(connected: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Weak connection'));
+      expect(status(connected: true, quality: ConnectionQuality.good), const BarStatus('Listening', meter: true));
+      expect(status(), const BarStatus('Tap to talk'));
+    });
+
+    test('a retrying page reconnects; placing a call, or a page not ready, connects', () {
+      expect(status(connectivity: GraineConnectivity.retrying), const BarStatus('Reconnecting…', waiting: 'reconnecting'));
+      expect(status(ready: false), const BarStatus('Connecting…', waiting: 'connecting'));
+      expect(status(connecting: true), const BarStatus('Connecting…', waiting: 'connecting'));
+    });
+
+    test('in the chat, none of the call\'s words are true: "Online", or connecting', () {
+      expect(status(inChat: true, chatOnline: true, online: false, connected: true, muted: true), const BarStatus('Online'));
+      expect(status(inChat: true, reconnecting: true), const BarStatus('Connecting…', waiting: 'connecting'));
+      expect(status(inChat: true, error: true), const BarStatus('Unavailable'), reason: 'a broken agent is broken everywhere');
+    });
+
+    test('thinking, speaking and listening are only ever said on a call', () {
+      expect(status(thinking: true), const BarStatus('Tap to talk'));
+      expect(status(speaking: true), const BarStatus('Tap to talk'));
+      expect(status(quality: ConnectionQuality.poor), const BarStatus('Tap to talk'));
+    });
+  });
+
+  group('callPhase', () {
+    CallPhase phase({
+      bool reconnecting = false,
+      GraineConnectivity connectivity = GraineConnectivity.ready,
+      bool connecting = false,
+      bool ready = true,
+      bool connected = true,
+      Caption? caption,
+      bool agentSpeaking = false,
+    }) =>
+        callPhase(
+          reconnecting: reconnecting,
+          connectivity: connectivity,
+          connecting: connecting,
+          ready: ready,
+          connected: connected,
+          caption: caption,
+          agentSpeaking: agentSpeaking,
+        );
+
+    test("thinking is the gap between the customer's final line and the agent's first", () {
+      expect(phase(), CallPhase.listening);
+      expect(phase(caption: const Caption(Role.customer, 'My PAN is', live: true)), CallPhase.listening,
+          reason: 'still talking');
+      expect(phase(caption: const Caption(Role.customer, 'My PAN is ABCDE1234F')), CallPhase.thinking);
+      expect(phase(caption: const Caption(Role.agent, 'Got it', live: true)), CallPhase.speaking);
+      expect(phase(caption: const Caption(Role.agent, 'Got it, thanks.')), CallPhase.listening);
+      expect(phase(caption: const Caption(Role.customer, 'Hi'), agentSpeaking: true), CallPhase.speaking);
+    });
+
+    test('the transcript folded the React Native way says thinking exactly while the agent owes an answer', () {
+      var log = const <Caption>[];
+      CallPhase now() => phase(caption: log.isEmpty ? null : log.last);
+      log = Captions.fold(log, const Caption(Role.customer, 'Show me', live: true));
+      expect(now(), CallPhase.listening);
+      log = Captions.fold(log, const Caption(Role.customer, '')); // the customer's full stop
+      expect(now(), CallPhase.thinking);
+      log = Captions.fold(log, const Caption(Role.agent, 'Here', live: true));
+      expect(now(), CallPhase.speaking);
+      log = Captions.fold(log, const Caption(Role.agent, 'Here they are.'));
+      expect(now(), CallPhase.listening);
+    });
+
+    test('off a call, coming up, or coming back: idle, connecting, reconnecting', () {
+      expect(phase(connected: false), CallPhase.idle);
+      expect(phase(connecting: true), CallPhase.connecting);
+      expect(phase(ready: false, connected: false), CallPhase.connecting);
+      expect(phase(reconnecting: true), CallPhase.reconnecting);
+      expect(phase(connectivity: GraineConnectivity.failed, connected: false), CallPhase.reconnecting);
+      expect(phase(connectivity: GraineConnectivity.retrying), CallPhase.reconnecting);
+    });
+  });
+
+  group('VoiceMeter', () {
+    test("four bars, 2.5 wide and 2 apart, at 55/100/70/40% of 12", () {
+      expect(VoiceMeter.heights, <double>[0.55, 1, 0.7, 0.4]);
+      expect(VoiceMeter.height, 12);
+      expect(VoiceMeter.barWidth, 2.5);
+      expect(VoiceMeter.gap, 2);
+      expect(VoiceMeter.low, 0.35);
+      expect(VoiceMeter.staggerMs, 90);
+    });
+
+    test('each leg is max(420, durationMs × 3.2) ms', () {
+      expect(VoiceMeter.legMs(0), 420);
+      expect(VoiceMeter.legMs(120), 420);
+      expect(VoiceMeter.legMs(150), closeTo(480, 1e-9));
+      expect(VoiceMeter.legMs(200), closeTo(640, 1e-9));
+      expect(VoiceMeter.legMs(500), closeTo(1600, 1e-9));
+      expect(VoiceMeter.legMs(201), closeTo(643.2, 1e-9), reason: 'not rounded');
+    });
+
+    test('bar i waits i × 90 ms at 35%, rises for one leg, falls for the next, forever', () {
+      const d = 200; // a 640 ms leg
+      final leg = VoiceMeter.legMs(d);
+      for (var i = 0; i < 4; i++) {
+        final start = i * 90.0;
+        if (i > 0) expect(VoiceMeter.scale(i, start - 1, d), VoiceMeter.low, reason: 'bar $i before its turn');
+        expect(VoiceMeter.scale(i, start, d), VoiceMeter.low, reason: 'bar $i at its start');
+        expect(VoiceMeter.scale(i, start + leg / 2, d), closeTo((VoiceMeter.low + 1) / 2, 1e-9), reason: 'bar $i halfway up');
+        expect(VoiceMeter.scale(i, start + leg - 0.001, d), closeTo(1, 1e-5), reason: 'bar $i at full height');
+        expect(VoiceMeter.scale(i, start + leg * 1.5, d), closeTo((VoiceMeter.low + 1) / 2, 1e-9), reason: 'bar $i halfway down');
+        expect(VoiceMeter.scale(i, start + leg * 2 + 1e-6, d), closeTo(VoiceMeter.low, 1e-6), reason: 'bar $i back at the bottom');
+        expect(VoiceMeter.scale(i, start + leg * 20.5, d), closeTo((VoiceMeter.low + 1) / 2, 1e-6), reason: 'forever');
+      }
+      // The easing shapes a leg without moving its ends.
+      double easeIn(double t) => t * t;
+      expect(VoiceMeter.scale(0, leg / 2, d, easeIn), closeTo(VoiceMeter.low + (1 - VoiceMeter.low) * 0.25, 1e-9));
+    });
+
+    test('still at full height when the design has no motion', () {
+      expect(VoiceMeter.still(0), isTrue);
+      expect(VoiceMeter.still(150), isFalse);
+      for (var i = 0; i < 4; i++) {
+        for (final t in <double>[0, 100, 5000]) {
+          expect(VoiceMeter.scale(i, t, 0), 1);
+        }
+      }
+    });
+  });
+
+  group('Surfaces', () {
+    test("the dashboard's mode decides which exist, its start which opens, a preference wins when allowed", () {
+      var p = Surfaces.resolve(null);
+      expect(p.allowed, <AgentSurface>[AgentSurface.voice, AgentSurface.chat]);
+      expect(p.start, AgentSurface.voice);
+      expect(p.canSwitch, isTrue);
+
+      p = Surfaces.resolve(const <String, Object?>{'mode': 'Voice'});
+      expect(p.allowed, <AgentSurface>[AgentSurface.voice]);
+      expect(p.canSwitch, isFalse);
+
+      p = Surfaces.resolve(const <String, Object?>{'mode': 'chat'}, AgentSurface.voice);
+      expect(p.start, AgentSurface.chat, reason: 'a surface the brand turned off is not opened');
+      expect(p.canSwitch, isFalse);
+
+      expect(Surfaces.resolve(const <String, Object?>{'start': 'chat'}).start, AgentSurface.chat);
+      expect(Surfaces.resolve(const <String, Object?>{'start': 'chat'}, AgentSurface.voice).start, AgentSurface.voice);
+      expect(Surfaces.resolve(const <String, Object?>{'mode': 'both', 'start': 'fax'}).start, AgentSurface.voice);
+      expect(Surfaces.resolve(const <String, Object?>{'mode': 7}).allowed, hasLength(2), reason: 'junk is both');
+    });
+  });
+}
+
+void fontTests() {
+  group('DesignFonts', () {
+    test('the nearest weight a family has; on a tie, the heavier', () {
+      expect(DesignFonts.nearestWeight(const <int>[400, 600], 500), 600);
+      expect(DesignFonts.nearestWeight(const <int>[300, 400, 500, 600, 700], 800), 700);
+      expect(DesignFonts.nearestWeight(const <int>[200, 300, 400, 600, 700, 800, 900], 500), 600, reason: 'Martel has no 500');
+      expect(DesignFonts.nearestWeight(const <int>[400], 900), 400);
+      expect(DesignFonts.nearestWeight(const <int>[], 400), isNull);
+    });
+
+    test('a face: the curated spelling, the nearest weight, its name and its URL', () {
+      final f = DesignFonts.faceFor('ibm plex sans', 650, origin: 'https://example.test//')!;
+      expect(f.family, 'IBM Plex Sans');
+      expect(f.weight, 700);
+      expect(f.name, 'Graine-IBMPlexSans-700');
+      expect(f.url, 'https://example.test/api/embed/font?f=IBM%20Plex%20Sans&w=700&v=${DesignFonts.assetVersion}');
+      expect(f.key, 'IBM Plex Sans|700');
+      expect(DesignFonts.faceFor('Baloo 2', 300)!.url, '$base/api/embed/font?f=Baloo%202&w=400&v=1',
+          reason: 'the default origin; Baloo 2 starts at 400');
+    });
+
+    test('"system", nothing, and a family this build has no files for are never fetched', () {
+      for (final family in <String?>['system', 'System', ' ', '', null, 'Comic Sans MS']) {
+        expect(DesignFonts.faceFor(family, 400), isNull, reason: '$family');
+      }
+    });
+
+    test('a token set draws with the body at body and strong, the heading at title and strong — each once', () {
+      final t = ThemeTokens.fromJson(tokensJson('light', extra: <String, Object?>{
+        'font': <String, Object?>{
+          'body': 'Nunito',
+          'heading': 'Baloo 2',
+          'weights': <String, Object?>{'body': 400, 'strong': 700, 'title': 700},
+        },
+      }))!;
+      expect(DesignFonts.facesFor(t).map((DesignFontFace f) => f.name), <String>[
+        'Graine-Nunito-400',
+        'Graine-Nunito-700',
+        'Graine-Baloo2-700',
+      ]);
+    });
+  });
+}
+
+void iconTests() {
+  group('SdkIcons', () {
+    test('the eight icons, each a body a fill can sit in and lines that are only stroked', () {
+      expect(SdkIcons.all.keys, <String>['mic', 'micOff', 'end', 'send', 'chat', 'call', 'chevron', 'close']);
+      for (final e in SdkIcons.all.entries) {
+        final icon = e.value;
+        expect(icon.body != null || icon.lines != null, isTrue, reason: e.key);
+        for (final d in <String?>[icon.body, icon.lines]) {
+          if (d == null) continue;
+          expect(SvgPath.parse(d), isNotEmpty, reason: '${e.key}: $d');
+        }
+      }
+    });
+
+    test('outline, sharp, filled and duotone stroke and fill as the contract says', () {
+      expect(SdkIcons.treatment('outline', 2),
+          const IconTreatment(fillBody: false, bodyFillOpacity: 0, bodyStroke: 2, lineStroke: 2, square: false));
+      expect(SdkIcons.treatment('sharp', 1.5),
+          const IconTreatment(fillBody: false, bodyFillOpacity: 0, bodyStroke: 1.5, lineStroke: 1.5, square: true));
+      expect(SdkIcons.treatment('filled', 2),
+          const IconTreatment(fillBody: true, bodyFillOpacity: 1, bodyStroke: 1.5, lineStroke: 2, square: false));
+      expect(SdkIcons.treatment('filled', 1.25).bodyStroke, 1, reason: '0.75 × the stroke, at least 1');
+      expect(SdkIcons.treatment('duotone', 1.5),
+          const IconTreatment(fillBody: true, bodyFillOpacity: 0.28, bodyStroke: 1.5, lineStroke: 1.5, square: false));
+      expect(SdkIcons.treatment('embossed', 2), SdkIcons.treatment('outline', 2), reason: 'an unknown style is outline');
     });
   });
 }

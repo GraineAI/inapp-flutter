@@ -238,8 +238,8 @@ class ThemeFont {
     required this.lineHeight,
   });
 
-  /// "system" — the platform's UI font — or a family name. An app draws a
-  /// family only when it bundles it: see [Design.fontFamily].
+  /// "system" — the platform's UI font — or a family name from the
+  /// dashboard's list, whose faces the SDK fetches itself: see `DesignFonts`.
   final String body;
   final String heading;
   final ThemeFontScale scale;
@@ -633,13 +633,12 @@ abstract final class Design {
     return null;
   }
 
-  /// THE FAMILY TO DRAW IN, or null for the platform's font.
+  /// THE APP'S OWN COPY OF A FAMILY, or null.
   ///
-  /// "system" always means the platform's font. Any other family is used
-  /// only when the app says it bundles it ([available], matched without
-  /// regard to case, answered in the app's own spelling) — otherwise the
-  /// platform's font, silently: never a crash, never a warning a customer
-  /// could see.
+  /// "system" always means the platform's font. Any other family is the
+  /// app's when it says it bundles it ([available], matched without regard
+  /// to case, answered in the app's own spelling) — and that copy wins over
+  /// the faces the SDK fetches (`DesignFonts`). Null otherwise.
   static String? fontFamily(String? family, Iterable<String> available) {
     final want = (family ?? '').trim().toLowerCase();
     if (want.isEmpty || want == 'system') return null;

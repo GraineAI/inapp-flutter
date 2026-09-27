@@ -3,12 +3,15 @@
 // trip, and every timer (the end watchdog, the background confirm, the load
 // watchdog and its retry ladder) on the test's fake clock.
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/widgets.dart' show Brightness;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:graine_inapp/graine_inapp.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+
+import 'contract_files.dart';
 
 const String base = 'https://www.graine.ai';
 
@@ -135,6 +138,83 @@ void main() {
     tester.platformDispatcher.platformBrightnessTestValue = Brightness.light;
     g.didChangePlatformBrightness();
     expect(seen, <String?>['dark', 'light']);
+    await finish(tester, g);
+  });
+
+  testWidgets("the session's typeface is fetched as the session arrives, through the SDK's own client",
+      (WidgetTester tester) async {
+    final fx = await tester.runAsync(() => contractJson('contract/design.json'));
+    final neo = (fx!['cases']! as List<Object?>).cast<Map<String, Object?>>().firstWhere(
+        (Map<String, Object?> c) => (c['config']! as Map<String, Object?>)['preset'] == 'neo-brutalism');
+    final fonts = <String>[];
+    final registered = <String>[];
+    final g = GraineInApp.forTesting(
+      const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'),
+      clock: () => tester.binding.clock.now().millisecondsSinceEpoch,
+      httpClient: MockClient((http.Request req) async {
+        if (req.method == 'POST') {
+          return http.Response(jsonEncode(<String, Object?>{'agentId': 'agent-1', 'design': neo['design']}), 200);
+        }
+        fonts.add(req.url.toString());
+        return http.Response.bytes(Uint8List.fromList(<int>[0, 1, 0, 0, ...List<int>.filled(32, 0)]), 200);
+      }),
+      fontRegistrar: (String name, Uint8List bytes) async => registered.add(name),
+    );
+    expect(g.fontFaces.value, isEmpty);
+    await g.loadSession();
+    await tester.pump();
+    final want = (neo['fontFaces']! as List<Object?>).cast<Map<String, Object?>>();
+    expect(fonts.toSet(), <String>{for (final f in want) f['url']! as String});
+    expect(registered.toSet(), <String>{for (final f in want) f['name']! as String});
+    expect(g.fontFaces.value, <String, String>{
+      for (final f in want) '${f['family']}|${f['weight']}': f['name']! as String,
+    });
+    await finish(tester, g);
+  });
+
+  testWidgets("a transport that is not configured is held as the call's error until the next call",
+      (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    expect(g.voice.error, isNull);
+    page.say(<String, Object?>{
+      'type': 'graine:transport',
+      'transport': 'ws',
+      'requested': 'rtc',
+      'reason': 'not_configured',
+      'message': 'This deployment has no WebRTC gateway.',
+    });
+    expect(g.voice.error, 'This deployment has no WebRTC gateway.');
+    page.say(<String, Object?>{'type': 'graine:transport', 'transport': 'ws', 'requested': 'rtc', 'reason': 'ice_failed'});
+    expect(g.voice.error, 'This deployment has no WebRTC gateway.', reason: 'a bad network is nobody\'s misconfiguration');
+    await g.voice.start();
+    expect(g.voice.error, isNull, reason: 'a new call is a new attempt');
+    await finish(tester, g);
+  });
+
+  testWidgets('the phase reads the call the way the React Native launcher does', (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    expect(g.voice.phase, CallPhase.connecting, reason: 'the page is not ready');
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    expect(g.voice.phase, CallPhase.idle);
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
+    expect(g.voice.phase, CallPhase.listening);
+    page.say(<String, Object?>{'type': 'graine:caption', 'role': 'customer', 'text': 'What does it cost?', 'live': false});
+    expect(g.voice.phase, CallPhase.thinking);
+    page.say(<String, Object?>{'type': 'graine:caption', 'role': 'agent', 'text': 'It costs', 'live': true});
+    expect(g.voice.phase, CallPhase.speaking);
+    page.say(<String, Object?>{'type': 'graine:caption', 'role': 'agent', 'text': 'It costs ₹19 lakh.', 'live': false});
+    expect(g.voice.phase, CallPhase.listening);
+    page.say(<String, Object?>{'type': 'graine:reconnecting', 'active': true});
+    expect(g.voice.phase, CallPhase.reconnecting);
+    page.say(<String, Object?>{'type': 'graine:ended'});
     await finish(tester, g);
   });
 

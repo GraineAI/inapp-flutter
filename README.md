@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.2.0
+  graine_inapp: ^0.3.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -102,26 +102,42 @@ Place `GraineEngine` ONCE near the root: a call must outlive every screen, and
 the agent's job is to move the customer between them. It loads the engine idle
 at mount, so a tap is an INVITE away rather than a page load away.
 
-`GraineAgentBar` is optional — a working default:
+`GraineAgentBar` is optional — the voice bar the dashboard's Garage shows in
+its phone preview, drawn by the SDK from the brand's design (see Design
+below). Your app passes nothing about how it looks:
 
-- names the network: *weak connection*, *no connection*, *reconnecting…*,
-  *connecting…*, *listening*, *speaking*, *muted*, *tap to talk*,
-  *couldn't load · tap to retry* (the call button retries);
+- the avatar with the design's launcher glyph (or the logo, or the name's
+  first letter), the name, and a status line; the microphone starts a call,
+  mutes it during one and retries a load that failed; the end button hangs up
+  during a call and closes the bar off one (`onClose` hears both — hide the
+  bar there, and bring it back with a `GraineLauncher`);
+- names the network before the agent takes the blame: *Unavailable*,
+  *No connection*, *Reconnecting…*, *Needs microphone*,
+  *Couldn’t load · tap to retry*, *Connecting…*, *Muted*, *Thinking…*,
+  *Speaking*, *Weak connection*, *Listening*, *Tap to talk* — the dashboard's
+  loader stands in for the words while it connects, reconnects or thinks, and
+  a four-bar meter moves beside *Listening* and *Speaking* at the design's pace;
 - **draggable** up and down (a movement under 8 px is still a tap), clamped to
   the screen, restored from `initialOffset`, reported by `onPlacementChange`;
 - **keyboard-aware**: rises by `MediaQuery.viewInsets.bottom` (0 below a route
   that already resized, so never a double lift);
-- shows the live caption, and the agent's components above itself
-  (`showComponents: false` to draw them elsewhere with `GraineWidgetView`);
-- looks as the brand's design says (see Design below), or — from a server
-  that predates designs — as Appearance says (accent, heading, logo,
-  light/dark/auto, radius); `accent`, `name`, `avatarUrl`, `scheme`, `radius`
-  override one thing each.
+- shows the live caption (`showCaptions: false` to hide it), and the agent's
+  components above itself (`showComponents: false` to draw them elsewhere
+  with `GraineWidgetView`);
+- an agent the dashboard offers as both a call and a chat: this package
+  carries the call; hand the bar your chat connection (`chat:`, a
+  `GraineChatState`) and it offers the switch and draws the chat window in
+  the design — `onSurfaceChange` tells you when to open or close it;
+- from a server that predates designs it keeps the colours, corners and
+  depth Appearance gave it (accent, heading, logo, light/dark/auto, radius);
+  `accent`, `name`, `avatarUrl`, `scheme`, `radius` override one thing each.
 
 Draw your own instead from `GraineInApp.instance.voice` — a `ChangeNotifier`
 implementing `GraineCallState` (`connected`, `connecting`, `ready`, `muted`,
 `quality`, `online`, `reconnecting`, `connectivity`, `captions`, `caption`,
-`agentSpeaking`, `micDenied`; `start()`, `end()`, `setMuted()`, `retry()`).
+`agentSpeaking`, `micDenied`; `start()`, `end()`, `setMuted()`, `retry()`),
+plus `phase` (idle, connecting, reconnecting, thinking, speaking, listening)
+and `error`. `voiceBarStatus(...)` gives the bar's words for any state.
 
 ## 4. Tell the agent what is happening
 
@@ -182,8 +198,10 @@ The brand chooses how the agent looks in the dashboard (Web components →
 Design): a design philosophy and a few knobs. The session carries it already
 resolved — every colour, size, radius, shadow and glyph, for light and dark —
 and the SDK draws those tokens, so a new design reaches your installed app
-without a release. The bar, components and loaders follow it; so do two
-optional widgets:
+without a release. The voice bar is drawn element by element as the Garage
+previews it (surface, outline, corners, the floating shadow or the solid
+offset, glass, the meter, the SDK's icons in the design's icon style); the
+components and loaders follow it too; so do two optional widgets:
 
 - `GraineLauncher` — a floating button in the design's shape (circle,
   squircle, rounded square, square, or a pill with a label) and glyph; a tap
@@ -194,9 +212,12 @@ optional widgets:
 Light or dark follows the brand's choice, else the device, and switches with
 it. The platform's reduce-motion setting always wins over the design's motion.
 
-Fonts: a design may name a font family. The SDK uses it only if your app
-bundles it and says so, otherwise the platform font — never a download,
-never an error:
+Fonts: a design may name a typeface, and the SDK loads it by itself — the
+faces the design draws with, from `<baseUrl>/api/embed/font`, kept in the
+app's cache directory so each is fetched once — and redraws in it as it
+lands. Until then, and if it never arrives, text is in the platform font at
+the design's weight: never an error the customer sees. A family your app
+already bundles is used instead, and never fetched:
 
 ```dart
 GraineInApp.init(GraineConfig(baseUrl: …, publishableKey: …, fonts: const ['Inter']));
@@ -204,7 +225,9 @@ GraineInApp.init(GraineConfig(baseUrl: …, publishableKey: …, fonts: const ['
 
 Drawing your own UI? `GraineInApp.instance.tokens` is the set to draw with
 right now (`tokensListenable` to redraw when the device switches);
-`Design.glyphUrl(...)` builds the launcher glyph as an image.
+`GraineInApp.instance.fontFaces` names the design's faces the SDK has loaded
+(set `fontFamily` to one with `FontWeight.normal` — a loaded face is its
+weight); `Design.glyphUrl(...)` builds the launcher glyph as an image.
 
 ## 8. Listen
 
@@ -229,9 +252,10 @@ flutter analyze
 
 `test/contract_test.dart` walks up to `contract/fixtures.json`,
 `contract/rn-parity.json` and `contract/design.json` and must reproduce every
-answer the React Native SDK produced; a missing file fails, it is never
-skipped. `lib/src/core/` is
-pure Dart (a test holds it to that).
+answer the React Native SDK produced — down to the faces and font URLs each
+design loads and the SDK's icon paths; a missing file fails, it is never
+skipped. `lib/src/core/` is pure Dart (a test holds it to that), and no test
+reaches a network host: font files come from a mock HTTP client.
 
 ## Example
 

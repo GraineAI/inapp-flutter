@@ -1,7 +1,9 @@
 // Drawing helpers the SDK's widgets share. Not exported: an app with its own
 // design system draws from the public state, not from these.
+import 'dart:math' as math;
 import 'dart:ui' as ui show ImageFilter;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/widgets.dart';
 
 import 'core/core.dart';
@@ -56,8 +58,76 @@ ThemeTokens? tokensFor(BuildContext context, {ResolvedDesign? design, String? sc
   return d.pick(deviceDark: b == null ? null : b == Brightness.dark, scheme: scheme);
 }
 
-/// A design family the app bundles ([GraineConfig.fonts]), or null for the platform's font.
-String? familyOf(String family) => Design.fontFamily(family, GraineInApp.maybeInstance?.config.fonts ?? const <String>[]);
+/// HOW TO SET TEXT IN A DESIGN [family] AT [weight] (contract/DESIGN.md, "Fonts"):
+///
+///  - the app bundles the family ([GraineConfig.fonts]) → that family, at the weight;
+///  - the SDK has loaded a face of it ([GraineInApp.fontFaces]) → that face,
+///    at normal weight: a loaded face IS its weight, and bold on top of a
+///    bold face would embolden it twice;
+///  - neither, yet or ever → the platform's font at the weight, silently.
+({String? family, FontWeight weight}) faceOf(String family, int weight) {
+  final app = GraineInApp.maybeInstance;
+  final own = Design.fontFamily(family, app?.config.fonts ?? const <String>[]);
+  if (own != null) return (family: own, weight: weightOf(weight));
+  final face = DesignFonts.faceFor(family, weight);
+  final name = face == null ? null : app?.fontFaces.value[face.key];
+  if (name != null) return (family: name, weight: FontWeight.normal);
+  return (family: null, weight: weightOf(weight));
+}
+
+/// [textStyle] in a design family: the face [faceOf] chooses for [weight].
+TextStyle designText(Color color, double size, String family, int weight, {double? height, double? letterSpacing}) {
+  final f = faceOf(family, weight);
+  return TextStyle(
+    color: color,
+    fontSize: size,
+    fontWeight: f.weight,
+    height: height,
+    letterSpacing: letterSpacing,
+    fontFamily: f.family,
+    decoration: TextDecoration.none,
+  );
+}
+
+/// A design's letter spacing (em) at [size], in logical pixels — rounded as
+/// the other SDKs round it; null for none.
+double? em(double size, double em) {
+  final v = (size * em * 100).roundToDouble() / 100;
+  return v == 0 ? null : v;
+}
+
+/// A name's first letter, upper-cased — "A" when there is none: the avatar
+/// and the chat's mark when there is neither a glyph nor a logo.
+String initialOf(String name) {
+  final t = name.trim();
+  return t.isEmpty ? 'A' : String.fromCharCodes(t.runes.take(1)).toUpperCase();
+}
+
+/// What a surface redraws on: its own state, the session arriving, and the
+/// design's typefaces landing — a face that loads after the first frame
+/// redraws everything set in it.
+Listenable surfaceListenable(List<Listenable?> own) {
+  final app = GraineInApp.maybeInstance;
+  final all = <Listenable>[
+    for (final l in own)
+      if (l != null) l,
+    if (app != null) app.sessionListenable,
+    if (app != null) app.fontFaces,
+  ];
+  return all.length == 1 ? all.single : Listenable.merge(all);
+}
+
+/// The accent at chip strength for an accent chosen outside the design: the
+/// same mix the design makes for its own — the accent a little way into the
+/// surface (RN softFor).
+Color softFor(Color accent, Color surface, {required bool dark}) => Color.lerp(surface, accent, dark ? 0.22 : 0.12)!;
+
+/// The depth a raised surface wears: the solid offset copy in `colors.text`
+/// when the design has one — never blurred — else [soft]'s shadow.
+List<BoxShadow> raisedShadows(ThemeTokens t, ThemeShadow? soft, Color text) {
+  final hard = t.elevation.hardOffset;
+  return hard != null ? <BoxShadow>[hardShadowOf(hard, text)] : shadowsOf(soft);
+}
 
 /// A token colour. Tokens are normalised #RRGGBB, so this never falls through.
 Color tokenColor(String hex) => colorOf(hex) ?? const Color(0xFF000000);
@@ -132,8 +202,11 @@ class Tap extends StatelessWidget {
 
 /// A SURFACE: its fill and outline, with its shadow outside. With [glass] the
 /// fill is translucent (the caller has already faded it) over a blur of
-/// whatever is behind, clipped to the corners, and the shadow stays outside
-/// the clip.
+/// whatever is behind, clipped to the corners — and the shadow is painted
+/// only OUTSIDE the surface, as CSS paints a box-shadow in the dashboard's
+/// preview: under a translucent fill, a shadow drawn whole would show through
+/// it, and a neo-brutalist offset copy would grey the entire bar. [height]
+/// is the whole surface's, outline included.
 Widget surfaceBox({
   Key? key,
   required Color color,
@@ -144,6 +217,7 @@ Widget surfaceBox({
   ThemeGlass? glass,
   EdgeInsetsGeometry? padding,
   EdgeInsetsGeometry? margin,
+  double? height,
   required Widget child,
 }) {
   final outline = borderWidth > 0 ? Border.all(color: border, width: borderWidth) : null;
@@ -152,6 +226,7 @@ Widget surfaceBox({
       key: key,
       margin: margin,
       padding: padding,
+      height: height,
       decoration: BoxDecoration(color: color, borderRadius: radius, border: outline, boxShadow: shadows),
       child: child,
     );
@@ -159,17 +234,52 @@ Widget surfaceBox({
   return Container(
     key: key,
     margin: margin,
-    decoration: BoxDecoration(borderRadius: radius, boxShadow: shadows),
-    child: ClipRRect(
-      borderRadius: radius,
-      child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: glass.blur, sigmaY: glass.blur),
-        child: Container(
-          padding: padding,
-          decoration: BoxDecoration(color: color, borderRadius: radius, border: outline),
-          child: child,
+    child: CustomPaint(
+      painter: OutsideShadowPainter(shadows: shadows, radius: radius),
+      child: ClipRRect(
+        borderRadius: radius,
+        child: BackdropFilter(
+          filter: ui.ImageFilter.blur(sigmaX: glass.blur, sigmaY: glass.blur),
+          child: Container(
+            padding: padding,
+            height: height,
+            decoration: BoxDecoration(color: color, borderRadius: radius, border: outline),
+            child: child,
+          ),
         ),
       ),
     ),
   );
+}
+
+/// Shadows painted only outside a rounded rectangle — for a translucent
+/// surface, which must not show its own shadow through itself.
+class OutsideShadowPainter extends CustomPainter {
+  OutsideShadowPainter({required this.shadows, required this.radius});
+
+  final List<BoxShadow> shadows;
+  final BorderRadius radius;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (shadows.isEmpty) return;
+    final rect = Offset.zero & size;
+    final shape = radius.toRRect(rect);
+    var reach = 0.0;
+    for (final s in shadows) {
+      reach = math.max(reach, s.offset.distance + s.blurRadius * 2 + s.spreadRadius.abs());
+    }
+    canvas.save();
+    canvas.clipPath(Path()
+      ..fillType = PathFillType.evenOdd
+      ..addRect(rect.inflate(reach + 1))
+      ..addRRect(shape));
+    for (final s in shadows) {
+      canvas.drawRRect(shape.shift(s.offset).inflate(s.spreadRadius), s.toPaint());
+    }
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(OutsideShadowPainter old) => !listEquals(old.shadows, shadows) || old.radius != radius;
 }

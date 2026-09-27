@@ -59,9 +59,10 @@ class GraineTranscriptView extends StatelessWidget {
   Widget build(BuildContext context) {
     final c = call ?? GraineInApp.maybeInstance?.voice;
     if (c == null) return const SizedBox.shrink();
-    final session = GraineInApp.maybeInstance?.sessionListenable;
+    // A design handed over directly has its typeface fetched too (each face once).
+    if (design != null) GraineInApp.maybeInstance?.loadDesignFonts(design);
     return ListenableBuilder(
-      listenable: session == null ? c : Listenable.merge(<Listenable>[c, session]),
+      listenable: surfaceListenable(<Listenable?>[c]),
       builder: (BuildContext context, Widget? _) => _build(context, c),
     );
   }
@@ -174,10 +175,11 @@ class GraineTranscriptView extends StatelessWidget {
             ),
       child: Text(turn.text, style: look.bubbleStyle.copyWith(color: ink)),
     );
-    // At most 88% of the width, on the speaker's side, as wide as its words.
+    // At most 84% of the width (contract/DESIGN.md, "Chat window"), on the
+    // speaker's side, as wide as its words.
     final side = customer ? Alignment.centerRight : Alignment.centerLeft;
     return FractionallySizedBox(
-      widthFactor: 0.88,
+      widthFactor: 0.84,
       alignment: side,
       child: Align(alignment: side, child: Opacity(opacity: turn.live ? 0.8 : 1, child: bubble)),
     );
@@ -215,7 +217,6 @@ class _ChatLook {
     final c = t.colors;
     final f = t.font;
     final text = tokenColor(c.text);
-    final body = familyOf(f.body);
     return _ChatLook(
       style: t.bubbles,
       background: tokenColor(c.background),
@@ -233,14 +234,11 @@ class _ChatLook {
       sm: t.shape.radius.sm,
       pad: t.spacing.cardPadding,
       gap: t.spacing.gap,
-      baseStyle: textStyle(text, f.scale.body, family: body),
-      titleStyle: textStyle(text, f.scale.title,
-          weight: f.weights.title,
-          height: f.lineHeight.title,
-          letterSpacing: f.letterSpacing.title * f.scale.title,
-          family: familyOf(f.heading)),
-      bubbleStyle: textStyle(text, f.scale.body,
-          weight: f.weights.body, height: f.lineHeight.body, letterSpacing: f.letterSpacing.body * f.scale.body),
+      baseStyle: designText(text, f.scale.body, f.body, f.weights.body),
+      titleStyle: designText(text, f.scale.title, f.heading, f.weights.title,
+          height: f.lineHeight.title, letterSpacing: f.letterSpacing.title * f.scale.title),
+      bubbleStyle: designText(text, f.scale.body, f.body, f.weights.body,
+          height: f.lineHeight.body, letterSpacing: f.letterSpacing.body * f.scale.body),
       emptyStyle: textStyle(tokenColor(c.textMuted), f.scale.caption, height: f.lineHeight.body),
       glass: t.glass,
     );

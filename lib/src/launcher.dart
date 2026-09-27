@@ -54,11 +54,12 @@ class GraineLauncher extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = _call;
-    final session = GraineInApp.maybeInstance?.sessionListenable;
-    final listen = <Listenable>[if (c != null) c, if (session != null) session];
-    if (listen.isEmpty) return _build(context, c);
+    final app = GraineInApp.maybeInstance;
+    if (c == null && app == null) return _build(context, c);
+    // A design handed over directly has its typeface fetched too (each face once).
+    if (design != null) app?.loadDesignFonts(design);
     return ListenableBuilder(
-      listenable: listen.length == 1 ? listen.single : Listenable.merge(listen),
+      listenable: surfaceListenable(<Listenable?>[c]),
       builder: (BuildContext context, Widget? _) => _build(context, c),
     );
   }
@@ -100,8 +101,8 @@ class GraineLauncher extends StatelessWidget {
         origin: app?.config.baseUrl,
       );
       final f = t.font;
-      labelStyle = textStyle(tokenColor(inkHex), f.scale.body,
-          weight: f.weights.strong, letterSpacing: f.letterSpacing.body * f.scale.body, family: familyOf(f.body));
+      labelStyle = designText(tokenColor(inkHex), f.scale.body, f.body, f.weights.strong,
+          letterSpacing: f.letterSpacing.body * f.scale.body);
     } else {
       fill = colorOf(dash.accent) ?? colorOf(Appearance.defaultAccent)!;
       inkHex = readableHexOn(fill);

@@ -39,6 +39,33 @@ abstract class GraineCallState implements Listenable {
   void retry();
 }
 
+/// A CALL THAT CAN SAY IT IS MISCONFIGURED — beside [GraineCallState] rather
+/// than in it, so a host's own call state keeps compiling. [GraineVoice]
+/// implements it; so may a fake.
+abstract interface class GraineCallFault {
+  /// What the page reported as permanently wrong with this agent's setup
+  /// (a transport that is not configured), or null. The bar says
+  /// "Unavailable" while it is set; a new call clears it.
+  String? get error;
+}
+
+/// A CHAT WITH THE AGENT, as the bar sees it.
+///
+/// The dashboard can offer an agent as a call, a chat, or both (Embed &
+/// Widgets → mode). This SDK carries the call; an app that runs the chat
+/// conversation itself hands it to `GraineAgentBar.chat`, and the bar draws
+/// the switch between them and the chat window in the brand's design.
+abstract class GraineChatState implements Listenable {
+  /// The conversation so far, oldest first; `live` while a line is still arriving.
+  List<Caption> get messages;
+
+  /// The chat is connected: its header says "Online".
+  bool get connected;
+
+  /// The customer typed [text] and sent it.
+  void send(String text);
+}
+
 /// What [GraineVoice] needs from the page that carries the call. The real
 /// one is a WebView ([GraineEngine] builds it); a test hands in a fake.
 abstract class GraineEnginePage {
@@ -109,7 +136,7 @@ class GraineEngineSink {
 /// tap costs one registration and an INVITE.
 ///
 /// A [ChangeNotifier]: a widget that listens redraws on every change.
-class GraineVoice extends ChangeNotifier implements GraineCallState {
+class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallFault {
   GraineVoice._(this._graine)
       : _watchdog = LoadWatchdog(
           stallMs: _graine.config.timing.stallMs,
@@ -139,6 +166,7 @@ class GraineVoice extends ChangeNotifier implements GraineCallState {
   List<Caption> _captions = const <Caption>[];
   bool _agentSpeaking = false;
   bool _micDenied = false;
+  String? _error;
   Transport? _transport;
 
   @override
@@ -166,7 +194,21 @@ class GraineVoice extends ChangeNotifier implements GraineCallState {
   @override
   bool get micDenied => _micDenied;
   @override
+  String? get error => _error;
+  @override
   Map<String, Object?> get appearance => _graine.session?.appearance ?? const <String, Object?>{};
+
+  /// Where the call stands in one word — idle, connecting, reconnecting,
+  /// thinking, speaking, listening — as the React Native launcher's `phase`.
+  CallPhase get phase => callPhase(
+        reconnecting: _reconnecting,
+        connectivity: _connectivity,
+        connecting: _connecting,
+        ready: _ready,
+        connected: _connected,
+        caption: caption,
+        agentSpeaking: _agentSpeaking,
+      );
 
   /// The transport that actually carries the call, once the page has said.
   Transport? get transport => _transport;
@@ -236,6 +278,7 @@ class GraineVoice extends ChangeNotifier implements GraineCallState {
     _ready = false;
     _startedCall = false;
     _pendingStart = false;
+    _error = null;
     _setCall(false, false);
     notifyListeners();
   }
@@ -260,6 +303,7 @@ class GraineVoice extends ChangeNotifier implements GraineCallState {
       return;
     }
     _micDenied = false;
+    _error = null;
     // A new call, not a continuation: the last one's words do not open this one.
     _captions = const <Caption>[];
     _agentSpeaking = false;
@@ -565,8 +609,10 @@ class GraineVoice extends ChangeNotifier implements GraineCallState {
         ):
         _transport = transport;
         _graine._report((GraineListener l) => l.onTransport(transport, requested, reason, message));
-        // A misconfiguration is an error even though the call survived it.
+        // A misconfiguration is an error even though the call survived it —
+        // held, so a bar can say so, and reported to whoever has to fix it.
         if (reason == 'not_configured' && message != null) {
+          _error = message;
           _graine._report((GraineListener l) => l.onError(message));
         }
       case PageQuality(rttMs: final rtt, jitterMs: final jitter, loss: final loss):

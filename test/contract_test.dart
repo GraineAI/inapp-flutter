@@ -7,7 +7,9 @@
 // answers for the component, loader, placement, appearance and friction
 // rules) is held to the same standard, every section of it. So is
 // sdk/contract/design.json (generate-design.mjs: real sessions' `design`
-// objects, which set of tokens each picks, and the glyph image URLs).
+// objects, which set of tokens each picks, the glyph image URLs, the faces
+// and font URLs each design loads, every family's weights, and the SDK's
+// own icon paths).
 //
 // A missing file FAILS. A skipped contract is a silent pass, and a silent
 // pass is how two SDKs drift apart. Imports ONLY lib/src/core.
@@ -304,6 +306,51 @@ void main() {
 
     setUpAll(() async {
       fx = await contractJson('contract/design.json');
+    });
+
+    test('every section is covered — a new one fails here until this suite checks it', () {
+      const covered = <String>{
+        'generatedBy', 'cases', 'legacy', 'glyphs', 'icons', 'fontWeights', 'fontAssetVersion', 'fontOrigin',
+      };
+      expect(fx.keys.toSet().difference(covered), isEmpty, reason: 'a section this suite does not check');
+      for (final c in cases(fx, 'cases')) {
+        expect(c.keys.toSet().difference(const <String>{'config', 'design', 'picks', 'fontFaces'}), isEmpty,
+            reason: 'a case field this suite does not check: ${c['config']}');
+      }
+    });
+
+    test('loads exactly the faces every design draws with, from exactly where the contract says', () {
+      final origin = fx['fontOrigin']! as String;
+      final all = cases(fx, 'cases');
+      var withFonts = 0;
+      for (final c in all) {
+        final design = ResolvedDesign.fromJson(c['design'])!;
+        final faces = DesignFonts.facesForDesign(design, origin: origin)
+          ..sort((DesignFontFace a, DesignFontFace b) =>
+              a.family == b.family ? a.weight - b.weight : a.family.compareTo(b.family));
+        final want = c['fontFaces']! as List<Object?>;
+        expect(canon(<Object?>[for (final f in faces) f.toJson()]), canon(want), reason: '${c['config']}');
+        if (want.isNotEmpty) withFonts++;
+      }
+      expect(withFonts, greaterThan(0), reason: 'the fixture must name some faces, or this proves nothing');
+    });
+
+    test('knows every family the dashboard offers and exactly the weights each has', () {
+      final want = fx['fontWeights']! as Map<String, Object?>;
+      expect(canon(DesignFonts.weights), canon(want));
+      expect(DesignFonts.assetVersion, fx['fontAssetVersion']);
+      expect(fx['fontOrigin'], Design.defaultOrigin, reason: "the SDK's default origin is the one the faces are served from");
+    });
+
+    test('draws the same eight icons from the same path data the dashboard draws', () {
+      final want = fx['icons']! as Map<String, Object?>;
+      expect(<String, Object?>{for (final e in SdkIcons.all.entries) e.key: e.value.toJson()}, want);
+      for (final e in SdkIcons.all.entries) {
+        for (final d in <String?>[e.value.body, e.value.lines]) {
+          if (d == null) continue;
+          expect(SvgPath.parse(d), isNotEmpty, reason: '${e.key} must be path data this SDK can paint');
+        }
+      }
     });
 
     test('parses every token of every design, exactly', () {

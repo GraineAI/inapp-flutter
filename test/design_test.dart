@@ -1,7 +1,9 @@
-// The design, drawn: the bar, the launcher, the transcript and a component
-// card, each under real sessions' designs (sdk/contract/design.json — every
-// one of them) and under none — where every surface must look exactly as it
-// did before designs. Fakes only: no WebView, no network.
+// The design, drawn: the voice bar (and its caption, meter, icons, chat
+// window and typeface), the launcher, the transcript and a component card,
+// each under real sessions' designs (sdk/contract/design.json — every one of
+// them) and under none — where every surface keeps the colours, corners and
+// depth it had before designs. Fakes only: no WebView, and no network — font
+// files come from a mock HTTP client.
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -9,7 +11,13 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:graine_inapp/graine_inapp.dart';
+import 'package:graine_inapp/src/agent_bar.dart' show BarMeter;
+import 'package:graine_inapp/src/chat_window.dart' show ChatWindow;
 import 'package:graine_inapp/src/glyph.dart';
+import 'package:graine_inapp/src/sdk_icon.dart';
+import 'package:graine_inapp/src/style.dart' show OutsideShadowPainter;
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 
 import 'contract_files.dart';
 
@@ -90,6 +98,43 @@ BoxDecoration fillOf(WidgetTester tester, Finder f) {
 
 TextStyle styleOf(WidgetTester tester, String text) => tester.widget<Text>(find.text(text)).style!;
 
+/// The shadows a surface wears: its decoration's — or, for a glass surface,
+/// whose shadow is painted only outside it, the outside painter's.
+List<BoxShadow> shadowsOn(WidgetTester tester, Finder f) {
+  final w = tester.widget(f);
+  if (w is Container) {
+    final d = w.decoration;
+    if (d is BoxDecoration && d.color != null) return d.boxShadow ?? const <BoxShadow>[];
+  }
+  for (final c in tester.widgetList<CustomPaint>(find.descendant(of: f, matching: find.byType(CustomPaint)))) {
+    final painter = c.painter;
+    if (painter is OutsideShadowPainter) return painter.shadows;
+  }
+  fail('no shadows found on $f');
+}
+
+/// The one SDK icon called [name] on screen.
+SdkIconView icon(WidgetTester tester, String name) =>
+    tester.widget<SdkIconView>(find.byWidgetPredicate((Widget w) => w is SdkIconView && w.name == name));
+
+/// A design's soft shadow, as the SDK draws it.
+BoxShadow soft(ThemeShadow s) => BoxShadow(
+    color: faded(hex(s.color), s.opacity), offset: Offset(0, s.y), blurRadius: s.blur, spreadRadius: s.spread);
+
+/// The first four bytes of a TrueType file, and enough after them to be one.
+final Uint8List ttf = Uint8List.fromList(<int>[0, 1, 0, 0, ...List<int>.filled(60, 7)]);
+
+/// A chat the app runs itself.
+class FakeChat extends ChangeNotifier implements GraineChatState {
+  FakeChat(this.messages);
+  @override
+  List<Caption> messages;
+  @override
+  bool connected = true;
+  @override
+  void send(String text) {}
+}
+
 Map<String, Object?> card({Map<String, Object?> style = const <String, Object?>{}}) => <String, Object?>{
       'widget_id': 'cars:1',
       'kind': 'product_list',
@@ -132,8 +177,13 @@ void main() {
 
   group('GraineAgentBar', () {
     Finder bar() => find.byKey(GraineAgentBar.barKey);
+    Map<String, Object?> caseOf(String preset) =>
+        all.firstWhere((Map<String, Object?> c) => (c['config']! as Map<String, Object?>).length == 1 &&
+            (c['config']! as Map<String, Object?>)['preset'] == preset);
+    ResolvedDesign preset(String id) => ResolvedDesign.fromJson(caseOf(id)['design'])!;
 
-    testWidgets('no design: exactly the bar before designs', (WidgetTester tester) async {
+    testWidgets("no design: the colours, corners and depth it always had, on the contract's elements",
+        (WidgetTester tester) async {
       final call = FakeCall();
       await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
       final d = decorationOf(tester, bar());
@@ -141,9 +191,14 @@ void main() {
       expect(d.borderRadius, BorderRadius.circular(26));
       expect(d.border, Border.all(color: const Color(0x1A000000)));
       expect(d.boxShadow, const <BoxShadow>[BoxShadow(color: Color(0x4D000000), blurRadius: 16, offset: Offset(0, 6))]);
-      expect(styleOf(tester, 'tap to talk').fontSize, 12.5);
-      expect(styleOf(tester, 'tap to talk').fontFamily, isNull);
-      expect(find.text('✦'), findsOneWidget);
+      expect(tester.getSize(bar()).height, 60);
+      expect(styleOf(tester, 'Tap to talk').fontSize, 12);
+      expect(styleOf(tester, 'Tap to talk').fontFamily, isNull);
+      expect(find.text('A'), findsOneWidget, reason: "no glyph and no logo: the name's first letter");
+      expect(icon(tester, 'mic').style, 'outline');
+      expect(icon(tester, 'mic').color, const Color(0xFFFFFFFF), reason: "readable on the dashboard's accent");
+      expect(fillOf(tester, find.byKey(GraineAgentBar.callButtonKey)).color, const Color(0xFF318CE7));
+      expect(fillOf(tester, find.byKey(GraineAgentBar.closeButtonKey)).color, const Color(0x0D000000));
       expect(find.byType(BackdropFilter), findsNothing);
       expect(find.byType(AnimatedContainer), findsNothing);
 
@@ -151,7 +206,8 @@ void main() {
       expect(decorationOf(tester, bar()).color, const Color(0xFF17161A));
     });
 
-    testWidgets("a design draws it — and it re-picks when the device switches", (WidgetTester tester) async {
+    testWidgets('a design draws it element by element — and re-picks when the device switches',
+        (WidgetTester tester) async {
       final t = designs[0].light;
       final call = FakeCall();
       Widget widget() => GraineAgentBar(call: call, showComponents: false, design: designs[0]);
@@ -160,33 +216,70 @@ void main() {
       expect(d.color, hex(t.colors.surface));
       expect(d.borderRadius, BorderRadius.circular(t.shape.radius.xl));
       expect(d.border, Border.all(color: hex(t.colors.border), width: t.shape.borderWidth));
-      final floating = t.elevation.floating!;
-      expect(d.boxShadow, <BoxShadow>[
-        BoxShadow(color: faded(const Color(0xFF000000), floating.opacity), offset: Offset(0, floating.y), blurRadius: floating.blur),
-      ]);
-      expect(styleOf(tester, 'tap to talk').color, hex(t.colors.textMuted));
-      expect(styleOf(tester, 'tap to talk').fontSize, t.font.scale.caption);
+      expect(d.boxShadow, <BoxShadow>[soft(t.elevation.floating!)]);
+      expect(d.padding, EdgeInsets.all(t.shape.borderWidth), reason: 'the outline; 9 more inside it');
+      expect(tester.getSize(bar()).height, 60);
+
+      // 38 round, 10 apart, 9 from the ends.
+      final avatar = tester.getRect(find.byKey(GraineAgentBar.avatarKey));
+      final mic = tester.getRect(find.byKey(GraineAgentBar.callButtonKey));
+      final close = tester.getRect(find.byKey(GraineAgentBar.closeButtonKey));
+      expect(avatar.size, const Size(38, 38));
+      expect(avatar.left - tester.getRect(bar()).left, 9 + t.shape.borderWidth);
+      expect(tester.getRect(bar()).right - close.right, 9 + t.shape.borderWidth);
+      expect(close.left - mic.right, 10);
+      expect(mic.size, const Size(38, 38));
+      expect(avatar.center.dy, closeTo(tester.getRect(bar()).center.dy, 0.01), reason: 'centred vertically');
+
+      final name = styleOf(tester, 'Assistant');
+      expect(name.fontSize, 14);
+      expect(name.fontWeight, FontWeight.w600, reason: 'the body family at weights.strong');
+      expect(name.color, hex(t.colors.text));
+      final status = styleOf(tester, 'Tap to talk');
+      expect(status.color, hex(t.colors.textMuted));
+      expect(status.fontSize, t.font.scale.caption);
+      expect(status.fontWeight, FontWeight.w400);
+
       expect(fillOf(tester, find.byKey(GraineAgentBar.callButtonKey)).color, hex(t.colors.accent));
-      expect(find.byKey(const ValueKey<String>('graine-glyph')), findsOneWidget, reason: "the design's glyph, painted");
+      expect(icon(tester, 'mic').color, hex(t.colors.onAccent));
+      expect(fillOf(tester, find.byKey(GraineAgentBar.closeButtonKey)).color, hex(t.colors.accentSoft));
+      expect(icon(tester, 'close').color, hex(t.colors.textMuted));
+      final glyph = find.byKey(const ValueKey<String>('graine-glyph'));
+      expect(glyph, findsOneWidget, reason: "the design's glyph, painted");
+      expect(tester.getSize(glyph), const Size(18, 18));
 
       await tester.pumpWidget(host(widget(), brightness: Brightness.dark));
       await tester.pump(const Duration(milliseconds: 400));
       d = decorationOf(tester, bar());
       expect(d.color, hex(designs[0].dark.colors.surface));
-      expect(styleOf(tester, 'tap to talk').color, hex(designs[0].dark.colors.textMuted));
+      expect(styleOf(tester, 'Tap to talk').color, hex(designs[0].dark.colors.textMuted));
     });
 
-    testWidgets('during a call: the microphone on the accent, the end button danger', (WidgetTester tester) async {
+    testWidgets('during a call: the microphone on the accent, hang up danger with its icon in white, the meter',
+        (WidgetTester tester) async {
       final t = designs[0].light;
       final call = FakeCall()..connected = true;
       await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: designs[0])));
       await tester.pump(const Duration(milliseconds: 400));
       expect(fillOf(tester, find.byKey(GraineAgentBar.muteButtonKey)).color, hex(t.colors.accent));
+      expect(icon(tester, 'mic').color, hex(t.colors.onAccent));
       expect(fillOf(tester, find.byKey(GraineAgentBar.callButtonKey)).color, hex(t.colors.danger));
-      expect(styleOf(tester, '✕').color, const Color(0xFFFFFFFF));
+      expect(icon(tester, 'end').color, const Color(0xFFFFFFFF));
+      final meter = tester.widget<BarMeter>(find.byKey(GraineAgentBar.meterKey));
+      expect(meter.color, hex(t.colors.accent));
+      expect(meter.durationMs, t.motion.durationMs);
+      expect(tester.getSize(find.byKey(GraineAgentBar.meterKey)), const Size(2.5 * 4 + 2 * 3, 12));
+
+      call
+        ..muted = true
+        ..notifyListeners();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400)); // the fill eases at the design's pace
+      expect(fillOf(tester, find.byKey(GraineAgentBar.muteButtonKey)).color, hex(t.colors.danger));
+      expect(icon(tester, 'micOff').color, const Color(0xFFFFFFFF));
     });
 
-    testWidgets("glass, square corners and a heavy outline; the brand's dark over a light device",
+    testWidgets("glass and a hard offset: translucent over a blur, the solid copy only outside; the brand's dark",
         (WidgetTester tester) async {
       final t = designs[1].dark;
       final call = FakeCall()
@@ -196,8 +289,9 @@ void main() {
       expect(find.descendant(of: bar(), matching: find.byType(BackdropFilter)), findsOneWidget);
       expect(find.descendant(of: find.byKey(GraineAgentBar.captionKey), matching: find.byType(BackdropFilter)),
           findsOneWidget);
-      final outer = decorationOf(tester, bar());
-      expect(outer.boxShadow, isEmpty, reason: 'no floating shadow in this design');
+      final hard = <BoxShadow>[BoxShadow(color: hex(t.colors.text), offset: const Offset(4, 4))];
+      expect(shadowsOn(tester, bar()), hard, reason: 'the solid offset copy, never blurred');
+      expect(shadowsOn(tester, find.byKey(GraineAgentBar.captionKey)), hard);
       final fill = fillOf(tester, bar());
       expect(fill.color, faded(hex(t.colors.surface), t.glass!.surfaceOpacity));
       expect(fill.borderRadius, BorderRadius.zero);
@@ -205,6 +299,135 @@ void main() {
       // The brand shows its logo; with none uploaded, the name's first letter.
       expect(find.text('R'), findsOneWidget);
       expect(find.byType(AnimatedContainer), findsNothing, reason: 'motion: none');
+      expect(tester.widget<BarMeter>(find.byKey(GraineAgentBar.meterKey)).durationMs, 0, reason: 'still');
+      expect(icon(tester, 'mic').style, 'filled', reason: 'the iconStyle knob');
+    });
+
+    testWidgets('neo-brutalism: the solid text-coloured copy under the bar and the caption, offset, never blurred',
+        (WidgetTester tester) async {
+      final neo = preset('neo-brutalism');
+      final t = neo.light;
+      final call = FakeCall()
+        ..connected = true
+        ..captions = const <Caption>[Caption(Role.agent, 'Here are two that fit.')];
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: neo)));
+      final offset = t.elevation.hardOffset!;
+      final d = decorationOf(tester, bar());
+      expect(d.boxShadow, <BoxShadow>[BoxShadow(color: hex(t.colors.text), offset: Offset(offset.x, offset.y))]);
+      expect(d.boxShadow!.single.blurRadius, 0);
+      expect(d.color, hex(t.colors.surface));
+      expect(d.border, Border.all(color: hex(t.colors.border), width: t.shape.borderWidth));
+      expect(d.borderRadius, BorderRadius.circular(t.shape.radius.xl));
+      final caption = decorationOf(tester, find.byKey(GraineAgentBar.captionKey));
+      expect(caption.boxShadow, d.boxShadow);
+      expect(caption.borderRadius, BorderRadius.circular(t.shape.radius.lg));
+      expect(find.byKey(BrandMark.glyphKey), findsOneWidget, reason: "the design's zap, painted");
+    });
+
+    testWidgets('liquid glass: the surface at its opacity over a blur of the glass radius, its shadow only outside',
+        (WidgetTester tester) async {
+      final glass = preset('liquid-glass');
+      final t = glass.light;
+      await tester.pumpWidget(host(GraineAgentBar(call: FakeCall(), showComponents: false, design: glass)));
+      final filter = tester.widget<BackdropFilter>(find.descendant(of: bar(), matching: find.byType(BackdropFilter)));
+      expect(filter.filter, ui.ImageFilter.blur(sigmaX: t.glass!.blur, sigmaY: t.glass!.blur));
+      expect(fillOf(tester, bar()).color, faded(hex(t.colors.surface), t.glass!.surfaceOpacity));
+      expect(shadowsOn(tester, bar()), <BoxShadow>[soft(t.elevation.floating!)]);
+      expect(fillOf(tester, bar()).borderRadius, BorderRadius.circular(t.shape.radius.xl));
+    });
+
+    testWidgets('a shadow painted outside a translucent surface never shows through it', (WidgetTester tester) async {
+      final key = GlobalKey();
+      await tester.pumpWidget(Directionality(
+        textDirection: TextDirection.ltr,
+        child: Center(
+          child: RepaintBoundary(
+            key: key,
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: CustomPaint(
+                painter: OutsideShadowPainter(
+                  shadows: const <BoxShadow>[BoxShadow(color: Color(0xFF000000), offset: Offset(4, 4))],
+                  radius: BorderRadius.zero,
+                ),
+                child: const SizedBox(width: 32, height: 32),
+              ),
+            ),
+          ),
+        ),
+      ));
+      final boundary = key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+      final rgba = (await tester.runAsync(() async {
+        final image = await boundary.toImage();
+        return image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      }))!;
+      int alphaAt(int x, int y) => rgba.getUint8((y * 48 + x) * 4 + 3);
+      expect(alphaAt(8 + 30, 8 + 30), 0, reason: 'inside the surface: nothing');
+      expect(alphaAt(8 + 34, 8 + 34), 255, reason: 'the offset copy, outside it');
+      expect(alphaAt(8 + 34, 8 + 2), 0, reason: 'offset down and right only');
+    });
+
+    testWidgets("the SDK's icons in the design's icon style and stroke — painted, never typed",
+        (WidgetTester tester) async {
+      for (final id in <String>['graine-classic', 'carbon', 'soft-playful', 'warm-earthy']) {
+        final design = preset(id);
+        final t = design.light;
+        final call = FakeCall()..connected = true;
+        await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: design, key: UniqueKey())));
+        for (final name in <String>['mic', 'end']) {
+          final view = icon(tester, name);
+          expect(view.style, t.icons.style, reason: '$id $name');
+          expect(view.stroke, t.icons.stroke, reason: '$id $name');
+          expect(view.size, 18);
+          final painter = tester
+              .widget<CustomPaint>(find.descendant(
+                  of: find.byWidgetPredicate((Widget w) => w is SdkIconView && w.name == name),
+                  matching: find.byType(CustomPaint)))
+              .painter! as SdkIconPainter;
+          expect(painter.treatment, SdkIcons.treatment(t.icons.style, t.icons.stroke), reason: '$id $name');
+        }
+        for (final typed in <String>['🎙', '🔇', '✕', '📞', '↻', '✦']) {
+          expect(find.text(typed), findsNothing, reason: '$id: no emoji or text glyphs');
+        }
+      }
+    });
+
+    testWidgets('a filled icon fills its body, a duotone tints it, an outline leaves it hollow',
+        (WidgetTester tester) async {
+      Future<int> alphaInMic(String style) async {
+        final key = GlobalKey();
+        await tester.pumpWidget(Directionality(
+          textDirection: TextDirection.ltr,
+          child: Center(
+            child: RepaintBoundary(
+              key: key,
+              child: SdkIconView('mic', color: const Color(0xFF000000), size: 48, style: style, stroke: 2),
+            ),
+          ),
+        ));
+        final boundary = key.currentContext!.findRenderObject()! as RenderRepaintBoundary;
+        final rgba = (await tester.runAsync(() async {
+          final image = await boundary.toImage();
+          return image.toByteData(format: ui.ImageByteFormat.rawRgba);
+        }))!;
+        return rgba.getUint8((16 * 48 + 24) * 4 + 3); // (12, 8) in the icon's box: inside the capsule
+      }
+
+      expect(await alphaInMic('filled'), 255);
+      expect(await alphaInMic('duotone'), closeTo(0.28 * 255, 3));
+      expect(await alphaInMic('outline'), 0);
+      expect(await alphaInMic('sharp'), 0);
+    });
+
+    testWidgets('the meter moves at the design pace — and never when the design or the platform says still',
+        (WidgetTester tester) async {
+      final call = FakeCall()..connected = true;
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: designs[2])));
+      expect(tester.widget<BarMeter>(find.byKey(GraineAgentBar.meterKey)).durationMs, designs[2].light.motion.durationMs);
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: designs[2]), still: true));
+      expect(tester.widget<BarMeter>(find.byKey(GraineAgentBar.meterKey)).durationMs, 0);
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: preset('retro-terminal'))));
+      expect(tester.widget<BarMeter>(find.byKey(GraineAgentBar.meterKey)).durationMs, 0, reason: 'durationMs 0 in the design');
     });
 
     testWidgets('motion at the design pace, and never when the platform asks for less', (WidgetTester tester) async {
@@ -218,7 +441,151 @@ void main() {
       expect(find.byType(AnimatedContainer), findsNothing);
     });
 
-    testWidgets('a design font only when the app bundles it', (WidgetTester tester) async {
+    testWidgets('the caption rises into place over the design duration; with no motion it is simply there',
+        (WidgetTester tester) async {
+      final call = FakeCall()..connected = true;
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: designs[2])));
+      call
+        ..captions = const <Caption>[Caption(Role.agent, 'Sure.')]
+        ..notifyListeners();
+      await tester.pump();
+      Opacity rise() => tester.widget<Opacity>(
+          find.ancestor(of: find.byKey(GraineAgentBar.captionKey), matching: find.byType(Opacity)).first);
+      expect(rise().opacity, lessThan(0.2), reason: 'arriving');
+      await tester.pump(Duration(milliseconds: designs[2].light.motion.durationMs));
+      expect(rise().opacity, 1);
+
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: designs[1], key: UniqueKey())));
+      expect(rise().opacity, 1, reason: 'motion: none');
+    });
+
+    testWidgets('the chat window in the design: header, mark, status, chevron, bubbles and composer',
+        (WidgetTester tester) async {
+      final t = designs[0].light;
+      final call = FakeCall()..appearance = const <String, Object?>{'mode': 'both', 'start': 'chat', 'title': 'Asha'};
+      final chat = FakeChat(const <Caption>[Caption(Role.agent, 'Hi! Looking for something?'), Caption(Role.customer, 'Headphones')]);
+      await tester.pumpWidget(host(GraineAgentBar(call: call, chat: chat, showComponents: false, design: designs[0])));
+      await tester.pump(const Duration(seconds: 1));
+      final window = find.descendant(of: find.byKey(GraineAgentBar.chatKey), matching: find.byType(Container)).first;
+      final frame = decorationOf(tester, window);
+      expect(frame.color, hex(t.colors.background));
+      expect(frame.borderRadius, BorderRadius.circular(t.shape.radius.xl));
+      expect(frame.border, Border.all(color: hex(t.colors.border), width: t.shape.borderWidth));
+      expect(frame.boxShadow, <BoxShadow>[soft(t.elevation.floating!)]);
+
+      final header = find.byKey(ChatWindow.headerKey);
+      expect(tester.getSize(header).height + t.shape.borderWidth, 50);
+      expect(fillOf(tester, header).color, hex(t.colors.surface));
+      final title = tester.widget<Text>(find.descendant(of: header, matching: find.text('Asha'))).style!;
+      expect(title.fontSize, 16, reason: 'min(font.scale.title, 16)');
+      expect(title.fontWeight, FontWeight.w600, reason: 'the heading family at weights.title');
+      final dot = find.descendant(of: header, matching: find.byWidgetPredicate((Widget w) =>
+          w is Container && w.decoration is BoxDecoration && (w.decoration! as BoxDecoration).shape == BoxShape.circle));
+      expect(tester.getSize(dot), const Size(6, 6));
+      expect(decorationOf(tester, dot).color, hex(t.colors.success));
+      final status = tester.widgetList<Text>(find.descendant(of: header, matching: find.text('Online'))).single.style!;
+      expect(status.color, hex(t.colors.textMuted));
+      expect(status.fontSize, t.font.scale.caption);
+      expect(icon(tester, 'chevron').turned, isTrue, reason: 'drawn pointing up; the header turns it down');
+      expect(icon(tester, 'chevron').color, hex(t.colors.textMuted));
+      final glyph = find.descendant(of: header, matching: find.byKey(BrandMark.glyphKey));
+      expect(tester.getSize(glyph), const Size(14, 14));
+      final mark = find.ancestor(of: glyph, matching: find.byType(Container)).first;
+      expect(tester.getSize(mark), const Size(30, 30));
+      expect(decorationOf(tester, mark).color, hex(t.colors.accent));
+      expect(decorationOf(tester, mark).borderRadius, BorderRadius.circular(15), reason: 'the launcher shape: a circle');
+
+      final agent = decorationOf(tester, find.byKey(ChatWindow.messageKey(0)));
+      final customer = decorationOf(tester, find.byKey(ChatWindow.messageKey(1)));
+      expect(agent.color, hex(t.colors.agentBubble));
+      expect(customer.color, hex(t.colors.userBubble));
+      expect(customer.borderRadius, BorderRadius.only(
+        topLeft: Radius.circular(t.shape.radius.lg),
+        topRight: Radius.circular(t.shape.radius.lg),
+        bottomLeft: Radius.circular(t.shape.radius.lg),
+        bottomRight: Radius.circular(t.shape.radius.sm),
+      ));
+      expect(styleOf(tester, 'Headphones').color, hex(t.colors.userBubbleText));
+
+      final field = find.byKey(ChatWindow.composerKey);
+      expect(tester.getSize(field).height, 40);
+      expect(decorationOf(tester, field).color, hex(t.colors.surfaceRaised));
+      expect(decorationOf(tester, field).borderRadius, BorderRadius.circular(t.shape.radius.xl));
+      expect(find.text('Message…'), findsOneWidget);
+      expect(styleOf(tester, 'Message…').color, hex(t.colors.textMuted));
+      final send = find.byKey(ChatWindow.sendKey);
+      expect(tester.getSize(send), const Size(40, 40));
+      expect(fillOf(tester, send).color, hex(t.colors.accent));
+      expect(icon(tester, 'send').color, hex(t.colors.onAccent));
+      expect(tester.getSize(find.ancestor(of: field, matching: find.byType(Container)).first).height, 58,
+          reason: 'the composer row');
+      expect(find.text('Online'), findsNWidgets(2), reason: "the chat's status on the bar too");
+    });
+
+    testWidgets("the design's typeface, fetched by the SDK and drawn as its own weight; never fetched twice",
+        (WidgetTester tester) async {
+      final neo = preset('neo-brutalism');
+      final want = (caseOf('neo-brutalism')['fontFaces']! as List<Object?>).cast<Map<String, Object?>>();
+      final requests = <String>[];
+      final registered = <String>[];
+      addTearDown(GraineInApp.resetForTesting);
+      GraineInApp.forTesting(
+        const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'),
+        install: true,
+        httpClient: MockClient((http.Request req) async {
+          requests.add(req.url.toString());
+          return http.Response.bytes(ttf, 200);
+        }),
+        fontRegistrar: (String name, Uint8List bytes) async => registered.add(name),
+      );
+      final call = FakeCall();
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: neo)));
+      final before = styleOf(tester, 'Assistant');
+      expect(before.fontFamily, isNull, reason: 'until it lands: the platform font');
+      expect(before.fontWeight, FontWeight.w700, reason: 'at the weight the design asked for');
+      await tester.pump();
+      await tester.pump();
+
+      expect(requests.toSet(), <String>{for (final f in want) f['url']! as String});
+      expect(requests, hasLength(want.length));
+      expect(registered.toSet(), <String>{for (final f in want) f['name']! as String});
+      final name = styleOf(tester, 'Assistant');
+      expect(name.fontFamily, 'Graine-DMSans-700');
+      expect(name.fontWeight, FontWeight.normal, reason: 'a loaded face IS its weight');
+      final status = styleOf(tester, 'Tap to talk');
+      expect(status.fontFamily, 'Graine-DMSans-500');
+      expect(status.fontWeight, FontWeight.normal);
+      expect(GraineInApp.instance.fontFaces.value,
+          <String, String>{'DM Sans|500': 'Graine-DMSans-500', 'DM Sans|700': 'Graine-DMSans-700'});
+
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: neo, key: UniqueKey())));
+      await GraineInApp.instance.loadDesignFonts(neo);
+      await tester.pump();
+      expect(requests, hasLength(want.length), reason: 'each face is fetched once');
+    });
+
+    testWidgets('a face that is not a font, or never arrives, leaves the text in the platform font — silently',
+        (WidgetTester tester) async {
+      final neo = preset('neo-brutalism');
+      final registered = <String>[];
+      addTearDown(GraineInApp.resetForTesting);
+      GraineInApp.forTesting(
+        const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'),
+        install: true,
+        httpClient: MockClient((http.Request req) async =>
+            req.url.queryParameters['w'] == '700' ? http.Response('<html>oops</html>', 200) : http.Response('', 404)),
+        fontRegistrar: (String name, Uint8List bytes) async => registered.add(name),
+      );
+      await tester.pumpWidget(host(GraineAgentBar(call: FakeCall(), showComponents: false, design: neo)));
+      await tester.pump();
+      await tester.pump();
+      expect(tester.takeException(), isNull);
+      expect(registered, isEmpty);
+      expect(styleOf(tester, 'Assistant').fontFamily, isNull);
+      expect(styleOf(tester, 'Assistant').fontWeight, FontWeight.w700);
+    });
+
+    testWidgets("the app's own copy of a family wins, and is never fetched", (WidgetTester tester) async {
       final raw = <String, Object?>{
         ...classicRaw,
         'light': <String, Object?>{
@@ -232,18 +599,30 @@ void main() {
       };
       final design = ResolvedDesign.fromJson(raw)!;
       final call = FakeCall();
+      final requests = <String>[];
+      final client = MockClient((http.Request req) async {
+        requests.add(req.url.toString());
+        return http.Response('', 404);
+      });
       addTearDown(GraineInApp.resetForTesting);
 
-      GraineInApp.forTesting(const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'), install: true);
+      GraineInApp.forTesting(const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'),
+          install: true, httpClient: client);
       await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: design)));
-      expect(styleOf(tester, 'tap to talk').fontFamily, isNull, reason: 'not bundled: the platform font, silently');
+      await tester.pump();
+      expect(styleOf(tester, 'Tap to talk').fontFamily, isNull, reason: 'not bundled and not arrived: the platform font');
+      expect(requests, contains('$base/api/embed/font?f=Inter&w=400&v=1'), reason: 'so the SDK fetches it');
 
       GraineInApp.resetForTesting();
+      requests.clear();
       GraineInApp.forTesting(const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1', fonts: <String>['inter']),
-          install: true);
+          install: true, httpClient: client);
       await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: design, key: UniqueKey())));
-      expect(styleOf(tester, 'tap to talk').fontFamily, 'inter');
+      await tester.pump();
+      expect(styleOf(tester, 'Tap to talk').fontFamily, 'inter');
+      expect(styleOf(tester, 'Tap to talk').fontWeight, FontWeight.w400, reason: "the app's family, at the weight");
       expect(styleOf(tester, 'Assistant').fontFamily, 'inter');
+      expect(requests, isEmpty, reason: "the app's own file wins; nothing to fetch");
     });
   });
 
@@ -489,19 +868,35 @@ void main() {
           await tester.pump(const Duration(seconds: 1));
           expect(tester.takeException(), isNull, reason: why);
 
-          // The bar: surface (translucent with glass), radius.xl, the floating shadow or none.
+          // The bar: 60 high on surface (translucent with glass), radius.xl,
+          // the floating shadow — or the solid offset — or none.
           final bar = fillOf(tester, find.byKey(GraineAgentBar.barKey));
           final surface = hex(t.colors.surface);
           expect(bar.color, t.glass == null ? surface : faded(surface, t.glass!.surfaceOpacity), reason: why);
           expect(bar.borderRadius, BorderRadius.circular(t.shape.radius.xl), reason: why);
+          expect(tester.getSize(find.byKey(GraineAgentBar.barKey)).height, 60, reason: why);
           expect(find.descendant(of: find.byKey(GraineAgentBar.barKey), matching: find.byType(BackdropFilter)),
               t.glass == null ? findsNothing : findsOneWidget,
               reason: why);
-          expect(decorationOf(tester, find.byKey(GraineAgentBar.barKey)).boxShadow,
-              hasLength(t.elevation.floating == null ? 0 : 1),
+          final hard = t.elevation.hardOffset;
+          expect(
+              shadowsOn(tester, find.byKey(GraineAgentBar.barKey)),
+              hard != null
+                  ? <BoxShadow>[BoxShadow(color: hex(t.colors.text), offset: Offset(hard.x, hard.y))]
+                  : <BoxShadow>[if (t.elevation.floating != null) soft(t.elevation.floating!)],
               reason: why);
-          expect(styleOf(tester, 'listening').color, hex(t.colors.textMuted), reason: why);
+          // The customer spoke last: the agent is working out its answer.
+          expect(styleOf(tester, 'Thinking…').color, hex(t.colors.textMuted), reason: why);
+          expect(
+              tester
+                  .widget<Text>(find.descendant(of: find.byKey(GraineAgentBar.barKey), matching: find.text('Assistant')))
+                  .style!
+                  .fontSize,
+              14,
+              reason: why);
           expect(fillOf(tester, find.byKey(GraineAgentBar.callButtonKey)).color, hex(t.colors.danger), reason: why);
+          expect(icon(tester, 'mic').style, t.icons.style, reason: why);
+          expect(icon(tester, 'mic').stroke, t.icons.stroke, reason: why);
 
           // The launcher: the accent, its shape's corners, its glyph painted (or the logo's stand-in).
           final launcher = find.byKey(GraineLauncher.launcherKey);
@@ -515,7 +910,6 @@ void main() {
           } else {
             expect(tester.getSize(launcher).width, 56, reason: why);
           }
-          final hard = t.elevation.hardOffset;
           if (hard != null) {
             expect(box.boxShadow, <BoxShadow>[BoxShadow(color: hex(t.colors.text), offset: Offset(hard.x, hard.y))],
                 reason: why);
@@ -555,6 +949,61 @@ void main() {
 
           await tester.pumpWidget(const SizedBox());
           comps.dispose();
+        }
+      }
+    });
+  });
+
+  group('every design on a small phone', () {
+    testWidgets('the bar, the caption and the chat window fit 320 points in every state, light and dark',
+        (WidgetTester tester) async {
+      for (final c in all) {
+        final design = ResolvedDesign.fromJson(c['design'])!;
+        final name = (c['config']! as Map<String, Object?>)['preset'];
+        for (final device in <Brightness>[Brightness.light, Brightness.dark]) {
+          final call = FakeCall()
+            ..appearance = const <String, Object?>{
+              'mode': 'both',
+              'title': 'Priya from Northwind Home Loans',
+              'loader': <String, Object?>{
+                'text': <String, Object?>{'connecting': 'Connecting you to a specialist now'},
+              },
+            };
+          final chat = FakeChat(const <Caption>[
+            Caption(Role.agent, 'Hi! I can compare the two plans for you, side by side, with the fees.'),
+            Caption(Role.customer, 'Yes please, and the prepayment charges too'),
+          ]);
+          final states = <String, void Function()>{
+            'idle': () {},
+            'connecting': () => call.connecting = true,
+            'on a call': () {
+              call
+                ..connecting = false
+                ..connected = true
+                ..captions = const <Caption>[
+                  Caption(Role.customer, 'Can you tell me what the prepayment charges are on the second plan?'),
+                ];
+            },
+          };
+          for (final state in states.entries) {
+            state.value();
+            await tester.pumpWidget(MediaQuery(
+              data: MediaQueryData(size: const Size(320, 640), platformBrightness: device),
+              child: Directionality(
+                textDirection: TextDirection.ltr,
+                child: Stack(children: <Widget>[
+                  GraineAgentBar(call: call, chat: chat, showComponents: false, design: design, key: UniqueKey()),
+                ]),
+              ),
+            ));
+            await tester.pump(const Duration(seconds: 1));
+            expect(tester.takeException(), isNull, reason: '$name, ${device.name}, ${state.key}');
+          }
+          // And the chat.
+          await tester.tap(find.byKey(GraineAgentBar.switchButtonKey));
+          await tester.pump(const Duration(seconds: 1));
+          expect(find.byKey(GraineAgentBar.chatKey), findsOneWidget);
+          expect(tester.takeException(), isNull, reason: '$name, ${device.name}, in the chat');
         }
       }
     });

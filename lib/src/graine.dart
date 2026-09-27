@@ -10,12 +10,14 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show Directory;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 
 import 'core/core.dart';
+import 'fonts.dart';
 
 part 'voice.dart';
 part 'components.dart';
@@ -80,7 +82,8 @@ class GraineException implements Exception {
 ///
 /// One instance per app. Every method is main-isolate only.
 class GraineInApp with WidgetsBindingObserver {
-  GraineInApp._(this.config, {http.Client? httpClient, int Function()? clock})
+  GraineInApp._(this.config,
+      {http.Client? httpClient, int Function()? clock, Directory? fontCacheDir, FontRegistrar? fontRegistrar})
       : _http = httpClient ?? http.Client(),
         _clock = clock ?? _wallClock,
         _variables = VariableStore(config.variables),
@@ -88,6 +91,7 @@ class GraineInApp with WidgetsBindingObserver {
         _friction = FrictionDetector(
             rules: Friction.resolve(<FrictionConfig?>[config.friction]), gateOnCall: true) {
     _screenSince = _clock();
+    _fonts = DesignFontLoader(client: _http, cacheDir: fontCacheDir, register: fontRegistrar, debug: config.debug);
   }
 
   static int _wallClock() => DateTime.now().millisecondsSinceEpoch;
@@ -100,7 +104,7 @@ class GraineInApp with WidgetsBindingObserver {
     final existing = _instance;
     if (existing != null) return existing;
     WidgetsFlutterBinding.ensureInitialized();
-    final g = GraineInApp._(config);
+    final g = GraineInApp._(config, fontCacheDir: defaultFontCacheDir());
     _instance = g;
     WidgetsBinding.instance.addObserver(g);
     g._observing = true;
@@ -120,10 +124,18 @@ class GraineInApp with WidgetsBindingObserver {
 
   /// An instance for tests: an injected HTTP client and clock, no lifecycle
   /// observer, and installed as [instance] only when [install] is true.
+  /// Design faces go through [httpClient] too, are kept on disk only in
+  /// [fontCacheDir] (none by default), and are registered by [fontRegistrar]
+  /// (default: Flutter's FontLoader).
   @visibleForTesting
   static GraineInApp forTesting(GraineConfig config,
-      {http.Client? httpClient, int Function()? clock, bool install = false}) {
-    final g = GraineInApp._(config, httpClient: httpClient, clock: clock);
+      {http.Client? httpClient,
+      int Function()? clock,
+      bool install = false,
+      Directory? fontCacheDir,
+      Future<void> Function(String name, Uint8List bytes)? fontRegistrar}) {
+    final g = GraineInApp._(config,
+        httpClient: httpClient, clock: clock, fontCacheDir: fontCacheDir, fontRegistrar: fontRegistrar);
     if (install) _instance = g;
     return g;
   }
@@ -399,6 +411,9 @@ class GraineInApp with WidgetsBindingObserver {
     return _sessionLoad ??= _fetchSession().then<SessionConfig?>((SessionConfig s) {
       _session.value = s;
       _pickTokens();
+      // The brand's typeface, fetched now — both schemes — so it is drawn
+      // from the first frame it can be, and a switch to dark never waits.
+      loadDesignFonts(s.design);
       _variables.setDashboardDefaults(s.variables);
       _friction.configure(
           Friction.resolve(<FrictionConfig?>[FrictionConfig.fromJson(s.friction), _appFriction]));
@@ -462,6 +477,26 @@ class GraineInApp with WidgetsBindingObserver {
   /// The device switched between light and dark.
   @override
   void didChangePlatformBrightness() => _pickTokens();
+
+  late final DesignFontLoader _fonts;
+
+  /// THE DESIGN'S TYPEFACES THE SDK HAS LOADED — `family|weight` (the
+  /// design's family, the weight it really has) → the family name the face
+  /// is registered under, such as `"DM Sans|700"` → `"Graine-DMSans-700"`.
+  ///
+  /// The SDK fetches the faces the session's design draws with by itself
+  /// (contract/DESIGN.md, "Fonts") and redraws its own surfaces as each one
+  /// lands. For a host drawing its own UI in the brand's typeface: a loaded
+  /// face IS its weight, so set `fontFamily` to it with `FontWeight.normal`.
+  /// Empty until one loads — and for "system", which is never fetched.
+  ValueListenable<Map<String, String>> get fontFaces => _fonts.loaded;
+
+  /// Fetch and register the faces [design] draws with. The SDK does this for
+  /// the session's design itself; call it for a design you hand a widget
+  /// directly. Families listed in [GraineConfig.fonts] are the app's own and
+  /// are never fetched. Safe to call again: each face is fetched once.
+  Future<void> loadDesignFonts(ResolvedDesign? design) =>
+      _fonts.load(design, origin: config.baseUrl, bundled: config.fonts);
 
   void _pickTokens() {
     final d = design;

@@ -22,6 +22,7 @@ class GraineLoaderView extends StatefulWidget {
     this.size,
     this.label,
     this.labelColor = const Color(0xFF5F6672),
+    this.labelStyle,
     this.stacked = false,
     this.logoUrl,
   });
@@ -39,6 +40,10 @@ class GraineLoaderView extends StatefulWidget {
   /// The words for this moment; null for the mark alone.
   final String? label;
   final Color labelColor;
+
+  /// The words' type, whole — the voice bar sets them in the design's face.
+  /// Null: [labelColor], semibold, sized to the mark.
+  final TextStyle? labelStyle;
 
   /// The label under the mark rather than beside it.
   final bool stacked;
@@ -118,21 +123,27 @@ class _GraineLoaderViewState extends State<GraineLoaderView> with SingleTickerPr
             mark,
             if (label != null && label.isNotEmpty) ...<Widget>[
               SizedBox(width: widget.stacked ? 0 : 10, height: widget.stacked ? 8 : 0),
-              Text(
-                label,
-                style: TextStyle(
-                  color: widget.labelColor,
-                  fontSize: math.max(12, (px * 0.65).roundToDouble()),
-                  fontWeight: FontWeight.w600,
-                  decoration: TextDecoration.none,
-                ),
-              ),
+              if (widget.stacked)
+                Text(label, style: _labelStyle(px))
+              else
+                // Beside the mark on a narrow line (the bar's status), long
+                // words end in an ellipsis rather than overflowing it.
+                Flexible(child: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: _labelStyle(px))),
             ],
           ],
         ),
       ),
     );
   }
+
+  TextStyle _labelStyle(double px) =>
+      widget.labelStyle ??
+      TextStyle(
+        color: widget.labelColor,
+        fontSize: math.max(12, (px * 0.65).roundToDouble()),
+        fontWeight: FontWeight.w600,
+        decoration: TextDecoration.none,
+      );
 
   Widget _painted(String kind, double px) {
     final w = _width(kind, px);

@@ -228,11 +228,8 @@ class _Skin {
     final t = tokens;
     if (t == null) return textStyle(text, size, weight: weight);
     final f = t.font;
-    return textStyle(text, f.scale.title,
-        weight: f.weights.title,
-        height: f.lineHeight.title,
-        letterSpacing: f.letterSpacing.title * f.scale.title,
-        family: familyOf(f.heading));
+    return designText(text, f.scale.title, f.heading, f.weights.title,
+        height: f.lineHeight.title, letterSpacing: f.letterSpacing.title * f.scale.title);
   }
 
   /// Meta — prompts, notes: `textMuted` at the caption size.
@@ -247,14 +244,16 @@ class _Skin {
     final t = tokens;
     if (t == null) return textStyle(text, size, height: height);
     final f = t.font;
-    return textStyle(text, f.scale.body,
-        weight: f.weights.body, height: f.lineHeight.body, letterSpacing: f.letterSpacing.body * f.scale.body);
+    return designText(text, f.scale.body, f.body, f.weights.body,
+        height: f.lineHeight.body, letterSpacing: f.letterSpacing.body * f.scale.body);
   }
 
-  /// The body family every other line inherits; null is the platform's font.
+  /// The body family every other line inherits — the face the SDK loaded at
+  /// the body weight, as the React Native cards set it; null is the
+  /// platform's font.
   String? get family {
     final t = tokens;
-    return t == null ? null : familyOf(t.font.body);
+    return t == null ? null : faceOf(t.font.body, t.font.weights.body).family;
   }
 }
 
@@ -272,9 +271,10 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
   Widget build(BuildContext context) {
     final c = _components;
     if (c == null) return const SizedBox.shrink();
-    final session = GraineInApp.maybeInstance?.sessionListenable;
+    // A design handed over directly has its typeface fetched too (each face once).
+    if (widget.design != null) GraineInApp.maybeInstance?.loadDesignFonts(widget.design);
     return ListenableBuilder(
-      listenable: session == null ? c : Listenable.merge(<Listenable>[c, session]),
+      listenable: surfaceListenable(<Listenable?>[c]),
       builder: (BuildContext context, Widget? _) => _draw(context, c),
     );
   }

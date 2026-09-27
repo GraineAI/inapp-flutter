@@ -1,4 +1,7 @@
+import 'dart:math' as math;
+
 import 'config.dart';
+import 'js.dart';
 import 'protocol.dart';
 
 /// One caption line: who, what, and whether it is still being said.
@@ -55,6 +58,9 @@ abstract final class Captions {
 /// THE BAR'S ONE WORD, in the Android SDK's order — the network gets named,
 /// or the agent takes the blame for it. A customer whose agent goes quiet on
 /// a train reads "listening" and concludes the agent is broken.
+///
+/// The 0.2.0 words, kept for hosts that print them. The agent bar now says
+/// [voiceBarStatus] — the contract's words, in the contract's order.
 String agentBarStatus({
   required GraineConnectivity connectivity,
   required bool? online,
@@ -78,4 +84,201 @@ String agentBarStatus({
   if (connected && agentSpeaking) return 'speaking';
   if (connected) return 'listening';
   return 'tap to talk';
+}
+
+// ── the voice bar (contract/DESIGN.md, "Voice bar") ─────────────────────────
+
+/// Where the call stands, in one word — the React Native launcher's
+/// `GrainePhase`, derived from the same state by [callPhase].
+enum CallPhase {
+  /// No call; ready to start one.
+  idle,
+
+  /// The page loading, or a call being placed.
+  connecting,
+
+  /// The page failed and is being reloaded, or the network dropped the call.
+  reconnecting,
+
+  /// The customer finished a sentence and the agent has not answered yet.
+  thinking,
+
+  /// The agent is talking.
+  speaking,
+
+  /// The agent is waiting for the customer.
+  listening,
+}
+
+/// THE CALL'S PHASE, exactly as the React Native launcher derives it.
+///
+/// Thinking is the gap between the customer's final line and the agent's
+/// first: the last thing said is the customer's, settled. Read from the
+/// transcript rather than kept as a flag, because the transcript is the
+/// truth about who last spoke — a flag set by one message and cleared by
+/// another is how a bar ends up "thinking" through the agent's whole answer.
+CallPhase callPhase({
+  required bool reconnecting,
+  required GraineConnectivity connectivity,
+  required bool connecting,
+  required bool ready,
+  required bool connected,
+  required Caption? caption,
+  bool agentSpeaking = false,
+}) {
+  if (reconnecting || connectivity == GraineConnectivity.failed || connectivity == GraineConnectivity.retrying) {
+    return CallPhase.reconnecting;
+  }
+  if (connecting || !ready) return CallPhase.connecting;
+  if (!connected) return CallPhase.idle;
+  if (agentSpeaking || (caption != null && caption.role == Role.agent && caption.live)) return CallPhase.speaking;
+  if (caption != null && caption.role == Role.customer && !caption.live) return CallPhase.thinking;
+  return CallPhase.listening;
+}
+
+/// What the voice bar's status line says ([voiceBarStatus]).
+class BarStatus {
+  const BarStatus(this.text, {this.waiting, this.meter = false});
+
+  /// The words, in sentence case, exactly as the contract lists them.
+  final String text;
+
+  /// A loader moment — `connecting`, `reconnecting` or `thinking` — to draw
+  /// instead of [text]: the dashboard's loader, with its words for that
+  /// moment. Null for plain words.
+  final String? waiting;
+
+  /// Precede the words with the four-bar meter ([VoiceMeter]).
+  final bool meter;
+
+  @override
+  bool operator ==(Object other) =>
+      other is BarStatus && other.text == text && other.waiting == waiting && other.meter == meter;
+
+  @override
+  int get hashCode => Object.hash(text, waiting, meter);
+
+  @override
+  String toString() => 'BarStatus("$text"${waiting != null ? ', loader: $waiting' : ''}${meter ? ', meter' : ''})';
+}
+
+/// THE VOICE BAR'S STATUS LINE — contract/DESIGN.md, "Status words": the
+/// first that matches wins.
+///
+/// The network gets named before the agent takes the blame for it: a customer
+/// whose agent goes quiet on a train reads "Listening" and concludes the agent
+/// is broken. In the chat none of the call's words are true, so the chat has
+/// its own two.
+BarStatus voiceBarStatus({
+  bool error = false,
+  bool inChat = false,
+  bool chatOnline = false,
+  required bool? online,
+  required bool reconnecting,
+  required GraineConnectivity connectivity,
+  required bool micDenied,
+  required bool ready,
+  required bool connecting,
+  required bool muted,
+  required bool connected,
+  bool thinking = false,
+  required bool speaking,
+  required ConnectionQuality quality,
+}) {
+  if (error) return const BarStatus('Unavailable');
+  if (inChat) return chatOnline ? const BarStatus('Online') : const BarStatus('Connecting…', waiting: 'connecting');
+  if (online == false) return const BarStatus('No connection');
+  if (reconnecting || connectivity == GraineConnectivity.retrying) {
+    return const BarStatus('Reconnecting…', waiting: 'reconnecting');
+  }
+  if (micDenied) return const BarStatus('Needs microphone');
+  if (connectivity == GraineConnectivity.failed) return const BarStatus('Couldn’t load · tap to retry');
+  if (!ready || connecting) return const BarStatus('Connecting…', waiting: 'connecting');
+  if (muted) return const BarStatus('Muted');
+  if (connected && thinking) return const BarStatus('Thinking…', waiting: 'thinking');
+  if (connected && speaking) return const BarStatus('Speaking', meter: true);
+  if (connected && quality == ConnectionQuality.poor) return const BarStatus('Weak connection');
+  if (connected) return const BarStatus('Listening', meter: true);
+  return const BarStatus('Tap to talk');
+}
+
+/// THE METER — four bars beside "Listening" and "Speaking" that move at the
+/// design's own pace, so the motion knob is visible on the one surface a
+/// customer watches. The Garage's `dg-eq`, as numbers.
+abstract final class VoiceMeter {
+  /// Each bar's height, as a fraction of [height].
+  static const List<double> heights = <double>[0.55, 1, 0.7, 0.4];
+  static const double height = 12;
+  static const double barWidth = 2.5;
+  static const double gap = 2;
+
+  /// The low point of the swing: a bar scales from its bottom between this and 1.
+  static const double low = 0.35;
+
+  /// Bar i starts i × this late.
+  static const int staggerMs = 90;
+
+  /// One leg — low to full, or back: `max(420, durationMs × 3.2)` ms.
+  static double legMs(int durationMs) => math.max(420, durationMs * 3.2);
+
+  /// Still at full height: no motion in the design (or the OS asked for less).
+  static bool still(int durationMs) => durationMs <= 0;
+
+  /// Bar [bar]'s vertical scale [elapsedMs] after the meter appeared. Before
+  /// its stagger a bar waits at [low]; then it rises for one leg and falls
+  /// for the next, forever. [ease] shapes each leg (the widget passes
+  /// ease-in-out); still, every bar is 1.
+  static double scale(int bar, double elapsedMs, int durationMs, [double Function(double t)? ease]) {
+    if (still(durationMs)) return 1;
+    final t = elapsedMs - bar * staggerMs;
+    if (t <= 0) return low;
+    final leg = legMs(durationMs);
+    final phase = t % (2 * leg);
+    final rising = phase < leg;
+    final raw = (rising ? phase : phase - leg) / leg;
+    final f = ease == null ? raw : ease(raw);
+    return rising ? low + (1 - low) * f : 1 - (1 - low) * f;
+  }
+}
+
+/// The two ways a customer can be with the agent.
+enum AgentSurface { voice, chat }
+
+/// Which surfaces the dashboard allows, which to open, and whether to offer
+/// a switch between them.
+class SurfacePolicy {
+  const SurfacePolicy({required this.allowed, required this.start, required this.canSwitch});
+
+  /// In the order to offer them.
+  final List<AgentSurface> allowed;
+  final AgentSurface start;
+
+  /// Draw a switch at all: false when the agent is one or the other.
+  final bool canSwitch;
+}
+
+/// THE CALL OR THE CHAT — the React Native SDK's resolveSurface. The
+/// dashboard's `mode` says which exist ("voice", "chat", else both) and its
+/// `start` which opens first; a preference ([prefer] — the host's, or the
+/// customer's last switch) wins when the dashboard allows it, and is clamped
+/// when it does not: the brand's setting is not something an app can talk
+/// its way past.
+abstract final class Surfaces {
+  static SurfacePolicy resolve(Map<String, Object?>? appearance, [AgentSurface? prefer]) {
+    final rawMode = appearance?['mode'];
+    final mode = (rawMode == null ? 'both' : Js.str(rawMode)).toLowerCase();
+    final allowed = mode == 'voice'
+        ? const <AgentSurface>[AgentSurface.voice]
+        : mode == 'chat'
+            ? const <AgentSurface>[AgentSurface.chat]
+            : const <AgentSurface>[AgentSurface.voice, AgentSurface.chat];
+    final configured = Js.strOrEmpty(appearance?['start']).toLowerCase();
+    AgentSurface? named;
+    if (configured == 'voice') named = AgentSurface.voice;
+    if (configured == 'chat') named = AgentSurface.chat;
+    final start = (prefer != null && allowed.contains(prefer))
+        ? prefer
+        : (named != null && allowed.contains(named) ? named : allowed.first);
+    return SurfacePolicy(allowed: allowed, start: start, canSwitch: allowed.length > 1);
+  }
 }

@@ -91,13 +91,14 @@ class GraineConfig {
   /// reports `graine:mic-denied` when the microphone is refused.
   final Future<bool> Function()? requestMicrophone;
 
-  /// THE FONT FAMILIES THIS APP BUNDLES, by family name as its pubspec
-  /// declares them (`fonts: - family: Inter`).
+  /// THE FONT FAMILIES THIS APP BUNDLES ITSELF, by family name as its
+  /// pubspec declares them (`fonts: - family: Inter`).
   ///
-  /// The brand may choose a font for the agent in the dashboard. A phone has
-  /// no way to fetch it, so the SDK draws in it only when the app says it
-  /// ships it — listed here — and in the platform's own font otherwise,
-  /// silently. Empty (the default): the platform's font everywhere.
+  /// The brand chooses the agent's typeface in the dashboard, and the SDK
+  /// fetches and registers it by itself — nothing here is needed for that. A
+  /// family listed here is the app's own copy: it wins over the download and
+  /// is never fetched. Empty (the default): the SDK fetches every family the
+  /// design draws with, and until one arrives draws the platform's font.
   final List<String> fonts;
 }
 
