@@ -9,6 +9,7 @@ import 'core/core.dart';
 import 'glyph.dart';
 import 'sdk_icon.dart';
 import 'style.dart';
+import 'window_chrome.dart';
 
 /// Everything the chat window draws with, resolved once: the design's tokens
 /// (contract/DESIGN.md, "Chat window"), or — with no design — the component
@@ -46,6 +47,7 @@ class ChatLook {
     required this.bodyStyle,
     required this.inputStyle,
     this.glass,
+    this.chrome,
   });
 
   factory ChatLook.design(ThemeTokens t, {Color? accent}) {
@@ -93,6 +95,7 @@ class ChatLook {
           height: f.lineHeight.body, letterSpacing: em(f.scale.body, f.letterSpacing.body)),
       inputStyle: designText(text, f.scale.body - 1, f.body, f.weights.body),
       glass: t.glass,
+      chrome: ChromeLook.of(t),
     );
   }
 
@@ -186,6 +189,10 @@ class ChatLook {
   final TextStyle inputStyle;
   final ThemeGlass? glass;
 
+  /// The design opens the chat as a desktop window: its title bar replaces
+  /// the header. Null — a design without window chrome, or none — keeps the header.
+  final ChromeLook? chrome;
+
   Color get onAccent => tokenColor(onAccentHex);
 }
 
@@ -194,7 +201,10 @@ class ChatLook {
 /// (or the hard offset); a 50-point header on `surface` — the launcher mark,
 /// the heading in the heading face, "Online" after a `success` dot, and a
 /// chevron back to the call; the messages as bubbles in the design's style;
-/// and a 58-point composer.
+/// and a 58-point composer. A design with window chrome replaces the header
+/// with a 32-point title bar ("Window chrome"): the traffic lights, the
+/// heading lower case in the platform's monospace after the online dot, and
+/// the chevron at its right end — no launcher mark.
 class ChatWindow extends StatefulWidget {
   const ChatWindow({
     super.key,
@@ -269,6 +279,7 @@ class _ChatWindowState extends State<ChatWindow> {
     final l = widget.look;
     final bw = l.borderWidth;
     final outline = bw > 0 ? Border.all(color: l.border, width: bw) : null;
+    final chrome = l.chrome;
     return Container(
       decoration: BoxDecoration(
         color: l.background,
@@ -282,7 +293,7 @@ class _ChatWindowState extends State<ChatWindow> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            _header(l),
+            if (chrome != null) _titleBar(l, chrome) else _header(l),
             _messages(l),
             _composer(l),
           ],
@@ -290,6 +301,27 @@ class _ChatWindowState extends State<ChatWindow> {
       ),
     );
   }
+
+  /// Window chrome: the title bar in the header's place — the heading, lower
+  /// case, after the online dot; the chevron back to the call (or closing a
+  /// chat-only agent) at the right end; no launcher mark.
+  Widget _titleBar(ChatLook l, ChromeLook chrome) => WindowTitleBar(
+        look: chrome,
+        surface: ChromeSurface.chat,
+        title: WindowChrome.title(ChromeSurface.chat, heading: widget.heading),
+        online: widget.online,
+        topRadius: WindowChrome.innerRadius(l.xl, l.borderWidth),
+        trailing: Tap(
+          key: ChatWindow.collapseKey,
+          label: 'Collapse',
+          onTap: widget.onCollapse,
+          child: Padding(
+            padding: const EdgeInsets.all((WindowChrome.chevronBox - WindowChrome.chevronIcon) / 2),
+            child: SdkIconView('chevron',
+                color: l.muted, size: WindowChrome.chevronIcon, style: l.iconStyle, stroke: l.iconStroke, turned: true),
+          ),
+        ),
+      );
 
   Widget _header(ChatLook l) {
     final line = l.borderWidth > 0 ? l.borderWidth : 0.0;

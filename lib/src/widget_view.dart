@@ -7,6 +7,7 @@ import 'core/core.dart';
 import 'graine.dart';
 import 'loader_view.dart';
 import 'style.dart';
+import 'window_chrome.dart';
 
 /// Single-colour overrides for [GraineWidgetView]. Null keeps the dashboard's.
 @immutable
@@ -55,7 +56,12 @@ class GraineWidgetTheme {
 /// meta in `textMuted` at the caption size, primary buttons `accent` at
 /// `radius.md`, chips on `accentSoft`. What the component chose for itself —
 /// its accent, radius, platform, density — still wins; the design supplies
-/// the rest.
+/// the rest. A design with window chrome ("Window chrome") opens every
+/// component as a desktop window: a 32-point `surfaceRaised` title bar
+/// across the top with the traffic lights and the component's own title,
+/// lower case — moved there from the body, where it is not drawn again —
+/// over a body in `surface`. The loader card and the answered line stay as
+/// they are.
 class GraineWidgetView extends StatefulWidget {
   const GraineWidgetView({
     super.key,
@@ -118,6 +124,8 @@ class _Skin {
     required this.explicitPlatform,
     required this.soft,
     this.tokens,
+    this.chrome,
+    this.windowBody,
   });
 
   factory _Skin.resolve(BuildContext context, GraineWidgetView w, WidgetLook? look) {
@@ -145,12 +153,17 @@ class _Skin {
     final t = w.theme;
     final c = tokens?.colors;
     final surface = t?.surface ?? colorOf(c?.surfaceRaised ?? palette.surface)!;
+    final border = t?.border ?? colorOf(c?.border ?? palette.border)!;
+    final muted = t?.muted ?? colorOf(c?.textMuted ?? palette.muted)!;
+    // The title bar is the card's own `surfaceRaised`, outline and muted ink —
+    // or the host's single-colour overrides, so the window stays one piece.
+    final chrome = ChromeLook.of(tokens, fill: surface, border: border, muted: muted);
     return _Skin(
       accent: accent,
       surface: surface,
-      border: t?.border ?? colorOf(c?.border ?? palette.border)!,
+      border: border,
       text: t?.text ?? colorOf(c?.text ?? palette.text)!,
-      muted: t?.muted ?? colorOf(c?.textMuted ?? palette.muted)!,
+      muted: muted,
       // The design's onAccent was chosen for the design's accent; any other gets ink by luminance.
       onAccent: t?.onAccent ?? colorOf(ownAccent == null && c != null ? c.onAccent : palette.onAccent)!,
       radius: radius,
@@ -167,6 +180,11 @@ class _Skin {
           ? fade(accent, 0.15)
           : (ownAccent == null ? colorOf(c.accentSoft)! : Color.lerp(surface, accent, tokens!.dark ? 0.22 : 0.12)!),
       tokens: tokens,
+      chrome: chrome,
+      // Under window chrome a component's body is `surface`, so the
+      // `surfaceRaised` bar reads as a title bar — white window, grey bar. A
+      // host's own surface still wins.
+      windowBody: chrome == null ? null : (t?.surface ?? tokenColor(c!.surface)),
     );
   }
 
@@ -191,6 +209,15 @@ class _Skin {
 
   /// Null before designs: every value below is then exactly what it was.
   final ThemeTokens? tokens;
+
+  /// The design opens components as desktop windows: the title bar every
+  /// surface wears. Null for a plain card (and before designs).
+  final ChromeLook? chrome;
+
+  /// A windowed component's body fill: `surface` under the `surfaceRaised`
+  /// bar (the host's own surface when it sets one). Null without [chrome];
+  /// the loader card and the answered line never use it.
+  final Color? windowBody;
 
   Color tint(double a) => fade(accent, a);
   Color borderTint(double a) => fade(border, a);
@@ -488,12 +515,59 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
 
   // ── the component ────────────────────────────────────────────────────────
 
-  BoxDecoration _boxDecoration(_Skin s, {BorderRadius? radius}) => BoxDecoration(
-        color: s.surface,
+  BoxDecoration _boxDecoration(_Skin s, {BorderRadius? radius, Color? color}) => BoxDecoration(
+        color: color ?? s.surface,
         borderRadius: radius ?? BorderRadius.circular(s.radius),
         border: Border.all(color: s.border, width: s.borderWidth),
         boxShadow: s.shadows,
       );
+
+  /// A COMPONENT'S SURFACE — its fill, outline, corners ([radius], else the
+  /// skin's) and shadow, with [padding] inside: exactly the card it always
+  /// was. When the design opens components as desktop windows
+  /// ([_Skin.chrome]), the title bar goes across its top under the surface's
+  /// own top corners, with the component's [title] in it lower case (the
+  /// caller then leaves it out of [child]); [padding] moves below the bar,
+  /// and the body below it is `surface` ([_Skin.windowBody]).
+  Widget _surface(
+    _Skin s, {
+    required Key key,
+    required String title,
+    required Widget child,
+    EdgeInsetsGeometry? padding,
+    BorderRadius? radius,
+  }) {
+    final chrome = s.chrome;
+    if (chrome == null) {
+      return Container(
+        key: key,
+        margin: const EdgeInsets.only(bottom: 8),
+        padding: padding,
+        decoration: _boxDecoration(s, radius: radius),
+        child: child,
+      );
+    }
+    final shape = radius ?? BorderRadius.circular(s.radius);
+    final content = padding == null ? child : Padding(padding: padding, child: child);
+    return Container(
+      key: key,
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: _boxDecoration(s, radius: radius, color: s.windowBody),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          WindowTitleBar(
+            look: chrome,
+            surface: ChromeSurface.component,
+            title: WindowChrome.title(ChromeSurface.component, componentTitle: title),
+            topRadius: WindowChrome.innerRadius(shape.topLeft.x, s.borderWidth),
+          ),
+          Flexible(child: content),
+        ],
+      ),
+    );
+  }
 
   Widget _closeButton(GraineComponents c, _Skin s, {double size = 44}) => Tap(
         key: const ValueKey<String>('graine-close'),
@@ -512,16 +586,19 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
     final surface = content.surface(look);
     final many = content.many(look);
     final body = SingleChildScrollView(child: _body(c, w, content, look, s, many));
+    // In window chrome the title moves into the title bar and is not drawn
+    // again below it; the rows keep their own.
     final title = content.title;
+    final heading = s.chrome == null ? title : '';
     final prompt = content.prompt;
 
     if (surface == 'screen') {
       // The component IS the screen. The agent is still on the call; saying so is
       // the difference between a screen it opened and a screen that replaced it.
-      return Container(
+      return _surface(
+        s,
         key: const ValueKey<String>('graine-surface-screen'),
-        margin: const EdgeInsets.only(bottom: 8),
-        decoration: _boxDecoration(s),
+        title: title,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -537,8 +614,8 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
-                        if (title.isNotEmpty)
-                          Text(title, maxLines: 1, overflow: TextOverflow.ellipsis, style: s.title(18)),
+                        if (heading.isNotEmpty)
+                          Text(heading, maxLines: 1, overflow: TextOverflow.ellipsis, style: s.title(18)),
                         if (prompt.isNotEmpty)
                           Text(prompt, maxLines: 1, overflow: TextOverflow.ellipsis, style: s.meta(12.5, weight: 600)),
                       ],
@@ -571,12 +648,13 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
     if (surface == 'sheet') {
       // A choice to finish. Not answering is an answer: "None of these" is always there.
       final top = Radius.circular(math.max(20, s.radius));
-      return Container(
+      return _surface(
+        s,
         key: const ValueKey<String>('graine-surface-sheet'),
-        margin: const EdgeInsets.only(bottom: 8),
+        title: title,
         padding: EdgeInsets.fromLTRB(s.pad(18), 10, s.pad(18), s.pad(16)),
-        decoration: _boxDecoration(s, radius: BorderRadius.only(topLeft: top, topRight: top,
-            bottomLeft: Radius.circular(s.radius), bottomRight: Radius.circular(s.radius))),
+        radius: BorderRadius.only(topLeft: top, topRight: top,
+            bottomLeft: Radius.circular(s.radius), bottomRight: Radius.circular(s.radius)),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -589,7 +667,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
               ),
             ),
             const SizedBox(height: 14),
-            if (title.isNotEmpty) Text(title, style: s.title(18)),
+            if (heading.isNotEmpty) Text(heading, style: s.title(18)),
             if (prompt.isNotEmpty) ...<Widget>[
               const SizedBox(height: 6),
               Text(prompt, style: s.meta(13, height: 18 / 13)),
@@ -617,17 +695,17 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
     }
 
     // A card: never covers the app. The smallest interruption, for what deserves the smallest one.
-    return Container(
+    return _surface(
+      s,
       key: const ValueKey<String>('graine-surface-card'),
-      margin: const EdgeInsets.only(bottom: 8),
+      title: title,
       padding: EdgeInsets.fromLTRB(s.pad(14), s.pad(12), s.pad(14), 4),
-      decoration: _boxDecoration(s),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
-          if (title.isNotEmpty) ...<Widget>[
-            Text(title, style: s.title(14.5)),
+          if (heading.isNotEmpty) ...<Widget>[
+            Text(heading, style: s.title(14.5)),
             const SizedBox(height: 2),
           ],
           if (prompt.isNotEmpty) ...<Widget>[

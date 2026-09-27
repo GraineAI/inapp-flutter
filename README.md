@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.3.0
+  graine_inapp: ^0.4.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -211,6 +211,9 @@ components and loaders follow it too; so do two optional widgets:
 
 Light or dark follows the brand's choice, else the device, and switches with
 it. The platform's reduce-motion setting always wins over the design's motion.
+A design with window chrome (Desktop Buddy's, or any design with the knob on)
+opens the chat window, the caption and the components as desktop windows — a
+title bar with traffic lights and a monospaced, lower-case title.
 
 Fonts: a design may name a typeface, and the SDK loads it by itself — the
 faces the design draws with, from `<baseUrl>/api/embed/font`, kept in the

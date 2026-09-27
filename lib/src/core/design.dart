@@ -483,6 +483,7 @@ class ThemeTokens {
     required this.icons,
     this.glass,
     required this.bubbles,
+    this.chrome = 'none',
   });
 
   final int v;
@@ -504,7 +505,16 @@ class ThemeTokens {
   /// One of [Design.bubbleStyles].
   final String bubbles;
 
+  /// One of [Design.chromes]: "window" opens the chat window, the caption
+  /// card and every component card as desktop windows (`WindowChrome` has
+  /// the numbers); "none" — and an older server that never says — is a
+  /// plain surface.
+  final String chrome;
+
   bool get dark => scheme == 'dark';
+
+  /// The design opens its surfaces as desktop windows.
+  bool get window => chrome == 'window';
 
   /// One scheme's tokens. [scheme] is the slot they arrived in, used when the
   /// tokens do not say. Null when [raw] is not an object with a `colors` object
@@ -530,6 +540,7 @@ class ThemeTokens {
       icons: ThemeIcons.fromJson(r['icons'], d.icons),
       glass: r.containsKey('glass') ? ThemeGlass.fromJson(r['glass']) : d.glass,
       bubbles: _pick(r['bubbles'], Design.bubbleStyles) ?? d.bubbles,
+      chrome: _pick(r['chrome'], Design.chromes) ?? d.chrome,
     );
   }
 
@@ -547,6 +558,7 @@ class ThemeTokens {
         'icons': icons.toJson(),
         'glass': glass?.toJson(),
         'bubbles': bubbles,
+        'chrome': chrome,
       };
 }
 
@@ -602,6 +614,10 @@ abstract final class Design {
   static const List<String> bubbleStyles = <String>['filled', 'outline', 'minimal'];
   static const List<String> iconStyles = <String>['outline', 'filled', 'duotone', 'sharp'];
   static const List<String> easings = <String>['standard', 'emphasized', 'spring', 'linear', 'none'];
+
+  /// How a surface that holds content is framed: a plain surface, or a
+  /// desktop window (contract/DESIGN.md, "Window chrome").
+  static const List<String> chromes = <String>['none', 'window'];
 
   /// The launcher: 56 × 56 (a pill is 56 high and as wide as its label).
   static const double launcherSize = 56;

@@ -13,6 +13,7 @@ import 'loader_view.dart';
 import 'sdk_icon.dart';
 import 'style.dart';
 import 'widget_view.dart';
+import 'window_chrome.dart';
 
 /// THE VOICE BAR — what the customer sees during a call, drawn by the SDK
 /// from the brand's design and nothing else.
@@ -209,6 +210,7 @@ class _BarLook {
     this.glyph,
     this.glass,
     this.tokens,
+    this.chrome,
   });
 
   /// Before designs: the palettes, corners and depth the bar always had,
@@ -283,6 +285,7 @@ class _BarLook {
       glyph: t.icons.launcher,
       glass: t.glass,
       tokens: t,
+      chrome: ChromeLook.of(t),
     );
   }
 
@@ -317,6 +320,10 @@ class _BarLook {
 
   /// Null before designs.
   final ThemeTokens? tokens;
+
+  /// The caption card's title bar, when the design opens it as a desktop
+  /// window; null for a plain card (and before designs).
+  final ChromeLook? chrome;
 
   Color get onAccent => tokenColor(onAccentHex);
 }
@@ -654,6 +661,24 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
         ),
       );
     } else if (showCaption) {
+      const padding = EdgeInsets.symmetric(horizontal: 12, vertical: 8);
+      final words = Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          // WHO is saying it: captions carry both sides, and an unlabelled
+          // "Take me to privacy" reads as the agent talking to itself.
+          if (caption.role == Role.customer)
+            Padding(padding: const EdgeInsets.only(bottom: 2), child: Text('YOU', style: p.youStyle)),
+          Opacity(
+            opacity: caption.live ? 0.75 : 1,
+            child: Text(caption.text, maxLines: 2, overflow: TextOverflow.ellipsis, style: p.captionStyle),
+          ),
+        ],
+      );
+      // Window chrome: a 24-point title bar, "captions", across the card's
+      // top; the words keep their padding below it.
+      final chrome = p.chrome;
       above = _Rise(
         key: const ValueKey<String>('graine-rise-caption'),
         duration: motion,
@@ -667,21 +692,22 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
           shadows: p.captionShadows,
           glass: p.glass,
           margin: const EdgeInsets.only(bottom: 8),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              // WHO is saying it: captions carry both sides, and an unlabelled
-              // "Take me to privacy" reads as the agent talking to itself.
-              if (caption.role == Role.customer)
-                Padding(padding: const EdgeInsets.only(bottom: 2), child: Text('YOU', style: p.youStyle)),
-              Opacity(
-                opacity: caption.live ? 0.75 : 1,
-                child: Text(caption.text, maxLines: 2, overflow: TextOverflow.ellipsis, style: p.captionStyle),
-              ),
-            ],
-          ),
+          padding: chrome == null ? padding : null,
+          child: chrome == null
+              ? words
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: <Widget>[
+                    WindowTitleBar(
+                      look: chrome,
+                      surface: ChromeSurface.caption,
+                      title: WindowChrome.title(ChromeSurface.caption),
+                      topRadius: WindowChrome.innerRadius(p.captionRadius, p.borderWidth),
+                    ),
+                    Padding(padding: padding, child: words),
+                  ],
+                ),
         ),
       );
     }

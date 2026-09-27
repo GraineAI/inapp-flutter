@@ -16,6 +16,7 @@ import 'package:graine_inapp/src/chat_window.dart' show ChatWindow;
 import 'package:graine_inapp/src/glyph.dart';
 import 'package:graine_inapp/src/sdk_icon.dart';
 import 'package:graine_inapp/src/style.dart' show OutsideShadowPainter;
+import 'package:graine_inapp/src/window_chrome.dart' show WindowTitleBar;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -814,7 +815,8 @@ void main() {
       final comps = await show(
           tester, (GraineComponents c) => GraineWidgetView(components: c, appearance: const <String, Object?>{}, design: designs[1]));
       final d = decorationOf(tester, chrome());
-      expect(d.color, hex(t.colors.surfaceRaised));
+      expect(t.window, isTrue);
+      expect(d.color, hex(t.colors.surface), reason: 'this case opens as a window: its body is surface, under the bar');
       expect(d.boxShadow, <BoxShadow>[BoxShadow(color: hex(t.colors.text), offset: const Offset(4, 4))]);
       expect(d.border, Border.all(color: hex(t.colors.border), width: 2));
       expect(d.borderRadius, BorderRadius.zero);
@@ -831,6 +833,442 @@ void main() {
       final button = find.ancestor(of: find.text('Choose').first, matching: find.byType(Container)).first;
       expect(decorationOf(tester, button).color, const Color(0xFFFF0000));
       await done(tester, comps);
+    });
+  });
+
+  group('window chrome', () {
+    // Desktop Buddy opens in windows: light here, a 1-point outline, radius.lg 16, radius.xl 24.
+    late ResolvedDesign buddy;
+    setUp(() {
+      buddy = ResolvedDesign.fromJson(all.firstWhere((Map<String, Object?> c) {
+        final config = c['config']! as Map<String, Object?>;
+        return config.length == 1 && config['preset'] == 'desktop-buddy';
+      })['design'])!;
+    });
+
+    Finder barIn(Finder surface) => find.descendant(of: surface, matching: find.byType(WindowTitleBar));
+    Finder inBar(Finder bar, Key key) => find.descendant(of: bar, matching: find.byKey(key));
+    Rect outlineOf(WidgetTester tester, Finder bar, Color border) => tester.getRect(
+        find.descendant(of: bar, matching: find.byWidgetPredicate((Widget w) => w is Container && w.color == border)));
+    GraineComponents components(WidgetTester tester) =>
+        GraineComponents(baseUrl: base, clock: () => tester.binding.clock.now().millisecondsSinceEpoch);
+
+    /// Three dots [size] across and 6 apart, the first [left], centred in the
+    /// bar's fill ([fill] high), in the window's three colours.
+    void expectLights(WidgetTester tester, Finder bar, {required double size, required double left, required double fill}) {
+      const colours = <Color>[Color(0xFFFF5F57), Color(0xFFFEBC2E), Color(0xFF28C840)];
+      final top = tester.getRect(bar).top;
+      Rect? previous;
+      for (var i = 0; i < colours.length; i++) {
+        final light = inBar(bar, WindowTitleBar.lightKey(i));
+        final r = tester.getRect(light);
+        expect(r.size, Size(size, size), reason: 'light $i');
+        expect(decorationOf(tester, light).color, colours[i], reason: 'light $i');
+        expect(decorationOf(tester, light).shape, BoxShape.circle, reason: 'light $i');
+        expect(r.center.dy, closeTo(top + fill / 2, 0.01), reason: 'light $i, centred in the bar');
+        if (previous == null) {
+          expect(r.left, closeTo(left, 0.01), reason: '12 in from the edge');
+        } else {
+          expect(r.left - previous.right, closeTo(6, 0.01), reason: '6 apart');
+        }
+        previous = r;
+      }
+    }
+
+    /// [text] on one line in the platform's monospace, at the caption size, textMuted, regular.
+    void expectTitle(WidgetTester tester, Finder bar, ThemeTokens t, String text) {
+      final title = tester.widget<Text>(inBar(bar, WindowTitleBar.titleKey));
+      expect(title.data, text);
+      expect(title.maxLines, 1);
+      final style = title.style!;
+      expect(style.fontFamily, 'monospace');
+      expect(style.fontFamilyFallback, contains('Menlo'));
+      expect(style.fontSize, t.font.scale.caption);
+      expect(style.color, hex(t.colors.textMuted));
+      expect(style.fontWeight, FontWeight.w400, reason: 'the regular weight');
+    }
+
+    testWidgets('Desktop Buddy: the caption card opens as a window — a 24-point bar, 8-point lights, "captions"',
+        (WidgetTester tester) async {
+      final t = buddy.light;
+      final bw = t.shape.borderWidth;
+      final call = FakeCall()
+        ..connected = true
+        ..captions = const <Caption>[Caption(Role.agent, 'Here are two that fit.')];
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: buddy)));
+      await tester.pump(const Duration(seconds: 1));
+      final caption = find.byKey(GraineAgentBar.captionKey);
+      final card = tester.getRect(caption); // its margin is below; the top and the sides are the card's
+      final bar = barIn(caption);
+      expect(bar, findsOneWidget);
+      final r = tester.getRect(bar);
+      expect(r.height, 24, reason: 'its bottom outline included');
+      expect(r.top, closeTo(card.top + bw, 0.01), reason: 'across the top, inside the outline');
+      expect(r.left, closeTo(card.left + bw, 0.01));
+      expect(r.right, closeTo(card.right - bw, 0.01));
+
+      final fill = fillOf(tester, bar);
+      expect(fill.color, hex(t.colors.surfaceRaised));
+      expect(fill.borderRadius, BorderRadius.vertical(top: Radius.circular(t.shape.radius.lg - bw)),
+          reason: "the caption's own top corners");
+      final line = outlineOf(tester, bar, hex(t.colors.border));
+      expect(line.height, bw);
+      expect(line.bottom, closeTo(r.bottom, 0.01));
+
+      expectLights(tester, bar, size: 8, left: card.left + bw + 12, fill: 24 - bw);
+      expectTitle(tester, bar, t, 'captions');
+      expect(tester.getRect(inBar(bar, WindowTitleBar.titleKey)).center.dx, closeTo(r.center.dx, 0.01),
+          reason: 'centred on the whole bar');
+
+      // Below the bar the caption is what it was: its words 12 × 8 in, the
+      // card's own surface, corners and shadow.
+      final words = tester.getRect(find.text('Here are two that fit.'));
+      expect(words.top, closeTo(r.bottom + 8, 0.01));
+      expect(words.left, closeTo(card.left + bw + 12, 0.01));
+      final d = decorationOf(tester, caption);
+      expect(d.color, hex(t.colors.surface));
+      expect(d.borderRadius, BorderRadius.circular(t.shape.radius.lg));
+      expect(d.boxShadow, <BoxShadow>[soft(t.elevation.card!)]);
+    });
+
+    testWidgets("Desktop Buddy: the chat window's title bar replaces its header — the heading after the online dot, the chevron 12 in",
+        (WidgetTester tester) async {
+      final t = buddy.light;
+      final bw = t.shape.borderWidth;
+      final call = FakeCall()..appearance = const <String, Object?>{'mode': 'both', 'start': 'chat', 'title': 'Asha'};
+      final chat = FakeChat(const <Caption>[Caption(Role.agent, 'Hi! Looking for something?')]);
+      await tester.pumpWidget(host(GraineAgentBar(call: call, chat: chat, showComponents: false, design: buddy)));
+      await tester.pump(const Duration(seconds: 1));
+      final window = find.byKey(GraineAgentBar.chatKey);
+      expect(find.byKey(ChatWindow.headerKey), findsNothing, reason: 'the title bar replaces the header');
+      expect(find.descendant(of: window, matching: find.byKey(BrandMark.glyphKey)), findsNothing,
+          reason: 'no launcher mark');
+      final frame = tester.getRect(find.descendant(of: window, matching: find.byType(Container)).first);
+      final bar = barIn(window);
+      expect(bar, findsOneWidget);
+      final r = tester.getRect(bar);
+      expect(r.height, 32);
+      expect(r.top, closeTo(frame.top + bw, 0.01));
+      expect(r.left, closeTo(frame.left + bw, 0.01));
+      expect(r.right, closeTo(frame.right - bw, 0.01));
+      final fill = fillOf(tester, bar);
+      expect(fill.color, hex(t.colors.surfaceRaised));
+      expect(fill.borderRadius, BorderRadius.vertical(top: Radius.circular(t.shape.radius.xl - bw)));
+      expect(outlineOf(tester, bar, hex(t.colors.border)).height, bw);
+      expectLights(tester, bar, size: 10, left: frame.left + bw + 12, fill: 32 - bw);
+      expectTitle(tester, bar, t, 'asha');
+
+      // Online: the 6-point success dot, 6 before the heading, the two centred together.
+      final dotFinder = inBar(bar, WindowTitleBar.onlineKey);
+      final dot = tester.getRect(dotFinder);
+      final title = tester.getRect(inBar(bar, WindowTitleBar.titleKey));
+      expect(dot.size, const Size(6, 6));
+      expect(decorationOf(tester, dotFinder).color, hex(t.colors.success));
+      expect(title.left - dot.right, closeTo(6, 0.01));
+      expect((dot.left + title.right) / 2, closeTo(r.center.dx, 0.01), reason: 'centred on the whole bar');
+      expect(dot.center.dy, closeTo(r.top + (32 - bw) / 2, 0.01));
+
+      // The chevron at the right end, its glyph 12 in, pointing down.
+      final chevron = find.descendant(
+          of: bar, matching: find.byWidgetPredicate((Widget w) => w is SdkIconView && w.name == 'chevron'));
+      expect(tester.getRect(chevron).right, closeTo(frame.right - bw - 12, 0.01));
+      expect(tester.getRect(chevron).center.dy, closeTo(r.top + (32 - bw) / 2, 0.01));
+      expect(tester.widget<SdkIconView>(chevron).turned, isTrue);
+      expect(tester.widget<SdkIconView>(chevron).color, hex(t.colors.textMuted));
+      expect(inBar(bar, ChatWindow.collapseKey), findsOneWidget);
+      // The rest of the window is unchanged.
+      expect(find.byKey(ChatWindow.composerKey), findsOneWidget);
+      expect(decorationOf(tester, find.byKey(ChatWindow.messageKey(0))).color, hex(t.colors.agentBubble));
+
+      // Offline: the heading alone — no dot, no "Connecting…" in the bar.
+      chat
+        ..connected = false
+        ..notifyListeners();
+      await tester.pump();
+      expect(dotFinder, findsNothing);
+      expect(find.descendant(of: bar, matching: find.text('Connecting…')), findsNothing);
+      expect(tester.widget<Text>(inBar(bar, WindowTitleBar.titleKey)).data, 'asha');
+      expect(tester.getRect(inBar(bar, WindowTitleBar.titleKey)).center.dx, closeTo(r.center.dx, 0.01));
+
+      // And the chevron still goes back to the call.
+      await tester.tap(find.byKey(ChatWindow.collapseKey));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byKey(GraineAgentBar.chatKey), findsNothing);
+    });
+
+    testWidgets('a long heading stays on one line, clear of the lights and the chevron', (WidgetTester tester) async {
+      final bw = buddy.light.shape.borderWidth;
+      final call = FakeCall()
+        ..appearance = const <String, Object?>{
+          'mode': 'chat',
+          'title': 'Priya from Northwind Home Loans, Mortgages and Everything In Between',
+        };
+      await tester.pumpWidget(MediaQuery(
+        data: const MediaQueryData(size: Size(320, 640)),
+        child: Directionality(
+          textDirection: TextDirection.ltr,
+          child: Stack(children: <Widget>[
+            GraineAgentBar(call: call, chat: FakeChat(const <Caption>[]), showComponents: false, design: buddy),
+          ]),
+        ),
+      ));
+      await tester.pump(const Duration(seconds: 1));
+      expect(tester.takeException(), isNull);
+      final bar = barIn(find.byKey(GraineAgentBar.chatKey));
+      final r = tester.getRect(bar);
+      final lights = tester.getRect(inBar(bar, WindowTitleBar.lightKey(2)));
+      final chevron = tester.getRect(inBar(bar, ChatWindow.collapseKey));
+      final dot = tester.getRect(inBar(bar, WindowTitleBar.onlineKey));
+      final title = tester.getRect(inBar(bar, WindowTitleBar.titleKey));
+      expect(dot.left, greaterThanOrEqualTo(lights.right + 8), reason: 'clear of the lights');
+      expect(title.right, lessThanOrEqualTo(chevron.left), reason: 'clear of the chevron');
+      expect(r.center.dx - dot.left, closeTo(title.right - r.center.dx, 0.01), reason: 'still centred');
+      expect(tester.widget<Text>(inBar(bar, WindowTitleBar.titleKey)).overflow, TextOverflow.ellipsis);
+      expect(title.height, lessThan(32 - bw), reason: 'one line');
+    });
+
+    testWidgets("Desktop Buddy: a component card opens as a window — its own title moves into the 32-point bar",
+        (WidgetTester tester) async {
+      final t = buddy.light;
+      final bw = t.shape.borderWidth;
+      final comps = components(tester)..present(card());
+      await tester.pumpWidget(host(GraineWidgetView(components: comps, appearance: const <String, Object?>{}, design: buddy)));
+      await tester.pump(const Duration(milliseconds: 400));
+      final surface = find.byKey(const ValueKey<String>('graine-surface-card'));
+      final cardRect = tester.getRect(surface);
+      final bar = barIn(surface);
+      expect(bar, findsOneWidget);
+      final r = tester.getRect(bar);
+      expect(r.height, 32);
+      expect(r.top, closeTo(cardRect.top + bw, 0.01));
+      expect(r.left, closeTo(cardRect.left + bw, 0.01));
+      expect(r.right, closeTo(cardRect.right - bw, 0.01));
+      final fill = fillOf(tester, bar);
+      expect(fill.color, hex(t.colors.surfaceRaised));
+      expect(fill.borderRadius, BorderRadius.vertical(top: Radius.circular(t.shape.radius.lg - bw)));
+      expect(outlineOf(tester, bar, hex(t.colors.border)).height, bw);
+      expectLights(tester, bar, size: 10, left: cardRect.left + bw + 12, fill: 32 - bw);
+      expectTitle(tester, bar, t, 'two that fit');
+      expect(tester.getRect(inBar(bar, WindowTitleBar.titleKey)).center.dx, closeTo(r.center.dx, 0.01));
+
+      // Not drawn again below; the prompt and the rows (their titles too) are
+      // where they were, the padding now under the bar.
+      expect(find.text('Two that fit'), findsNothing);
+      expect(tester.getRect(find.text('Tap one.')).top, closeTo(r.bottom + t.spacing.cardPadding, 0.01));
+      expect(find.text('Creta'), findsOneWidget);
+      expect(find.text('Seltos'), findsOneWidget);
+      // The white window under the grey bar: the body is surface; the corners
+      // and the shadow are the card's as ever.
+      final d = decorationOf(tester, surface);
+      expect(d.color, hex(t.colors.surface));
+      expect(hex(t.colors.surface), const Color(0xFFFFFFFF));
+      expect(fill.color, const Color(0xFFF5F5F5));
+      expect(d.borderRadius, BorderRadius.circular(t.shape.radius.lg));
+      expect(d.boxShadow, <BoxShadow>[soft(t.elevation.card!)]);
+      await tester.pumpWidget(const SizedBox());
+      comps.dispose();
+    });
+
+    testWidgets("dark, and a host's own colours: the body is surface under a surfaceRaised bar, unless the host says",
+        (WidgetTester tester) async {
+      final dark = buddy.dark;
+      Future<GraineComponents> show({Brightness brightness = Brightness.light, GraineWidgetTheme? theme}) async {
+        final comps = components(tester)..present(card());
+        await tester.pumpWidget(host(
+            GraineWidgetView(
+                key: UniqueKey(), components: comps, appearance: const <String, Object?>{}, design: buddy, theme: theme),
+            brightness: brightness));
+        await tester.pump(const Duration(milliseconds: 400));
+        return comps;
+      }
+
+      final surface = find.byKey(const ValueKey<String>('graine-surface-card'));
+      var comps = await show(brightness: Brightness.dark);
+      expect(decorationOf(tester, surface).color, hex(dark.colors.surface));
+      expect(fillOf(tester, barIn(surface)).color, hex(dark.colors.surfaceRaised));
+      expect(<Color>[hex(dark.colors.surface), hex(dark.colors.surfaceRaised)],
+          const <Color>[Color(0xFF161618), Color(0xFF1F1F22)]);
+      await tester.pumpWidget(const SizedBox());
+      comps.dispose();
+
+      // The host's own surface wins over the design's — the body and the bar
+      // alike, so the window stays one piece; its border and muted ink too.
+      const own = GraineWidgetTheme(surface: Color(0xFFFFF4E0), border: Color(0xFFCC8800), muted: Color(0xFF775500));
+      comps = await show(theme: own);
+      final bar = barIn(surface);
+      expect(decorationOf(tester, surface).color, own.surface);
+      expect(fillOf(tester, bar).color, own.surface);
+      expect(outlineOf(tester, bar, own.border!).height, buddy.light.shape.borderWidth);
+      expect(tester.widget<Text>(inBar(bar, WindowTitleBar.titleKey)).style!.color, own.muted);
+      await tester.pumpWidget(const SizedBox());
+      comps.dispose();
+    });
+
+    testWidgets('every component surface wears it; no title, the lights alone; the loader card and the answered line stay plain',
+        (WidgetTester tester) async {
+      final t = buddy.light;
+      final bw = t.shape.borderWidth;
+      Future<GraineComponents> show(Map<String, Object?> frame) async {
+        final comps = components(tester)..present(frame);
+        await tester.pumpWidget(host(GraineWidgetView(
+            key: UniqueKey(), components: comps, appearance: const <String, Object?>{}, design: buddy)));
+        await tester.pump(const Duration(milliseconds: 400));
+        return comps;
+      }
+
+      Future<void> done(GraineComponents comps) async {
+        await tester.pumpWidget(const SizedBox());
+        comps.dispose();
+      }
+
+      // A sheet: the bar under the sheet's own, rounder top corners.
+      var comps = await show(<String, Object?>{
+        'widget_id': 'pick:2',
+        'kind': 'choices',
+        'data': <String, Object?>{'title': 'Which Suits You?', 'prompt': 'Pick one.', 'options': <Object?>['Yes', 'No']},
+      });
+      var bar = barIn(find.byKey(const ValueKey<String>('graine-surface-sheet')));
+      expect(bar, findsOneWidget);
+      expect(tester.getSize(bar).height, 32);
+      expect(tester.widget<Text>(inBar(bar, WindowTitleBar.titleKey)).data, 'which suits you?');
+      final sheetTop = t.shape.radius.lg < 20 ? 20.0 : t.shape.radius.lg;
+      expect(fillOf(tester, bar).borderRadius, BorderRadius.vertical(top: Radius.circular(sheetTop - bw)));
+      expect(find.text('Which Suits You?'), findsNothing, reason: 'the title moved into the bar');
+      expect(find.text('Pick one.'), findsOneWidget);
+      expect(find.text('None of these'), findsOneWidget);
+      expect(fillOf(tester, bar).color, hex(t.colors.surfaceRaised));
+      expect(decorationOf(tester, find.byKey(const ValueKey<String>('graine-surface-sheet'))).color, hex(t.colors.surface),
+          reason: 'the body under the bar is surface');
+      await done(comps);
+
+      // A screen: the bar above its close button.
+      comps = await show(<String, Object?>{
+        'widget_id': 'cars:1',
+        'kind': 'product_list',
+        'data': <String, Object?>{
+          'title': 'Three That Fit',
+          'items': <Object?>[
+            <String, Object?>{'id': 'creta', 'title': 'Creta'},
+          ],
+        },
+      });
+      final screen = find.byKey(const ValueKey<String>('graine-surface-screen'));
+      bar = barIn(screen);
+      expect(bar, findsOneWidget);
+      expect(tester.widget<Text>(inBar(bar, WindowTitleBar.titleKey)).data, 'three that fit');
+      expect(find.text('Three That Fit'), findsNothing);
+      expect(find.text('STILL LISTENING'), findsOneWidget);
+      expect(tester.getRect(find.byKey(const ValueKey<String>('graine-close'))).top,
+          greaterThanOrEqualTo(tester.getRect(bar).bottom));
+      expect(fillOf(tester, bar).color, hex(t.colors.surfaceRaised));
+      expect(decorationOf(tester, screen).color, hex(t.colors.surface), reason: 'the body under the bar is surface');
+      await done(comps);
+
+      // No title: the lights alone.
+      comps = await show(<String, Object?>{
+        'widget_id': 'cars:2',
+        'kind': 'product_list',
+        'style': <String, Object?>{'surface': 'card', 'preset': 'cards'},
+        'data': <String, Object?>{
+          'items': <Object?>[
+            <String, Object?>{'id': 'creta', 'title': 'Creta'},
+          ],
+        },
+      });
+      bar = barIn(find.byKey(const ValueKey<String>('graine-surface-card')));
+      expect(bar, findsOneWidget);
+      expect(tester.widget<Text>(inBar(bar, WindowTitleBar.titleKey)).data, isEmpty);
+      for (var i = 0; i < 3; i++) {
+        expect(inBar(bar, WindowTitleBar.lightKey(i)), findsOneWidget);
+      }
+      await done(comps);
+
+      // The "coming" loader card: unchanged.
+      comps = components(tester);
+      await tester.pumpWidget(host(GraineWidgetView(
+          key: UniqueKey(), components: comps, appearance: const <String, Object?>{}, design: buddy)));
+      comps.presentPending(const <String, Object?>{'widget_id': 'x:1', 'kind': 'info_card'});
+      await tester.pump();
+      expect(find.byKey(const ValueKey<String>('graine-pending')), findsOneWidget);
+      expect(find.byType(WindowTitleBar), findsNothing, reason: 'the loader card is unchanged');
+      expect(decorationOf(tester, find.byKey(const ValueKey<String>('graine-pending'))).color,
+          hex(t.colors.surfaceRaised), reason: 'still surfaceRaised');
+      await done(comps);
+
+      // The answered line: unchanged.
+      comps = await show(card());
+      await tester.tap(find.text('Choose').first);
+      await tester.pump();
+      final answered = find.byKey(const ValueKey<String>('graine-answered'));
+      expect(answered, findsOneWidget);
+      expect(find.descendant(of: answered, matching: find.byType(WindowTitleBar)), findsNothing);
+      expect(decorationOf(tester, answered).color, hex(t.colors.surfaceRaised), reason: 'still surfaceRaised');
+      await done(comps);
+    });
+
+    testWidgets('every knob turned — glass, a hard offset, square corners, 2-point outlines: the bar is solid surfaceRaised',
+        (WidgetTester tester) async {
+      final t = designs[1].dark;
+      expect(t.window, isTrue, reason: 'the all-knobs case turns the chrome on');
+      final call = FakeCall()
+        ..connected = true
+        ..captions = const <Caption>[Caption(Role.customer, 'The cheaper one')];
+      final comps = components(tester)..present(card());
+      await tester.pumpWidget(host(GraineAgentBar(call: call, components: comps, design: designs[1])));
+      await tester.pump(const Duration(milliseconds: 400));
+
+      final caption = find.byKey(GraineAgentBar.captionKey);
+      final bar = barIn(caption);
+      expect(bar, findsOneWidget);
+      expect(tester.getSize(bar).height, 24);
+      final fill = fillOf(tester, bar);
+      expect(fill.color, hex(t.colors.surfaceRaised), reason: 'solid, though the caption is glass');
+      expect(fill.borderRadius, const BorderRadius.vertical(top: Radius.zero), reason: 'square stays square');
+      expect(outlineOf(tester, bar, hex(t.colors.border)).height, 2);
+      expect(find.descendant(of: caption, matching: find.byType(BackdropFilter)), findsOneWidget,
+          reason: "the caption's own blur, and only that");
+      expect(find.descendant(of: bar, matching: find.byType(BackdropFilter)), findsNothing);
+      expect(find.text('YOU'), findsOneWidget, reason: 'the words below the bar are unchanged');
+
+      final surface = find.byKey(const ValueKey<String>('graine-surface-card'));
+      expect(barIn(surface), findsOneWidget);
+      expect(fillOf(tester, barIn(surface)).color, hex(t.colors.surfaceRaised));
+      expect(decorationOf(tester, surface).color, hex(t.colors.surface), reason: 'the body under the bar');
+      expect(decorationOf(tester, surface).boxShadow, <BoxShadow>[BoxShadow(color: hex(t.colors.text), offset: const Offset(4, 4))],
+          reason: 'the solid offset, as before');
+      await tester.pumpWidget(const SizedBox());
+      comps.dispose();
+    });
+
+    testWidgets('a design without window chrome, and no design at all: plain surfaces, the header, the title in the body',
+        (WidgetTester tester) async {
+      for (final design in <ResolvedDesign?>[designs[0], null]) {
+        final why = design == null ? 'no design' : design.light.preset;
+        if (design != null) expect(design.light.chrome, 'none');
+        final call = FakeCall()
+          ..connected = true
+          ..captions = const <Caption>[Caption(Role.agent, 'Hello')];
+        final comps = components(tester)..present(card());
+        await tester.pumpWidget(host(GraineAgentBar(key: UniqueKey(), call: call, components: comps, design: design)));
+        await tester.pump(const Duration(seconds: 1));
+        expect(find.byKey(GraineAgentBar.captionKey), findsOneWidget, reason: why);
+        expect(find.byKey(const ValueKey<String>('graine-surface-card')), findsOneWidget, reason: why);
+        expect(find.byType(WindowTitleBar), findsNothing, reason: why);
+        expect(find.text('Two that fit'), findsOneWidget, reason: '$why: the title in the body');
+        if (design != null) {
+          expect(decorationOf(tester, find.byKey(const ValueKey<String>('graine-surface-card'))).color,
+              hex(design.light.colors.surfaceRaised), reason: '$why: a plain card is surfaceRaised');
+        }
+        await tester.pumpWidget(const SizedBox());
+        comps.dispose();
+
+        final chatting = FakeCall()..appearance = const <String, Object?>{'mode': 'both', 'start': 'chat', 'title': 'Asha'};
+        await tester.pumpWidget(host(GraineAgentBar(
+            key: UniqueKey(), call: chatting, chat: FakeChat(const <Caption>[]), showComponents: false, design: design)));
+        await tester.pump(const Duration(seconds: 1));
+        expect(find.byKey(ChatWindow.headerKey), findsOneWidget, reason: why);
+        expect(find.byType(WindowTitleBar), findsNothing, reason: why);
+      }
     });
   });
 
@@ -938,14 +1376,30 @@ void main() {
               expect(customer!.color, hex(t.colors.accentSoft), reason: why);
           }
 
-          // The card: surfaceRaised, radius.lg, the card shadow or the hard offset.
+          // The card: surfaceRaised — or, opened as a window, surface under its
+          // surfaceRaised bar — radius.lg, the card shadow or the hard offset.
           final chrome = decorationOf(tester, find.byKey(const ValueKey<String>('graine-surface-card')));
-          expect(chrome.color, hex(t.colors.surfaceRaised), reason: why);
+          expect(chrome.color, hex(t.window ? t.colors.surface : t.colors.surfaceRaised), reason: why);
           expect(chrome.borderRadius, BorderRadius.circular(t.shape.radius.lg), reason: why);
           expect(chrome.boxShadow,
               hasLength(hard != null ? 1 : (t.elevation.card == null ? 0 : 1)),
               reason: why);
-          expect(styleOf(tester, 'Two that fit').fontSize, t.font.scale.title, reason: why);
+
+          // Window chrome: the card and the caption open as desktop windows,
+          // the card's title moved into its bar; every other design is plain.
+          final cardFinder = find.byKey(const ValueKey<String>('graine-surface-card'));
+          final captionFinder = find.byKey(GraineAgentBar.captionKey);
+          expect(find.descendant(of: cardFinder, matching: find.byType(WindowTitleBar)),
+              t.window ? findsOneWidget : findsNothing, reason: why);
+          expect(find.descendant(of: captionFinder, matching: find.byType(WindowTitleBar)),
+              t.window ? findsOneWidget : findsNothing, reason: why);
+          if (t.window) {
+            final title = find.descendant(of: cardFinder, matching: find.byKey(WindowTitleBar.titleKey));
+            expect(tester.widget<Text>(title).data, 'two that fit', reason: why);
+            expect(find.text('Two that fit'), findsNothing, reason: '$why: the title moved into the bar');
+          } else {
+            expect(styleOf(tester, 'Two that fit').fontSize, t.font.scale.title, reason: why);
+          }
 
           await tester.pumpWidget(const SizedBox());
           comps.dispose();
@@ -999,11 +1453,14 @@ void main() {
             await tester.pump(const Duration(seconds: 1));
             expect(tester.takeException(), isNull, reason: '$name, ${device.name}, ${state.key}');
           }
-          // And the chat.
+          // And the chat — behind a title bar instead of its header where the design opens windows.
           await tester.tap(find.byKey(GraineAgentBar.switchButtonKey));
           await tester.pump(const Duration(seconds: 1));
           expect(find.byKey(GraineAgentBar.chatKey), findsOneWidget);
           expect(tester.takeException(), isNull, reason: '$name, ${device.name}, in the chat');
+          final window = design.pick(deviceDark: device == Brightness.dark).window;
+          expect(find.byType(WindowTitleBar), window ? findsOneWidget : findsNothing, reason: '$name, ${device.name}');
+          expect(find.byKey(ChatWindow.headerKey), window ? findsNothing : findsOneWidget, reason: '$name, ${device.name}');
         }
       }
     });

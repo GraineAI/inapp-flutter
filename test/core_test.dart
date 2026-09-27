@@ -45,6 +45,7 @@ void main() {
   barTests();
   voiceBarTests();
   designTests();
+  windowChromeTests();
   fontTests();
   iconTests();
   svgPathTests();
@@ -1222,6 +1223,87 @@ void designTests() {
           'https://x.test/api/embed/glyph?id=waveform&c=101318&s=16&w=0.5&v=2');
       expect(Design.glyphUrl('https://x.test', 'waveform', '#318ce7', 76.5, 2.63),
           'https://x.test/api/embed/glyph?id=waveform&c=318CE7&s=77&w=2.75&v=2');
+    });
+  });
+}
+
+void windowChromeTests() {
+  group('Window chrome', () {
+    test('the token: absent (an older server) or unknown is "none"; "window" in any case is a window', () {
+      ThemeTokens tokens(Map<String, Object?> extra) => ThemeTokens.fromJson(tokensJson('light', extra: extra))!;
+      final older = tokens(const <String, Object?>{});
+      expect(older.chrome, 'none');
+      expect(older.window, isFalse);
+      expect(older.toJson()['chrome'], 'none', reason: 'read back as the contract names it');
+      for (final junk in <Object?>[null, 'skeuomorphic', 7, true, const <String, Object?>{'window': true}, '']) {
+        expect(tokens(<String, Object?>{'chrome': junk}).chrome, 'none', reason: '$junk');
+      }
+      for (final said in <String>['window', ' Window ', 'WINDOW']) {
+        final t = tokens(<String, Object?>{'chrome': said});
+        expect(t.chrome, 'window', reason: said);
+        expect(t.window, isTrue);
+        expect(t.toJson()['chrome'], 'window');
+      }
+      expect(tokens(const <String, Object?>{'chrome': 'none'}).window, isFalse);
+      expect(Design.chromes, <String>['none', 'window']);
+    });
+
+    test('each scheme says its own; a missing set borrows the other, chrome and all', () {
+      final d = ResolvedDesign.fromJson(<String, Object?>{
+        'light': tokensJson('light'),
+        'dark': tokensJson('dark', extra: const <String, Object?>{'chrome': 'window'}),
+      })!;
+      expect(d.light.chrome, 'none');
+      expect(d.dark.chrome, 'window');
+      final one = ResolvedDesign.fromJson(<String, Object?>{
+        'light': tokensJson('light', extra: const <String, Object?>{'chrome': 'window'}),
+      })!;
+      expect(one.dark.window, isTrue);
+    });
+
+    test('the title bar: 32 high on the chat and components, 24 on the caption', () {
+      expect(WindowChrome.barHeight(ChromeSurface.chat), 32);
+      expect(WindowChrome.barHeight(ChromeSurface.component), 32);
+      expect(WindowChrome.barHeight(ChromeSurface.caption), 24);
+    });
+
+    test('the traffic lights: 12 in, three dots 10 across (8 on the caption), 6 apart, always the same three', () {
+      expect(WindowChrome.lightsInset, 12);
+      expect(WindowChrome.lightSize(ChromeSurface.chat), 10);
+      expect(WindowChrome.lightSize(ChromeSurface.component), 10);
+      expect(WindowChrome.lightSize(ChromeSurface.caption), 8);
+      expect(WindowChrome.lightsGap, 6);
+      expect(WindowChrome.lights, <String>['#FF5F57', '#FEBC2E', '#28C840']);
+      expect(WindowChrome.lightsWidth(ChromeSurface.chat), 10 * 3 + 6 * 2);
+      expect(WindowChrome.lightsWidth(ChromeSurface.caption), 8 * 3 + 6 * 2);
+    });
+
+    test('the title, lower case: the heading, "captions", a component its own — none, the lights alone', () {
+      expect(WindowChrome.title(ChromeSurface.chat, heading: ' Asha from Graine '), 'asha from graine');
+      expect(WindowChrome.title(ChromeSurface.caption, heading: 'Asha'), 'captions');
+      expect(WindowChrome.title(ChromeSurface.component, componentTitle: 'Two That Fit'), 'two that fit');
+      expect(WindowChrome.title(ChromeSurface.component), '');
+      expect(WindowChrome.title(ChromeSurface.chat, heading: 'ÉCOLE Ölçü'), 'école ölçü');
+    });
+
+    test('the title is centred on the whole bar, clear of the lights and the chevron alike', () {
+      // Lights 12 + 42 on the left; the chevron's 30-point target 6 in on the right; 8 clear of either.
+      expect(WindowChrome.titleInset(ChromeSurface.chat, chevron: true), 12 + 42 + 8);
+      expect(WindowChrome.titleInset(ChromeSurface.component), 12 + 42 + 8);
+      expect(WindowChrome.titleInset(ChromeSurface.caption), 12 + 36 + 8);
+      // The chevron's glyph sits 12 in: the lights' inset, mirrored.
+      expect(WindowChrome.chevronInset + (WindowChrome.chevronBox - WindowChrome.chevronIcon) / 2, WindowChrome.lightsInset);
+      expect(WindowChrome.onlineDot, 6);
+      expect(WindowChrome.onlineDotGap, 6);
+    });
+
+    test("the platform's monospace, and the bar under the surface's own top corners", () {
+      expect(WindowChrome.monospace, 'monospace');
+      expect(WindowChrome.monospaceFallback, contains('Menlo'), reason: 'iOS names no "monospace"');
+      expect(WindowChrome.innerRadius(24, 1), 23);
+      expect(WindowChrome.innerRadius(16, 2), 14);
+      expect(WindowChrome.innerRadius(0, 2), 0, reason: 'square stays square');
+      expect(WindowChrome.innerRadius(18, 0), 18);
     });
   });
 }

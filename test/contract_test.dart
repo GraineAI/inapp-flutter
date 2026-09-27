@@ -368,6 +368,45 @@ void main() {
       }
     });
 
+    test("reads every design's chrome exactly: Desktop Buddy and the all-knobs case open as windows", () {
+      final windows = <Map<String, Object?>>[];
+      for (final c in cases(fx, 'cases')) {
+        final raw = c['design']! as Map<String, Object?>;
+        final d = ResolvedDesign.fromJson(raw)!;
+        for (final scheme in <String>['light', 'dark']) {
+          final want = (raw[scheme]! as Map<String, Object?>)['chrome'];
+          expect(want, anyOf('none', 'window'), reason: 'design.json carries chrome in every case: ${c['config']} $scheme');
+          final t = scheme == 'light' ? d.light : d.dark;
+          expect(t.chrome, want, reason: '${c['config']} $scheme');
+          expect(t.window, want == 'window', reason: '${c['config']} $scheme');
+        }
+        expect(d.light.chrome, d.dark.chrome, reason: 'one frame for both schemes: ${c['config']}');
+        if (d.light.window) windows.add(c['config']! as Map<String, Object?>);
+      }
+      expect(windows, hasLength(2), reason: '$windows');
+      expect(windows.where((Map<String, Object?> w) => w.length == 1 && w['preset'] == 'desktop-buddy'), hasLength(1),
+          reason: 'Desktop Buddy opens in windows');
+      expect(windows.where((Map<String, Object?> w) => w['chrome'] == 'window'), hasLength(1),
+          reason: 'the knob turns it on for any design');
+    });
+
+    test('a session from an older server — no chrome in its tokens — draws plain surfaces', () {
+      final buddy = cases(fx, 'cases').firstWhere((Map<String, Object?> c) =>
+          (c['config']! as Map<String, Object?>).length == 1 && (c['config']! as Map<String, Object?>)['preset'] == 'desktop-buddy');
+      final raw = buddy['design']! as Map<String, Object?>;
+      Map<String, Object?> without(String scheme) =>
+          <String, Object?>{...raw[scheme]! as Map<String, Object?>}..remove('chrome');
+      final older = ResolvedDesign.fromJson(<String, Object?>{...raw, 'light': without('light'), 'dark': without('dark')})!;
+      expect(older.light.chrome, 'none');
+      expect(older.dark.chrome, 'none');
+      expect(older.light.window, isFalse);
+      // Everything else still reads exactly as served.
+      final back = older.light.toJson()..remove('chrome');
+      expect(canon(back), canon(without('light')));
+      final legacy = (fx['legacy']! as Map<String, Object?>)['design']! as Map<String, Object?>;
+      expect(ResolvedDesign.fromJson(legacy)!.light.chrome, 'none', reason: 'an embed that never chose a design');
+    });
+
     test('picks light or dark as the React Native SDK does', () {
       for (final c in cases(fx, 'cases')) {
         final d = ResolvedDesign.fromJson(c['design'])!;
