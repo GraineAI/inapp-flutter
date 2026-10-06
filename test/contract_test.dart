@@ -228,8 +228,16 @@ void main() {
           maxRadius: n(f['maxRadius']),
           origin: f['origin'] as String?,
         );
-        expect(canon(<String, Object?>{'accent': a.accent, 'heading': a.heading, 'logoUrl': a.logoUrl, 'radius': a.radius}),
-            canon(c['output']), reason: '$c');
+        expect(
+            canon(<String, Object?>{
+              'accent': a.accent,
+              'heading': a.heading,
+              'logoUrl': a.logoUrl,
+              'logoPlate': a.logoPlate.wire,
+              'radius': a.radius,
+            }),
+            canon(c['output']),
+            reason: '$c');
       }
       for (final c in cases(fx, 'palette')) {
         final p = Appearance.palette(

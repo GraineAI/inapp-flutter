@@ -171,6 +171,8 @@ abstract final class Protocol {
         return PageNetwork(_optBool(o, 'online'));
       case ProtocolIn.reconnecting:
         return PageReconnecting(_optBool(o, 'active'));
+      case ProtocolIn.progress:
+        return PageProgress(_optString(o, 'stage'));
       default:
         return null;
     }
@@ -239,6 +241,10 @@ abstract final class ProtocolIn {
   static const String quality = 'graine:quality';
   static const String network = 'graine:network';
   static const String reconnecting = 'graine:reconnecting';
+
+  /// Where a connect is: `{stage}` — registering, dialling, retrying,
+  /// switching, or failed (contract/DESIGN.md, "Connecting").
+  static const String progress = 'graine:progress';
 }
 
 /// How the call's audio travels.
@@ -400,6 +406,22 @@ final class PageReconnecting extends PageMessage {
       other is PageReconnecting && other.active == active;
   @override
   int get hashCode => active.hashCode;
+}
+
+/// The engine's account of a connect in progress. [stage] is the word as
+/// sent — a stage this SDK does not know is carried, and ignored by the
+/// call ([ConnectStage.from]), rather than guessed at.
+final class PageProgress extends PageMessage {
+  const PageProgress(this.stage);
+  final String stage;
+
+  /// Nothing could carry the call: stop connecting.
+  bool get failed => stage == 'failed';
+
+  @override
+  bool operator ==(Object other) => other is PageProgress && other.stage == stage;
+  @override
+  int get hashCode => stage.hashCode;
 }
 
 /// The connection, in one word — the way LiveKit reports it.

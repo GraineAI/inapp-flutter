@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'js.dart';
+import 'logo.dart';
 
 /// The dashboard's appearance, translated for a phone: see [Appearance.resolve].
 class NativeAppearance {
@@ -8,6 +9,7 @@ class NativeAppearance {
     required this.accent,
     required this.heading,
     this.logoUrl,
+    this.logoPlate = LogoPlate.accent,
     required this.radius,
   });
 
@@ -19,6 +21,10 @@ class NativeAppearance {
 
   /// Absolute, or null when no logo is set. The dashboard stores an S3 key, not a URL.
   final String? logoUrl;
+
+  /// What the logo sits on where it stands in for the launcher glyph — the
+  /// accent, or a white plate (contract/DESIGN.md, "The brand's logo").
+  final LogoPlate logoPlate;
 
   /// Corner rounding, clamped to what the host draws.
   final double radius;
@@ -74,7 +80,8 @@ abstract final class Appearance {
 
   /// The dashboard decides; the host's values are the fallback — one rule in
   /// one direction. `accent` may arrive without its "#"; `title` is a
-  /// heading; `logo` is an S3 key that becomes `<origin>/api/embed/logo?k=…`.
+  /// heading; `logo` is an S3 key that becomes `<origin>/api/embed/logo?k=…`;
+  /// `logoPlate` is "white" or, for anything else, the accent.
   static NativeAppearance resolve(
     Map<String, Object?>? appearance, {
     required String accent,
@@ -98,6 +105,7 @@ abstract final class Appearance {
           : accent,
       heading: title.isEmpty ? heading : title,
       logoUrl: logoKey.isEmpty ? null : '$base/api/embed/logo?k=${encodeURIComponent(logoKey)}',
+      logoPlate: LogoPlate.from(a['logoPlate']),
       radius: _clamp(_numericValue(a['radius']) ?? radius ?? 18, max),
     );
   }

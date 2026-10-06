@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'config.dart';
 import 'js.dart';
+import 'loader.dart';
 import 'protocol.dart';
 
 /// One caption line: who, what, and whether it is still being said.
@@ -138,7 +139,7 @@ CallPhase callPhase({
 
 /// What the voice bar's status line says ([voiceBarStatus]).
 class BarStatus {
-  const BarStatus(this.text, {this.waiting, this.meter = false});
+  const BarStatus(this.text, {this.waiting, this.meter = false, this.label});
 
   /// The words, in sentence case, exactly as the contract lists them.
   final String text;
@@ -151,19 +152,108 @@ class BarStatus {
   /// Precede the words with the four-bar meter ([VoiceMeter]).
   final bool meter;
 
+  /// Words the loader says in place of the brand's words for [waiting] —
+  /// only "Still connecting…" sets it, and only while those words are the
+  /// default ([connectingLook]). Null: the brand's words for the moment.
+  final String? label;
+
   @override
   bool operator ==(Object other) =>
-      other is BarStatus && other.text == text && other.waiting == waiting && other.meter == meter;
+      other is BarStatus &&
+      other.text == text &&
+      other.waiting == waiting &&
+      other.meter == meter &&
+      other.label == label;
 
   @override
-  int get hashCode => Object.hash(text, waiting, meter);
+  int get hashCode => Object.hash(text, waiting, meter, label);
 
   @override
-  String toString() => 'BarStatus("$text"${waiting != null ? ', loader: $waiting' : ''}${meter ? ', meter' : ''})';
+  String toString() => 'BarStatus("$text"${waiting != null ? ', loader: $waiting' : ''}'
+      '${label != null ? ', label: $label' : ''}${meter ? ', meter' : ''})';
+}
+
+/// WHERE A CALL BEING PLACED IS, as the engine reports it (`graine:progress`).
+enum ConnectStage {
+  /// A credential and a line are being set up (a cold start).
+  registering,
+
+  /// The call is on its way to the agent.
+  dialling,
+
+  /// The first attempt went unanswered; a fresh connection is being made —
+  /// on mobile data, usually a connection the phone dropped while idle.
+  retrying,
+
+  /// The call is moving to the other transport.
+  switching;
+
+  /// The stage for a word on the wire, or null for one this SDK does not
+  /// know — and for "failed", which ends a connect rather than being a stage of one.
+  static ConnectStage? from(String? wire) {
+    for (final s in values) {
+      if (s.name == wire) return s;
+    }
+    return null;
+  }
+
+  /// The word on the wire.
+  String get wire => name;
+}
+
+/// The numbers and words of a connect that says where it is.
+abstract final class ConnectProgress {
+  /// When a connect stops being "Connecting…" and becomes "Still
+  /// connecting…": past the point a healthy connect finishes (warm 0.2–0.9 s,
+  /// cold 1.5–2.5 s on a good network) and well inside the ten seconds after
+  /// which, without a word of explanation, people assume it is broken. The
+  /// React Native SDK's SLOW_CONNECT_MS.
+  static const int slowConnectMs = 4000;
+
+  /// A slow connect, while the brand's connecting words are the default.
+  static const String stillConnecting = 'Still connecting…';
+
+  /// Neither transport could carry the call (a curly apostrophe).
+  static const String couldNotConnect = 'Couldn’t connect · tap to retry';
+}
+
+/// WHAT A CONNECT SAYS WHILE IT RUNS — contract/DESIGN.md, "Connecting"; the
+/// React Native voice bar's connectingLook.
+///
+/// Measured, the commonest slow connect on mobile data is a connection the
+/// phone dropped while idle being replaced: a few seconds the customer will
+/// wait if the bar says what is happening, and will not if it says
+/// "Connecting…" for all of them.
+///
+/// The words stay the BRAND's. The loader draws each moment in the wording
+/// set under Appearance → Loading — often not English — so a retry or a
+/// switch to the other transport is the "reconnecting" moment, in their
+/// words, and a slow connect says "Still connecting…" only while
+/// [connectingText] (the brand's words for connecting) is still the default
+/// "Connecting…". A wording someone chose is never overwritten.
+BarStatus connectingLook({
+  ConnectStage? stage,
+  bool slow = false,
+  String? connectingText,
+}) {
+  final words = connectingText ?? Loaders.defaultText.connecting!;
+  if (stage == ConnectStage.retrying || stage == ConnectStage.switching) {
+    return const BarStatus('Reconnecting…', waiting: 'reconnecting');
+  }
+  if (slow && words == Loaders.defaultText.connecting) {
+    return const BarStatus(ConnectProgress.stillConnecting,
+        waiting: 'connecting', label: ConnectProgress.stillConnecting);
+  }
+  return BarStatus(words, waiting: 'connecting');
 }
 
 /// THE VOICE BAR'S STATUS LINE — contract/DESIGN.md, "Status words": the
 /// first that matches wins.
+///
+/// While the call is being placed the words are [connectingLook]'s, from
+/// [connectStage], [slowConnect] and the brand's [connectingText] (the
+/// loader's words for connecting; default "Connecting…"). [callFailed] —
+/// nothing could carry the call — says "Couldn’t connect · tap to retry".
 ///
 /// The network gets named before the agent takes the blame for it: a customer
 /// whose agent goes quiet on a train reads "Listening" and concludes the agent
@@ -184,6 +274,10 @@ BarStatus voiceBarStatus({
   bool thinking = false,
   required bool speaking,
   required ConnectionQuality quality,
+  bool callFailed = false,
+  ConnectStage? connectStage,
+  bool slowConnect = false,
+  String? connectingText,
 }) {
   if (error) return const BarStatus('Unavailable');
   if (inChat) return chatOnline ? const BarStatus('Online') : const BarStatus('Connecting…', waiting: 'connecting');
@@ -193,7 +287,11 @@ BarStatus voiceBarStatus({
   }
   if (micDenied) return const BarStatus('Needs microphone');
   if (connectivity == GraineConnectivity.failed) return const BarStatus('Couldn’t load · tap to retry');
-  if (!ready || connecting) return const BarStatus('Connecting…', waiting: 'connecting');
+  // Neither transport could carry the call. The microphone tries again.
+  if (callFailed) return const BarStatus(ConnectProgress.couldNotConnect);
+  if (!ready || connecting) {
+    return connectingLook(stage: connectStage, slow: slowConnect, connectingText: connectingText);
+  }
   if (muted) return const BarStatus('Muted');
   if (connected && thinking) return const BarStatus('Thinking…', waiting: 'thinking');
   if (connected && speaking) return const BarStatus('Speaking', meter: true);

@@ -11,6 +11,7 @@ class GraineTiming {
     this.hardCapMs = 120000,
     this.retryDelaysMs = const <int>[1000, 2000, 4000, 8000, 15000, 15000],
     this.endWatchdogMs = 4000,
+    this.slowConnectMs = 4000,
   });
 
   /// Silence — nothing downloaded — before a load is given up on.
@@ -28,6 +29,11 @@ class GraineTiming {
 
   /// How long an end-call may go unconfirmed before the call is torn down locally.
   final int endWatchdogMs;
+
+  /// How long a connect the customer is waiting on runs before it becomes
+  /// `slowConnect` ("Still connecting…"). The default is
+  /// ConnectProgress.slowConnectMs.
+  final int slowConnectMs;
 }
 
 /// Everything the SDK needs to know up front.

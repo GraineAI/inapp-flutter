@@ -174,6 +174,41 @@ Curve curveOf(ThemeTokens? t) {
 /// white on a dark one — the rule [Appearance.palette] uses for its onAccent.
 String readableHexOn(Color bg) => bg.computeLuminance() > 0.45 ? '#101318' : '#FFFFFF';
 
+/// THE PLATE UNDER THE BRAND'S LOGO (contract/DESIGN.md, "The brand's
+/// logo"): the accent, or — for [LogoPlate.white] — white with a
+/// `max(1, borderWidth)` hairline in [border]. Pass [LogoPlate.accent]
+/// whenever the shape carries a glyph or a letter rather than the logo.
+({Color color, Border? border}) logoPlateOf(LogoPlate plate,
+    {required Color accent, required Color border, required double borderWidth}) {
+  if (plate != LogoPlate.white) return (color: accent, border: null);
+  return (
+    color: tokenColor(BrandLogo.plateWhite),
+    border: Border.all(color: border, width: BrandLogo.outlineWidth(borderWidth)),
+  );
+}
+
+/// The ink for a glyph-less mark's letter (or a pill's label) on [plate]:
+/// [onAccentHex] on the accent, dark ink on the white plate.
+String inkOnPlate(LogoPlate plate, String onAccentHex) =>
+    plate == LogoPlate.white ? BrandLogo.labelOnWhite : onAccentHex;
+
+/// THE BRAND'S LOGO, WHOLE: fitted ([BoxFit.contain]) into a [box]-point
+/// square — [BrandLogo.box] of its shape — centred, proportions kept, never
+/// cropped. [fallback] stands in when it cannot load.
+Widget logoWhole(String url, double box, {required Widget Function() fallback}) => Image.network(
+      url,
+      key: logoKey,
+      width: box,
+      height: box,
+      fit: BoxFit.contain,
+      excludeFromSemantics: true,
+      errorBuilder: (BuildContext c, Object e, StackTrace? s) =>
+          SizedBox(width: box, height: box, child: Center(child: fallback())),
+    );
+
+/// The brand's logo where it stands in for the launcher glyph, for a test to find.
+const Key logoKey = ValueKey<String>('graine-logo');
+
 /// A tappable area with a button's semantics and no Material dependency.
 class Tap extends StatelessWidget {
   const Tap({super.key, required this.label, required this.onTap, required this.child, this.enabled = true});

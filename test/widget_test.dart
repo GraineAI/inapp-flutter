@@ -65,6 +65,16 @@ class FaultyCall extends FakeCall implements GraineCallFault {
   String? error = 'This agent has no WebRTC gateway configured.';
 }
 
+/// A call that says where its connect is, as GraineVoice does.
+class ProgressCall extends FakeCall implements GraineConnectProgress {
+  @override
+  ConnectStage? connectStage;
+  @override
+  bool slowConnect = false;
+  @override
+  bool callFailed = false;
+}
+
 /// A chat the app runs itself, handed to the bar.
 class FakeChat extends ChangeNotifier implements GraineChatState {
   @override
@@ -307,6 +317,83 @@ void main() {
       expect(find.text('Speaking'), findsOneWidget);
       expect(find.byType(GraineLoaderView), findsNothing);
       expect(find.byKey(GraineAgentBar.meterKey), findsOneWidget);
+    });
+
+    testWidgets('a slow connect says what is happening, in the loader, instead of spinning on one word',
+        (WidgetTester tester) async {
+      final call = ProgressCall()..connecting = true;
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      Future<void> says(String words, void Function(ProgressCall c) change, {String? reason}) async {
+        change(call);
+        call.notifyListeners();
+        await tester.pump();
+        expect(find.text(words), findsOneWidget, reason: reason);
+        expect(find.byType(GraineLoaderView), findsOneWidget, reason: 'a connect is drawn as the loader');
+      }
+
+      // The React Native voice bar's cases, word for word.
+      await says('Connecting…', (ProgressCall c) {});
+      await says('Still connecting…', (ProgressCall c) => c.slowConnect = true);
+      await says('Reconnecting…', (ProgressCall c) => c.connectStage = ConnectStage.retrying,
+          reason: 'a retry outranks the slow clock');
+      await says('Reconnecting…', (ProgressCall c) {
+        c.slowConnect = false;
+        c.connectStage = ConnectStage.switching;
+      });
+      await says('Still connecting…', (ProgressCall c) {
+        c.connectStage = ConnectStage.dialling;
+        c.slowConnect = true;
+      });
+      await says('Still connecting…', (ProgressCall c) {
+        c.connecting = false;
+        c.ready = false;
+      }, reason: 'a page the customer is waiting on is a connect too');
+      expect(
+          tester.getSemantics(find.byKey(GraineAgentBar.statusKey)).value, 'Still connecting…');
+    });
+
+    testWidgets("a retry and a slow connect speak in the brand's loader words, and never replace them",
+        (WidgetTester tester) async {
+      const connecting = 'जुड़ रहा है…';
+      const reconnecting = 'फिर से जोड़ रहे हैं…';
+      final call = ProgressCall()
+        ..connecting = true
+        ..slowConnect = true
+        ..appearance = const <String, Object?>{
+          'loader': <String, Object?>{
+            'text': <String, Object?>{'connecting': connecting, 'reconnecting': reconnecting},
+          },
+        };
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      expect(find.text(connecting), findsOneWidget, reason: "the brand's wording was replaced");
+      expect(find.text('Still connecting…'), findsNothing);
+      call.update((FakeCall c) => (c as ProgressCall).connectStage = ConnectStage.retrying);
+      await tester.pump();
+      expect(find.text(reconnecting), findsOneWidget, reason: "a retry is the reconnecting moment, in the brand's words");
+      expect(find.text('Reconnecting…'), findsNothing);
+    });
+
+    testWidgets('a call nothing could carry says so, and the microphone starts a new one', (WidgetTester tester) async {
+      final call = ProgressCall()..callFailed = true;
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      expect(find.text('Couldn’t connect · tap to retry'), findsOneWidget, reason: 'a curly apostrophe');
+      expect(find.byType(GraineLoaderView), findsNothing, reason: 'no longer connecting');
+      final mic = find.byKey(GraineAgentBar.callButtonKey);
+      expect(opacityOf(tester, mic), 1, reason: 'the microphone can act');
+      expect(tester.getSemantics(mic).label, 'Try again');
+      await tester.tap(mic);
+      expect(call.starts, 1, reason: 'a new call, not a page reload');
+      expect(call.retries, 0);
+      // A failed load still outranks it, and still reloads.
+      call.update((FakeCall c) => c.connectivity = GraineConnectivity.failed);
+      await tester.pump();
+      expect(find.text('Couldn’t load · tap to retry'), findsOneWidget);
+    });
+
+    testWidgets('a host call that does not report progress draws exactly as before', (WidgetTester tester) async {
+      final call = FakeCall()..connecting = true;
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      expect(find.text('Connecting…'), findsOneWidget);
     });
 
     testWidgets('the microphone starts a call, mutes one, and cannot act while it cannot', (WidgetTester tester) async {

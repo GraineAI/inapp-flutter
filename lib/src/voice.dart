@@ -49,6 +49,29 @@ abstract interface class GraineCallFault {
   String? get error;
 }
 
+/// A CALL THAT SAYS WHERE A CONNECT IS — beside [GraineCallState], as
+/// [GraineCallFault] is, so a host's own call state keeps compiling.
+/// [GraineVoice] implements it; so may a fake. The bar draws from it
+/// (contract/DESIGN.md, "Connecting").
+abstract interface class GraineConnectProgress {
+  /// Where the call being placed is, as the engine reports it
+  /// (`graine:progress`); null outside a connect. A bar that says
+  /// "Reconnecting…" across a retry is one the customer waits for; one that
+  /// says "Connecting…" for eight seconds is one they close.
+  ConnectStage? get connectStage;
+
+  /// A connect the customer is waiting on — a bar on screen while the page
+  /// loads, or a call being placed — has run past `timing.slowConnectMs`.
+  /// Say so honestly ("Still connecting…"), not with a faster spinner.
+  bool get slowConnect;
+
+  /// The last start could not be connected at all — not on WebRTC, not on
+  /// the fallback. Distinct from an error (a setting someone must change):
+  /// the network may well be better in a moment, so a start simply tries
+  /// again. Cleared by a start, a connected call, and the bar closing.
+  bool get callFailed;
+}
+
 /// A CHAT WITH THE AGENT, as the bar sees it.
 ///
 /// The dashboard can offer an agent as a call, a chat, or both (Embed &
@@ -136,7 +159,7 @@ class GraineEngineSink {
 /// tap costs one registration and an INVITE.
 ///
 /// A [ChangeNotifier]: a widget that listens redraws on every change.
-class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallFault {
+class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallFault, GraineConnectProgress {
   GraineVoice._(this._graine)
       : _watchdog = LoadWatchdog(
           stallMs: _graine.config.timing.stallMs,
@@ -168,6 +191,9 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   bool _micDenied = false;
   String? _error;
   Transport? _transport;
+  ConnectStage? _connectStage;
+  bool _slowConnect = false;
+  bool _callFailed = false;
 
   @override
   bool get connected => _connected;
@@ -195,6 +221,12 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   bool get micDenied => _micDenied;
   @override
   String? get error => _error;
+  @override
+  ConnectStage? get connectStage => _connectStage;
+  @override
+  bool get slowConnect => _slowConnect;
+  @override
+  bool get callFailed => _callFailed;
   @override
   Map<String, Object?> get appearance => _graine.session?.appearance ?? const <String, Object?>{};
 
@@ -232,6 +264,10 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   Timer? _retryTimer;
   Timer? _endWatchdog;
   Timer? _backgroundConfirm;
+  Timer? _slowTimer;
+
+  /// UIs showing this call on screen ([viewOpened]).
+  int _views = 0;
 
   /// Mount the engine: [GraineEngine] calls this with its WebView page; a
   /// test calls it with a fake. Loads the page idle — nothing registered,
@@ -279,6 +315,7 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
     _startedCall = false;
     _pendingStart = false;
     _error = null;
+    _clearProgress();
     _setCall(false, false);
     notifyListeners();
   }
@@ -288,7 +325,73 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
     _retryTimer?.cancel();
     _endWatchdog?.cancel();
     _backgroundConfirm?.cancel();
-    _checkTimer = _retryTimer = _endWatchdog = _backgroundConfirm = null;
+    _slowTimer?.cancel();
+    _checkTimer = _retryTimer = _endWatchdog = _backgroundConfirm = _slowTimer = null;
+  }
+
+  /// A UI showing this call came on screen — [GraineAgentBar] says so
+  /// itself; a host drawing its own bar may too, paired with [viewClosed].
+  /// While one is, a page still loading is a customer waiting, and after
+  /// `timing.slowConnectMs` the call says so ([slowConnect]). An idle page
+  /// loading behind no bar at all is nobody's slow connect.
+  void viewOpened() {
+    _views++;
+    // No notification: nothing a listener draws has changed yet, and this
+    // runs while the bar is being built.
+    _syncSlowConnect();
+  }
+
+  /// A UI from [viewOpened] left the screen. When the last one goes, the
+  /// customer has closed the agent: a failed connect and its stage are no
+  /// longer news.
+  void viewClosed() {
+    if (_views == 0) return;
+    _views--;
+    final before = (_callFailed, _connectStage, _slowConnect);
+    if (_views == 0) _clearProgress();
+    _syncSlowConnect();
+    if (before != (_callFailed, _connectStage, _slowConnect)) {
+      // Not synchronously: this runs while the bar is being unmounted.
+      scheduleMicrotask(notifyListeners);
+    }
+  }
+
+  void _clearProgress() {
+    _callFailed = false;
+    _connectStage = null;
+  }
+
+  /// The customer is actually waiting on a connect: a call being placed, or
+  /// a bar on screen while the page is not ready — and neither connected nor
+  /// given up on. A clock on the wait, not on the network: the network is
+  /// the engine's to report.
+  bool get _waitingOnConnect =>
+      _page != null && !_connected && !_callFailed && (_connecting || (!_ready && _views > 0));
+
+  /// Arm "Still connecting…" when a wait begins; disarm (and clear it) the
+  /// moment the wait ends. A wait that continues keeps its clock.
+  void _syncSlowConnect() {
+    if (!_waitingOnConnect) {
+      _slowTimer?.cancel();
+      _slowTimer = null;
+      _slowConnect = false;
+      return;
+    }
+    if (_slowConnect || _slowTimer != null) return;
+    _slowTimer = Timer(Duration(milliseconds: _graine.config.timing.slowConnectMs), () {
+      _slowTimer = null;
+      if (!_waitingOnConnect) return;
+      _slowConnect = true;
+      notifyListeners();
+    });
+  }
+
+  /// Every change a listener hears about is also a chance for the wait to
+  /// have begun or ended.
+  @override
+  void notifyListeners() {
+    _syncSlowConnect();
+    super.notifyListeners();
   }
 
   /// Place the call. With [GraineConfig.requestMicrophone] set, the app is
@@ -304,6 +407,8 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
     }
     _micDenied = false;
     _error = null;
+    // A new attempt: the last one's failure and stage are not news.
+    _clearProgress();
     // A new call, not a continuation: the last one's words do not open this one.
     _captions = const <Caption>[];
     _agentSpeaking = false;
@@ -549,6 +654,8 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
           _reconnecting = false;
           _endWatchdog?.cancel();
           _endWatchdog = null;
+          // Answered: no longer retrying, and no longer failed.
+          _clearProgress();
         }
         // The page announces "not connected" as it loads. With a start queued
         // behind it that is not idle — the bar must keep saying "connecting".
@@ -625,6 +732,23 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
         _reconnecting = active;
         if (active) _setCall(_connected, true);
         _graine._report((GraineListener l) => l.onReconnecting(active));
+      case PageProgress(failed: true):
+        // Neither transport could carry the call. The bar must stop saying
+        // "connecting" and offer another try; the host hears the attempt is over.
+        _connectStage = null;
+        _callFailed = true;
+        _startedCall = false;
+        _pendingStart = false;
+        if (_connecting) {
+          _setCall(_connected, false);
+        } else {
+          // Already not connecting (the page said so first): still the end of an attempt.
+          _graine._report((GraineListener l) => l.onCallState(_connected, false));
+        }
+      case PageProgress(stage: final stage):
+        // A stage this SDK does not know is ignored, not stored.
+        final known = ConnectStage.from(stage);
+        if (known != null) _connectStage = known;
     }
   }
 

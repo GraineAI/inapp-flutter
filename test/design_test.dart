@@ -4,6 +4,7 @@
 // them) and under none — where every surface keeps the colours, corners and
 // depth it had before designs. Fakes only: no WebView, and no network — font
 // files come from a mock HTTP client.
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -15,7 +16,7 @@ import 'package:graine_inapp/src/agent_bar.dart' show BarMeter;
 import 'package:graine_inapp/src/chat_window.dart' show ChatWindow;
 import 'package:graine_inapp/src/glyph.dart';
 import 'package:graine_inapp/src/sdk_icon.dart';
-import 'package:graine_inapp/src/style.dart' show OutsideShadowPainter;
+import 'package:graine_inapp/src/style.dart' show OutsideShadowPainter, logoKey;
 import 'package:graine_inapp/src/window_chrome.dart' show WindowTitleBar;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -1268,6 +1269,192 @@ void main() {
         await tester.pump(const Duration(seconds: 1));
         expect(find.byKey(ChatWindow.headerKey), findsOneWidget, reason: why);
         expect(find.byType(WindowTitleBar), findsNothing, reason: why);
+      }
+    });
+  });
+
+  // ── the brand's logo, whole, on its plate (contract/DESIGN.md, "The brand's logo") ──
+  // Reported: an uploaded logo did not show fully. The avatar drew it with
+  // `cover` across the circle — a wordmark lost both ends — and on the
+  // accent, where a logo in the brand's own colour vanished.
+  group("the brand's logo", () {
+    /// [preset]'s design with the logo as its launcher (and, optionally, another launcher shape).
+    ResolvedDesign logoDesign(String preset, {String? shape}) {
+      final raw = all.firstWhere((Map<String, Object?> c) =>
+          (c['config']! as Map<String, Object?>).length == 1 &&
+          (c['config']! as Map<String, Object?>)['preset'] == preset)['design']! as Map<String, Object?>;
+      Map<String, Object?> side(Object? tokens) {
+        final m = Map<String, Object?>.of(tokens! as Map<String, Object?>);
+        m['icons'] = <String, Object?>{...(m['icons']! as Map<String, Object?>), 'launcher': null};
+        if (shape != null) m['shape'] = <String, Object?>{...(m['shape']! as Map<String, Object?>), 'launcher': shape};
+        return m;
+      }
+
+      return ResolvedDesign.fromJson(<String, Object?>{...raw, 'light': side(raw['light']), 'dark': side(raw['dark'])})!;
+    }
+
+    Map<String, Object?> withLogo([String? plate]) => <String, Object?>{
+          'title': 'Asha',
+          'mode': 'voice',
+          'logo': 'org/wordmark.png',
+          if (plate != null) 'logoPlate': plate,
+        };
+
+    Finder avatar() => find.byKey(GraineAgentBar.avatarKey);
+    Image logoIn(WidgetTester tester, Finder within) =>
+        tester.widget<Image>(find.descendant(of: within, matching: find.byKey(logoKey)));
+
+    testWidgets('the avatar draws the logo whole: fitted into the largest square the circle holds, never cropped',
+        (WidgetTester tester) async {
+      for (final design in <ResolvedDesign?>[designs[1], logoDesign('graine-classic'), null]) {
+        final call = FakeCall()..appearance = withLogo();
+        await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: design, key: UniqueKey())));
+        final img = logoIn(tester, avatar());
+        expect(img.fit, BoxFit.contain, reason: 'the logo is cropped to fill the circle');
+        expect(img.width, 26, reason: 'floor(38 × 0.7): the largest square the circle holds');
+        expect(img.height, 26);
+        expect((img.image as NetworkImage).url, contains('wordmark.png'));
+        expect(tester.getSize(avatar()), const Size(38, 38));
+      }
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('a logo on the white plate sits on white with a hairline in border; on the accent plate, the accent',
+        (WidgetTester tester) async {
+      final design = logoDesign('graine-classic');
+      final t = design.light;
+      for (final plate in <String?>['white', 'accent', null, 'WHITE']) {
+        final call = FakeCall()..appearance = withLogo(plate);
+        await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false, design: design, key: UniqueKey())));
+        final d = decorationOf(tester, avatar());
+        if (plate == 'white') {
+          expect(d.color, const Color(0xFFFFFFFF), reason: 'plate $plate');
+          expect(d.border, Border.all(color: hex(t.colors.border), width: math.max(1, t.shape.borderWidth)),
+              reason: 'a white plate on a white bar needs its hairline');
+        } else {
+          expect(d.color, hex(t.colors.accent), reason: 'plate $plate');
+          expect(d.border, isNull, reason: 'plate $plate');
+        }
+      }
+      // No design: the same plate, the bar's own hairline colour.
+      await tester.pumpWidget(host(GraineAgentBar(call: FakeCall()..appearance = withLogo('white'), showComponents: false)));
+      final d = decorationOf(tester, avatar());
+      expect(d.color, const Color(0xFFFFFFFF));
+      expect(d.border, Border.all(color: const Color(0x1A000000)));
+      // A glyph is never on the plate, whatever the logo's says.
+      await tester.pumpWidget(host(GraineAgentBar(
+          call: FakeCall()..appearance = withLogo('white'), showComponents: false, design: designs[0], key: UniqueKey())));
+      expect(decorationOf(tester, avatar()).color, hex(designs[0].light.colors.accent));
+      expect(decorationOf(tester, avatar()).border, isNull);
+      expect(find.descendant(of: avatar(), matching: find.byKey(BrandMark.glyphKey)), findsOneWidget);
+    });
+
+    testWidgets("a logo that cannot load leaves the name's letter, readable on its plate", (WidgetTester tester) async {
+      // flutter_test answers every image request with an error: the fallback is what shows.
+      await tester.pumpWidget(host(GraineAgentBar(
+          call: FakeCall()..appearance = withLogo('white'), showComponents: false, design: logoDesign('graine-classic'))));
+      await tester.pump();
+      await tester.pump();
+      final letter = find.descendant(of: avatar(), matching: find.text('A'));
+      expect(letter, findsOneWidget);
+      expect(tester.widget<Text>(letter).style!.color, const Color(0xFF101318), reason: 'dark ink on the white plate');
+    });
+
+    testWidgets('the launcher draws the logo whole in the largest square its shape holds, on its plate',
+        (WidgetTester tester) async {
+      Finder launcher() => find.byKey(GraineLauncher.launcherKey);
+      BoxDecoration box() => decorationOf(tester, find.descendant(of: launcher(), matching: find.byType(Container)).first);
+      for (final (preset, shape, side) in <(String, String?, double)>[
+        ('graine-classic', null, 39),
+        ('material-3', null, 44),
+        ('carbon', null, 44),
+        ('warm-earthy', null, 39),
+        ('liquid-glass', null, 39),
+      ]) {
+        final design = logoDesign(preset, shape: shape);
+        final t = design.light;
+        for (final plate in <String?>['white', null]) {
+          final call = FakeCall()..appearance = withLogo(plate);
+          await tester.pumpWidget(placed(GraineLauncher(call: call, design: design, label: 'Talk to Asha', key: UniqueKey())));
+          await tester.pump(const Duration(milliseconds: 400));
+          final why = '$preset (${t.shape.launcher}) on the ${plate ?? 'default'} plate';
+          final img = logoIn(tester, launcher());
+          expect(img.fit, BoxFit.contain, reason: why);
+          expect(<double?>[img.width, img.height], <double>[side, side], reason: why);
+          final d = box();
+          if (plate == 'white') {
+            expect(d.color, const Color(0xFFFFFFFF), reason: why);
+            expect(d.border, Border.all(color: hex(t.colors.border), width: math.max(1, t.shape.borderWidth)),
+                reason: why);
+          } else {
+            expect(d.color, hex(t.colors.accent), reason: why);
+            expect(d.border, isNull, reason: why);
+          }
+          if (t.shape.launcher == 'pill') {
+            expect(styleOf(tester, 'Talk to Asha').color,
+                plate == 'white' ? const Color(0xFF101318) : hex(t.colors.onAccent),
+                reason: "$why: a pill's label");
+          }
+        }
+      }
+    });
+
+    testWidgets("neo-brutalist on the white plate: white, its text-coloured outline kept; the pill's label in dark ink",
+        (WidgetTester tester) async {
+      final t = designs[1].dark;
+      final call = FakeCall()..appearance = withLogo('white');
+      await tester.pumpWidget(placed(GraineLauncher(call: call, design: designs[1], label: 'Talk to Asha')));
+      final d = decorationOf(
+          tester, find.descendant(of: find.byKey(GraineLauncher.launcherKey), matching: find.byType(Container)).first);
+      expect(d.color, const Color(0xFFFFFFFF));
+      expect(d.border, Border.all(color: hex(t.colors.text), width: 2), reason: 'a hard offset keeps its outline');
+      expect(d.boxShadow, <BoxShadow>[BoxShadow(color: hex(t.colors.text), offset: const Offset(4, 4))]);
+      expect(styleOf(tester, 'Talk to Asha').color, const Color(0xFF101318));
+      final img = logoIn(tester, find.byKey(GraineLauncher.launcherKey));
+      expect(img.fit, BoxFit.contain);
+      expect(img.width, 39, reason: 'a pill: its height, as a circle');
+    });
+
+    testWidgets("no design: the dashboard's accent, or the white plate with the classic hairline", (WidgetTester tester) async {
+      Finder launcher() => find.byKey(GraineLauncher.launcherKey);
+      final call = FakeCall()..appearance = <String, Object?>{...withLogo('white'), 'accent': '12AB34'};
+      await tester.pumpWidget(placed(GraineLauncher(call: call)));
+      var d = decorationOf(tester, find.descendant(of: launcher(), matching: find.byType(Container)).first);
+      expect(d.color, const Color(0xFFFFFFFF));
+      expect(d.border, Border.all(color: const Color(0xFFE5E7EB)));
+      final img = logoIn(tester, launcher());
+      expect(img.fit, BoxFit.contain);
+      expect(img.width, 39);
+      call.appearance = <String, Object?>{...withLogo(), 'accent': '12AB34'};
+      await tester.pumpWidget(placed(GraineLauncher(call: call, key: UniqueKey())));
+      d = decorationOf(tester, find.descendant(of: launcher(), matching: find.byType(Container)).first);
+      expect(d.color, const Color(0xFF12AB34));
+      expect(d.border, isNull);
+    });
+
+    testWidgets("the chat header's mark: the logo whole in its shape's square, on its plate", (WidgetTester tester) async {
+      for (final (shape, side) in <(String?, double)>[(null, 21), ('rounded-square', 24)]) {
+        final design = logoDesign('graine-classic', shape: shape);
+        final t = design.light;
+        final call = FakeCall()
+          ..appearance = <String, Object?>{...withLogo('white'), 'mode': 'both', 'start': 'chat'};
+        final chat = FakeChat(const <Caption>[Caption(Role.agent, 'Hi!')]);
+        await tester.pumpWidget(host(
+            GraineAgentBar(call: call, chat: chat, showComponents: false, design: design, key: UniqueKey())));
+        await tester.pump(const Duration(seconds: 1));
+        final header = find.byKey(ChatWindow.headerKey);
+        final img = logoIn(tester, header);
+        expect(img.fit, BoxFit.contain, reason: '$shape');
+        expect(<double?>[img.width, img.height], <double>[side, side], reason: '$shape');
+        final mark = find
+            .ancestor(of: find.descendant(of: header, matching: find.byKey(logoKey)), matching: find.byType(Container))
+            .first;
+        expect(tester.getSize(mark), const Size(30, 30));
+        expect(decorationOf(tester, mark).color, const Color(0xFFFFFFFF));
+        expect(decorationOf(tester, mark).border,
+            Border.all(color: hex(t.colors.border), width: math.max(1, t.shape.borderWidth)));
+        await tester.pumpWidget(const SizedBox());
+        chat.dispose();
       }
     });
   });

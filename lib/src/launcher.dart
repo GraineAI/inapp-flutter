@@ -14,7 +14,10 @@ import 'style.dart';
 ///
 /// The brand's design draws it (contract/DESIGN.md, "Launcher"): 56 × 56 — a
 /// `pill` 56 high and as wide as its label — filled with `accent`; the
-/// design's glyph (or the brand's logo) in `onAccent` at 46% of the height;
+/// design's glyph in `onAccent` at 46% of the height, or the brand's logo
+/// whole — fitted into the largest square the shape holds, never cropped —
+/// on its plate (the accent, or white with a hairline and a pill's label in
+/// dark ink: "The brand's logo");
 /// corners by `shape.launcher` (`circle` fully round, `squircle` 30% of the
 /// size, `rounded-square` `radius.lg`, `square` `radius.sm`); the floating
 /// shadow, or — neo-brutalist — a solid `colors.text` copy offset by the hard
@@ -81,22 +84,32 @@ class GraineLauncher extends StatelessWidget {
     final Border? outline;
     final Widget mark;
     TextStyle? labelStyle;
+    final hasLogo = (dash.logoUrl ?? '').isNotEmpty;
     if (tokens != null) {
       final t = tokens;
-      fill = tokenColor(t.colors.accent);
-      inkHex = t.colors.onAccent;
       shape = t.shape.launcher;
       radius = Design.launcherRadius(shape, t.shape.radius, h);
       final hard = t.elevation.hardOffset;
       final text = tokenColor(t.colors.text);
+      // The brand's logo sits on its plate; a glyph or a letter always on the accent.
+      final onPlate = t.icons.launcher == null && hasLogo ? dash.logoPlate : LogoPlate.accent;
+      final plate = logoPlateOf(onPlate,
+          accent: tokenColor(t.colors.accent), border: tokenColor(t.colors.border), borderWidth: t.shape.borderWidth);
+      fill = plate.color;
+      inkHex = inkOnPlate(onPlate, t.colors.onAccent);
       shadows = hard != null ? <BoxShadow>[hardShadowOf(hard, text)] : shadowsOf(t.elevation.floating);
-      outline = hard != null && t.shape.borderWidth > 0 ? Border.all(color: text, width: t.shape.borderWidth) : null;
+      // A hard offset keeps its colors.text outline instead of the plate's hairline.
+      outline = hard != null
+          ? (t.shape.borderWidth > 0 ? Border.all(color: text, width: t.shape.borderWidth) : null)
+          : plate.border;
       mark = BrandMark(
         glyph: t.icons.launcher,
         colorHex: inkHex,
         size: glyphSize,
         stroke: t.icons.stroke,
         logoUrl: dash.logoUrl,
+        // Whole, in the largest square the shape holds (a pill: its height, as a circle).
+        logoSize: BrandLogo.box(shape == 'pill' ? 'circle' : shape, h).toDouble(),
         name: words,
         origin: app?.config.baseUrl,
       );
@@ -104,14 +117,25 @@ class GraineLauncher extends StatelessWidget {
       labelStyle = designText(tokenColor(inkHex), f.scale.body, f.body, f.weights.strong,
           letterSpacing: f.letterSpacing.body * f.scale.body);
     } else {
-      fill = colorOf(dash.accent) ?? colorOf(Appearance.defaultAccent)!;
-      inkHex = readableHexOn(fill);
+      final accent = colorOf(dash.accent) ?? colorOf(Appearance.defaultAccent)!;
+      final onPlate = hasLogo ? dash.logoPlate : LogoPlate.accent;
+      // The React Native SDK's classic launcher: a white plate's hairline is 1 in #E5E7EB.
+      final plate = logoPlateOf(onPlate, accent: accent, border: const Color(0xFFE5E7EB), borderWidth: 1);
+      fill = plate.color;
+      inkHex = inkOnPlate(onPlate, readableHexOn(accent));
       shape = 'circle';
       radius = h / 2;
       shadows = const <BoxShadow>[BoxShadow(color: Color(0x4D000000), blurRadius: 16, offset: Offset(0, 6))];
-      outline = null;
+      outline = plate.border;
       // No name: the SDK's own mark when there is no logo, as the bar's avatar shows.
-      mark = BrandMark(glyph: null, colorHex: inkHex, size: glyphSize, logoUrl: dash.logoUrl, name: '');
+      mark = BrandMark(
+        glyph: null,
+        colorHex: inkHex,
+        size: glyphSize,
+        logoUrl: dash.logoUrl,
+        logoSize: BrandLogo.box('circle', h).toDouble(),
+        name: '',
+      );
     }
 
     final pill = shape == 'pill';

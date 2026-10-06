@@ -38,6 +38,7 @@ class ChatLook {
     required this.pad,
     required this.gap,
     required this.markRadius,
+    this.markShape = 'circle',
     required this.glyph,
     required this.iconStyle,
     required this.iconStroke,
@@ -83,6 +84,7 @@ class ChatLook {
       pad: t.spacing.cardPadding,
       gap: t.spacing.gap,
       markRadius: Design.launcherRadius(shape, t.shape.radius, 30),
+      markShape: shape,
       glyph: t.icons.launcher,
       iconStyle: t.icons.style,
       iconStroke: t.icons.stroke,
@@ -177,6 +179,10 @@ class ChatLook {
 
   /// The 30-point launcher mark's corners.
   final double markRadius;
+
+  /// The mark's shape — the launcher's, a pill drawn as a circle — which
+  /// sets the square the brand's logo is fitted into ([BrandLogo.box]).
+  final String markShape;
   final LauncherGlyph? glyph;
   final String iconStyle;
   final double iconStroke;
@@ -215,6 +221,7 @@ class ChatWindow extends StatefulWidget {
     required this.onSend,
     required this.onCollapse,
     this.logoUrl,
+    this.logoPlate = LogoPlate.accent,
     this.origin,
     this.lifted = false,
   });
@@ -230,6 +237,9 @@ class ChatWindow extends StatefulWidget {
   /// The chevron: back to the call, or — an agent that is only a chat — closed.
   final VoidCallback onCollapse;
   final String? logoUrl;
+
+  /// What the logo sits on in the header's mark: the accent, or white with a hairline.
+  final LogoPlate logoPlate;
   final String? origin;
 
   /// The keyboard is up: fewer messages, so the composer stays in view.
@@ -326,12 +336,22 @@ class _ChatWindowState extends State<ChatWindow> {
   Widget _header(ChatLook l) {
     final line = l.borderWidth > 0 ? l.borderWidth : 0.0;
     final initial = initialOf(widget.heading);
+    final url = widget.logoUrl;
+    final logo = url != null && url.isNotEmpty ? url : null;
+    // The brand's logo, whole, on its plate; a glyph or a letter on the accent
+    // (contract/DESIGN.md, "The brand's logo").
+    final onPlate = l.glyph == null && logo != null ? widget.logoPlate : LogoPlate.accent;
+    final fill = logoPlateOf(onPlate, accent: l.accent, border: l.border, borderWidth: l.borderWidth);
+    final box = BrandLogo.box(l.markShape, 30).toDouble();
+    Widget letter() =>
+        Text(initial, style: textStyle(tokenColor(inkOnPlate(onPlate, l.onAccentHex)), 12, weight: 700, height: 1));
     final mark = Container(
       width: 30,
       height: 30,
       alignment: Alignment.center,
       clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(color: l.accent, borderRadius: BorderRadius.circular(l.markRadius)),
+      decoration:
+          BoxDecoration(color: fill.color, borderRadius: BorderRadius.circular(l.markRadius), border: fill.border),
       child: l.glyph != null
           ? BrandMark(
               glyph: l.glyph,
@@ -339,18 +359,13 @@ class _ChatWindowState extends State<ChatWindow> {
               size: 14,
               stroke: l.iconStroke,
               logoUrl: widget.logoUrl,
+              logoSize: box,
               name: widget.heading,
               origin: widget.origin,
             )
-          : (widget.logoUrl != null && widget.logoUrl!.isNotEmpty)
-              ? Image.network(widget.logoUrl!,
-                  width: 14,
-                  height: 14,
-                  fit: BoxFit.contain,
-                  excludeFromSemantics: true,
-                  errorBuilder: (BuildContext c, Object e, StackTrace? s) =>
-                      Text(initial, style: textStyle(l.onAccent, 12, weight: 700, height: 1)))
-              : Text(initial, style: textStyle(l.onAccent, 12, weight: 700, height: 1)),
+          : logo != null
+              ? logoWhole(logo, box, fallback: letter)
+              : letter(),
     );
     return Column(
       mainAxisSize: MainAxisSize.min,

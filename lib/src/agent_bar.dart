@@ -347,9 +347,36 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
   GraineCallState get _call => widget.call ?? GraineInApp.instance.voice;
   GraineComponents? get _components => widget.components ?? GraineInApp.maybeInstance?.components;
 
+  /// The call this bar has told it is on screen ([GraineVoice.viewOpened]):
+  /// while it is, a page still loading is a customer waiting.
+  GraineVoice? _viewing;
+
+  void _holdView() {
+    final call = widget.call ?? GraineInApp.maybeInstance?.voice;
+    final next = call is GraineVoice ? call : null;
+    if (identical(next, _viewing)) return;
+    _viewing?.viewClosed();
+    _viewing = next;
+    next?.viewOpened();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _holdView();
+  }
+
+  @override
+  void dispose() {
+    _viewing?.viewClosed();
+    _viewing = null;
+    super.dispose();
+  }
+
   @override
   void didUpdateWidget(GraineAgentBar old) {
     super.didUpdateWidget(old);
+    _holdView();
     // A restored position arriving later (read from storage after the first frame).
     if (widget.initialOffset != old.initialOffset && widget.initialOffset != null && !_dragging) {
       _offset = widget.initialOffset!;
@@ -414,6 +441,8 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
   @override
   Widget build(BuildContext context) {
     final call = _call;
+    // GraineInApp.init may have run after this bar mounted.
+    _holdView();
     // A design handed to this bar directly has its typeface fetched too; the
     // session's is fetched when the session arrives. Each face once.
     if (widget.design != null) GraineInApp.maybeInstance?.loadDesignFonts(widget.design);
@@ -458,6 +487,8 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
 
     // A host's own call state need not say; GraineVoice does.
     final fault = switch (call) { GraineCallFault(:final error) => error, _ => null };
+    final progress = switch (call) { GraineConnectProgress p => p, _ => null };
+    final callFailed = progress?.callFailed ?? false;
     final phase = callPhase(
       reconnecting: call.reconnecting,
       connectivity: call.connectivity,
@@ -482,6 +513,11 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
       thinking: phase == CallPhase.thinking,
       speaking: phase == CallPhase.speaking,
       quality: call.quality,
+      callFailed: callFailed,
+      connectStage: progress?.connectStage,
+      slowConnect: progress?.slowConnect ?? false,
+      // The brand's words for connecting: a wording it chose is never replaced.
+      connectingText: loader.text.connecting,
     );
     final failed = call.connectivity == GraineConnectivity.failed;
     // The microphone cannot act while the call is being placed, before the
@@ -546,7 +582,7 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
             color: loaderColor,
             trackColor: p.border,
             size: 14,
-            label: loader.text.forMoment(waiting) ?? status.text,
+            label: status.label ?? loader.text.forMoment(waiting) ?? status.text,
             labelColor: p.muted,
             labelStyle: p.waitingStyle,
             logoUrl: dash.logoUrl,
@@ -563,7 +599,7 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
           );
 
     final row = <Widget>[
-      _avatar(p, name: name, logoUrl: dash.logoUrl, origin: app?.config.baseUrl),
+      _avatar(p, name: name, logoUrl: dash.logoUrl, plate: dash.logoPlate, origin: app?.config.baseUrl),
       const SizedBox(width: 10),
       Expanded(
         child: Column(
@@ -593,12 +629,15 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
         ),
       ],
       // Off a call the microphone STARTS one; on a call it is the mute; after
-      // a failed load it retries.
+      // a failed load it retries; after a call nothing could carry, it starts
+      // a new one.
       if (!isChat) ...<Widget>[
         const SizedBox(width: 10),
         round(
           key: call.connected ? GraineAgentBar.muteButtonKey : GraineAgentBar.callButtonKey,
-          label: failed ? 'Try again' : (!call.connected ? 'Start talking to $name' : (call.muted ? 'Unmute' : 'Mute')),
+          label: failed || (callFailed && !call.connected)
+              ? 'Try again'
+              : (!call.connected ? 'Start talking to $name' : (call.muted ? 'Unmute' : 'Mute')),
           fill: call.muted ? p.danger : p.accent,
           enabled: !micBlocked,
           child: icon(call.muted ? 'micOff' : 'mic', call.muted ? _white : p.onAccent),
@@ -655,6 +694,7 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
             // Back to the call — or, for an agent that is only a chat, closed.
             onCollapse: canSwitch ? () => _setSurface(AgentSurface.voice, call) : () => _endOrClose(call),
             logoUrl: dash.logoUrl,
+            logoPlate: dash.logoPlate,
             origin: app?.config.baseUrl,
             lifted: keyboard > 0,
           ),
@@ -778,21 +818,25 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
     if (notify != null) SchedulerBinding.instance.addPostFrameCallback((Duration _) => notify(surface));
   }
 
-  /// The avatar, 38 round on the accent: a face the host passed; else the
-  /// design's launcher glyph in onAccent at 18; else the brand's logo filling
-  /// the circle; else the name's first letter, 15, bold — each falling to
-  /// the next when it cannot be shown.
-  Widget _avatar(_BarLook p, {required String name, String? logoUrl, String? origin}) {
+  /// The avatar, 38 round: a face the host passed; else the design's
+  /// launcher glyph in onAccent at 18, on the accent; else the brand's logo
+  /// WHOLE — fitted into the largest square the circle holds, never cropped
+  /// — on its plate (the accent, or white with a hairline); else the name's
+  /// first letter, 15, bold — each falling to the next when it cannot be
+  /// shown (contract/DESIGN.md, "Voice bar" and "The brand's logo").
+  Widget _avatar(_BarLook p,
+      {required String name, String? logoUrl, LogoPlate plate = LogoPlate.accent, String? origin}) {
+    const double size = 38;
     final initial = initialOf(name);
-    Widget letter() => Text(initial, style: textStyle(p.onAccent, 15, weight: 700, height: 1));
-    Widget cover(String url, Widget Function() fallback) => Image.network(
-          url,
-          width: 38,
-          height: 38,
-          fit: BoxFit.cover,
-          excludeFromSemantics: true,
-          errorBuilder: (BuildContext c, Object e, StackTrace? s) => Center(child: fallback()),
-        );
+    final own = widget.avatarUrl;
+    final face = own != null && own.isNotEmpty ? own : null;
+    final logo = logoUrl != null && logoUrl.isNotEmpty ? logoUrl : null;
+    // The plate is the logo's: a glyph, a letter or the host's own face sit on the accent.
+    final onPlate = face == null && p.glyph == null && logo != null ? plate : LogoPlate.accent;
+    final fill = logoPlateOf(onPlate, accent: p.accent, border: p.border, borderWidth: p.borderWidth);
+    final box = BrandLogo.box('circle', size).toDouble();
+    Widget letter() =>
+        Text(initial, style: textStyle(tokenColor(inkOnPlate(onPlate, p.onAccentHex)), 15, weight: 700, height: 1));
     Widget brand() {
       final glyph = p.glyph;
       if (glyph != null) {
@@ -802,23 +846,33 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
           size: 18,
           stroke: p.iconStroke,
           logoUrl: logoUrl,
+          logoSize: box,
           name: name,
           origin: origin,
         );
       }
-      if (logoUrl != null && logoUrl.isNotEmpty) return cover(logoUrl, letter);
+      if (logo != null) return logoWhole(logo, box, fallback: letter);
       return letter();
     }
 
-    final own = widget.avatarUrl;
     return Container(
       key: GraineAgentBar.avatarKey,
-      width: 38,
-      height: 38,
+      width: size,
+      height: size,
       alignment: Alignment.center,
       clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(color: p.accent, shape: BoxShape.circle),
-      child: (own != null && own.isNotEmpty) ? cover(own, brand) : brand(),
+      decoration: BoxDecoration(color: fill.color, shape: BoxShape.circle, border: fill.border),
+      // A face fills the circle (it is a photograph, not a mark).
+      child: face != null
+          ? Image.network(
+              face,
+              width: size,
+              height: size,
+              fit: BoxFit.cover,
+              excludeFromSemantics: true,
+              errorBuilder: (BuildContext c, Object e, StackTrace? s) => Center(child: brand()),
+            )
+          : brand(),
     );
   }
 }

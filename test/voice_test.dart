@@ -5,7 +5,8 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
-import 'package:flutter/widgets.dart' show Brightness;
+import 'package:flutter/widgets.dart'
+    show Brightness, Directionality, MediaQuery, MediaQueryData, Size, SizedBox, Stack, TextDirection, Widget;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:graine_inapp/graine_inapp.dart';
 import 'package:http/http.dart' as http;
@@ -571,6 +572,173 @@ void main() {
     page.say(<String, Object?>{'type': 'graine:network', 'online': false});
     expect(g.voice.quality, ConnectionQuality.lost);
     expect(g.voice.online, isFalse);
+    await finish(tester, g);
+  });
+
+  // ── graine:progress — a connect that says where it is (contract/DESIGN.md, "Connecting") ──
+
+  GraineInApp slowApp(WidgetTester tester, Log log) {
+    final g = app(tester,
+        config: const GraineConfig(
+          baseUrl: '$base/',
+          publishableKey: 'pk_test_1',
+          timing: GraineTiming(slowConnectMs: 120),
+        ));
+    g.addListener(log);
+    return g;
+  }
+
+  testWidgets("the engine's stages reach the call, and an answered call clears them", (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': false, 'connecting': true});
+    expect(g.voice.connectStage, isNull);
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'registering'});
+    expect(g.voice.connectStage, ConnectStage.registering);
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'dialling'});
+    expect(g.voice.connectStage, ConnectStage.dialling);
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'retrying'});
+    expect(g.voice.connectStage, ConnectStage.retrying);
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'nonsense'});
+    expect(g.voice.connectStage, ConnectStage.retrying, reason: 'an unknown stage is ignored, not stored');
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'switching'});
+    expect(g.voice.connectStage, ConnectStage.switching);
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
+    expect(g.voice.connectStage, isNull, reason: 'a connected call still claimed to be switching');
+    expect(g.voice.callFailed, isFalse);
+    await finish(tester, g);
+  });
+
+  testWidgets('when nothing could carry the call, the connect ends and the next start tries again',
+      (WidgetTester tester) async {
+    final log = Log();
+    final g = app(tester);
+    g.addListener(log);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': false, 'connecting': true});
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'switching'});
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'failed'});
+    expect(g.voice.callFailed, isTrue);
+    expect(g.voice.connecting, isFalse, reason: 'the bar went on saying connecting after the engine gave up');
+    expect(g.voice.connectStage, isNull);
+    expect(log.events.last, 'call false false', reason: 'the host was not told the attempt is over');
+    // The page said "not connecting" first: the failure is still the end of the attempt.
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': false, 'connecting': false});
+    log.events.clear();
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'failed'});
+    expect(log.events, <String>['call false false']);
+    page.clear();
+    await g.voice.start();
+    expect(g.voice.callFailed, isFalse, reason: "a new attempt still showed the last one's failure");
+    expect(page.types, contains('graine:start-call'), reason: 'a start after a failed connect places a new call');
+    await finish(tester, g);
+  });
+
+  testWidgets('a connect the customer is waiting on admits it is slow; one that lands never does',
+      (WidgetTester tester) async {
+    final g = slowApp(tester, Log());
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': false, 'connecting': true});
+    expect(g.voice.slowConnect, isFalse);
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(g.voice.slowConnect, isFalse);
+    await tester.pump(const Duration(milliseconds: 40));
+    expect(g.voice.slowConnect, isTrue, reason: 'past the slow mark, the bar still said Connecting…');
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
+    expect(g.voice.slowConnect, isFalse);
+    await finish(tester, g);
+  });
+
+  testWidgets('a failed connect is not a slow one', (WidgetTester tester) async {
+    final g = slowApp(tester, Log());
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    await g.voice.start();
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(g.voice.slowConnect, isTrue);
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'failed'});
+    expect(g.voice.slowConnect, isFalse);
+    await tester.pump(const Duration(milliseconds: 200));
+    expect(g.voice.slowConnect, isFalse);
+    await finish(tester, g);
+  });
+
+  testWidgets("an idle page loading behind no bar is nobody's slow connect; with a bar open it is",
+      (WidgetTester tester) async {
+    final g = slowApp(tester, Log());
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(g.voice.ready, isFalse);
+    expect(g.voice.slowConnect, isFalse, reason: 'nobody is waiting on a page loading idle');
+    g.voice.viewOpened();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(g.voice.slowConnect, isFalse);
+    await tester.pump(const Duration(milliseconds: 40));
+    expect(g.voice.slowConnect, isTrue, reason: 'the bar is open and the page is still not there');
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    expect(g.voice.slowConnect, isFalse, reason: 'it landed');
+    g.voice.viewClosed();
+    await finish(tester, g);
+  });
+
+  testWidgets('closing the last bar clears a failed connect, as the customer closing the agent',
+      (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    g.voice.viewOpened();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'failed'});
+    expect(g.voice.callFailed, isTrue);
+    var heard = 0;
+    void count() => heard++;
+    g.voice.addListener(count);
+    g.voice.viewClosed();
+    expect(g.voice.callFailed, isFalse);
+    await tester.pump();
+    expect(heard, greaterThan(0), reason: 'listeners hear the failure clear');
+    g.voice.removeListener(count);
+    await finish(tester, g);
+  });
+
+  testWidgets('the bar on screen is a customer waiting: a page slow to load says so, and stops when the bar goes',
+      (WidgetTester tester) async {
+    final g = slowApp(tester, Log());
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(g.voice.slowConnect, isFalse, reason: 'no bar yet: nobody is waiting');
+    await tester.pumpWidget(MediaQuery(
+      data: const MediaQueryData(size: Size(800, 600)),
+      child: Directionality(
+        textDirection: TextDirection.ltr,
+        child: Stack(children: <Widget>[GraineAgentBar(call: g.voice, showComponents: false)]),
+      ),
+    ));
+    expect(find.text('Connecting…'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 140));
+    expect(g.voice.slowConnect, isTrue);
+    await tester.pump();
+    expect(find.text('Still connecting…'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox());
+    expect(g.voice.slowConnect, isFalse, reason: 'the bar closed: nobody is waiting any more');
     await finish(tester, g);
   });
 }

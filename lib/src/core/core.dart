@@ -15,6 +15,7 @@ export 'icons.dart';
 export 'js.dart';
 export 'loader.dart';
 export 'loading.dart';
+export 'logo.dart';
 export 'masking.dart';
 export 'placement.dart';
 export 'protocol.dart';

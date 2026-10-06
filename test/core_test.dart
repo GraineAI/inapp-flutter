@@ -41,6 +41,7 @@ void main() {
   widgetFlowTests();
   frictionTests();
   appearanceTests();
+  logoTests();
   loaderTests();
   barTests();
   voiceBarTests();
@@ -100,6 +101,10 @@ void protocolTests() {
       expect(Protocol.parse('{"type":"graine:mic-denied"}'), const PageMicDenied('NotAllowedError'));
       expect(Protocol.parse('{"type":"graine:network","online":false}'), const PageNetwork(false));
       expect(Protocol.parse('{"type":"graine:reconnecting","active":true}'), const PageReconnecting(true));
+      expect(Protocol.parse('{"type":"graine:progress","stage":"dialling"}'), const PageProgress('dialling'));
+      expect((Protocol.parse('{"type":"graine:progress","stage":"failed"}')! as PageProgress).failed, isTrue);
+      expect(Protocol.parse('{"type":"graine:progress"}'), const PageProgress(''),
+          reason: 'a progress with no stage is carried, and ignored by the call');
 
       final q = Protocol.parse('{"type":"graine:quality","sample":{"rtt":480,"jitter":40,"loss":0.1}}')! as PageQuality;
       expect(ConnectionQuality.classify(q.rttMs, q.jitterMs, q.loss), ConnectionQuality.poor);
@@ -997,12 +1002,65 @@ void appearanceTests() {
       expect(<Object?>[none.accent, none.heading, none.logoUrl, none.radius], <Object?>['#318CE7', 'Assistant', null, 48]);
     });
 
+    test("the logo's plate is read from the appearance, and anything unknown is the accent", () {
+      NativeAppearance a(Map<String, Object?> raw) => Appearance.resolve(raw, accent: '#318CE7', heading: 'Assistant');
+      expect(a(<String, Object?>{'logo': 'embed-logos/a.png', 'logoPlate': 'white'}).logoPlate, LogoPlate.white);
+      expect(a(<String, Object?>{'logo': 'embed-logos/a.png', 'logoPlate': 'accent'}).logoPlate, LogoPlate.accent);
+      expect(a(<String, Object?>{'logo': 'embed-logos/a.png', 'logoPlate': 'chartreuse'}).logoPlate, LogoPlate.accent);
+      expect(a(<String, Object?>{'logoPlate': 'WHITE'}).logoPlate, LogoPlate.accent, reason: 'exactly "white", as theme.ts reads it');
+      expect(a(<String, Object?>{'logoPlate': 1}).logoPlate, LogoPlate.accent);
+      expect(a(<String, Object?>{}).logoPlate, LogoPlate.accent);
+      expect(Appearance.resolve(null, accent: '#318CE7', heading: 'Assistant').logoPlate, LogoPlate.accent);
+    });
+
     test('a button label stays readable on any accent someone picks', () {
       expect(Appearance.palette(<String, Object?>{}, accent: '#318CE7').onAccent, '#FFFFFF');
       expect(Appearance.palette(<String, Object?>{}, accent: '#FFD400').onAccent, '#101318');
       expect(Appearance.palette(<String, Object?>{'theme': 'auto'}, deviceDark: true).mode, 'dark');
       expect(Appearance.palette(<String, Object?>{'theme': 'light'}, deviceDark: true).mode, 'light');
       expect(Appearance.palette(null).mode, 'light');
+    });
+  });
+}
+
+void logoTests() {
+  group('BrandLogo', () {
+    test('the plates are the accent and white; only "white" is white', () {
+      expect(LogoPlate.values.map((LogoPlate p) => p.wire), <String>['accent', 'white']);
+      expect(LogoPlate.from('white'), LogoPlate.white);
+      for (final v in <Object?>[null, '', 'black', 'WHITE', 'White', 3, true]) {
+        expect(LogoPlate.from(v), LogoPlate.accent, reason: '$v is not a plate');
+      }
+    });
+
+    test('a logo is fitted whole into the largest square its shape holds, rounded down', () {
+      expect(BrandLogo.box('circle', 38), 26);
+      expect(BrandLogo.box('circle', 30), 21);
+      expect(BrandLogo.box('circle', 56), 39);
+      expect(BrandLogo.box('squircle', 56), 39);
+      expect(BrandLogo.box('rounded-square', 56), 44);
+      expect(BrandLogo.box('square', 56), 44);
+      expect(BrandLogo.box('square', 30), 24);
+      expect(BrandLogo.box('rounded-square', 30), 24);
+      // A pill is passed as a circle at its height.
+      expect(BrandLogo.box('pill', 56), 39);
+      expect(BrandLogo.box('circle', 0), 1, reason: 'never nothing');
+      // The largest square inside a circle is 70.7% of it: a fitted logo never touches the edge.
+      for (final size in <double>[30, 38, 52, 56, 64]) {
+        expect(BrandLogo.box('circle', size), lessThanOrEqualTo(size / 1.4142135623730951));
+      }
+    });
+
+    test('the white plate is white with a max(1, borderWidth) hairline in border; the accent plate has none', () {
+      expect(BrandLogo.plateLook(LogoPlate.accent, accent: '#318CE7', border: '#E5E5E5'),
+          const LogoPlateLook(fill: '#318CE7'));
+      expect(BrandLogo.plateLook(LogoPlate.white, accent: '#318CE7', border: '#E5E5E5', borderWidth: 0),
+          const LogoPlateLook(fill: '#FFFFFF', outlineWidth: 1, outlineColor: '#E5E5E5'));
+      expect(BrandLogo.plateLook(LogoPlate.white, accent: '#318CE7', border: '#E5E5E5', borderWidth: 3),
+          const LogoPlateLook(fill: '#FFFFFF', outlineWidth: 3, outlineColor: '#E5E5E5'));
+      expect(BrandLogo.plateLook(LogoPlate.accent, accent: '#318CE7', border: '#E5E5E5', borderWidth: 3).hasOutline,
+          isFalse);
+      expect(BrandLogo.labelOnWhite, '#101318', reason: "a pill's label on the white plate");
     });
   });
 }
@@ -1422,8 +1480,16 @@ void voiceBarTests() {
       bool thinking = false,
       bool speaking = false,
       ConnectionQuality quality = ConnectionQuality.unknown,
+      bool callFailed = false,
+      ConnectStage? connectStage,
+      bool slowConnect = false,
+      String? connectingText,
     }) =>
         voiceBarStatus(
+          callFailed: callFailed,
+          connectStage: connectStage,
+          slowConnect: slowConnect,
+          connectingText: connectingText,
           error: error,
           inChat: inChat,
           chatOnline: chatOnline,
@@ -1465,6 +1531,10 @@ void voiceBarTests() {
           thinking: true, speaking: true, quality: ConnectionQuality.poor);
       expect(s, const BarStatus('Couldn’t load · tap to retry'), reason: 'a curly apostrophe, as React Native says it');
       s = status(
+          callFailed: true, ready: false, connecting: true, muted: true, connected: true, thinking: true,
+          speaking: true, quality: ConnectionQuality.poor);
+      expect(s, const BarStatus('Couldn’t connect · tap to retry'), reason: 'nothing could carry the call');
+      s = status(
           ready: false, connecting: true, muted: true, connected: true, thinking: true, speaking: true,
           quality: ConnectionQuality.poor);
       expect(s, const BarStatus('Connecting…', waiting: 'connecting'));
@@ -1484,6 +1554,59 @@ void voiceBarTests() {
       expect(status(connectivity: GraineConnectivity.retrying), const BarStatus('Reconnecting…', waiting: 'reconnecting'));
       expect(status(ready: false), const BarStatus('Connecting…', waiting: 'connecting'));
       expect(status(connecting: true), const BarStatus('Connecting…', waiting: 'connecting'));
+    });
+
+    test('a slow connect says what is happening instead of spinning on one word', () {
+      // The React Native voice bar's cases, word for word.
+      expect(status(connecting: true), const BarStatus('Connecting…', waiting: 'connecting'));
+      expect(status(connecting: true, slowConnect: true),
+          const BarStatus('Still connecting…', waiting: 'connecting', label: 'Still connecting…'));
+      expect(status(connecting: true, connectStage: ConnectStage.retrying),
+          const BarStatus('Reconnecting…', waiting: 'reconnecting'),
+          reason: "a retry is the loader's reconnecting moment, in the brand's words");
+      expect(status(connecting: true, connectStage: ConnectStage.retrying, slowConnect: true),
+          const BarStatus('Reconnecting…', waiting: 'reconnecting'));
+      expect(status(connecting: true, connectStage: ConnectStage.switching),
+          const BarStatus('Reconnecting…', waiting: 'reconnecting'));
+      expect(status(connecting: true, connectStage: ConnectStage.dialling, slowConnect: true),
+          const BarStatus('Still connecting…', waiting: 'connecting', label: 'Still connecting…'));
+      expect(status(connecting: true, connectStage: ConnectStage.registering),
+          const BarStatus('Connecting…', waiting: 'connecting'));
+      expect(status(ready: false, slowConnect: true),
+          const BarStatus('Still connecting…', waiting: 'connecting', label: 'Still connecting…'),
+          reason: 'a page the customer is waiting on is a slow connect too');
+      expect(status(callFailed: true), const BarStatus('Couldn’t connect · tap to retry'));
+    });
+
+    test('a brand that chose its own connecting words keeps them, however slow the connect', () {
+      const hindi = 'जुड़ रहा है…';
+      expect(status(connecting: true, slowConnect: true, connectingText: hindi),
+          const BarStatus(hindi, waiting: 'connecting'),
+          reason: "the brand's wording was replaced");
+      expect(status(connecting: true, connectingText: hindi), const BarStatus(hindi, waiting: 'connecting'));
+      // Words the brand left as the default are the default.
+      expect(status(connecting: true, slowConnect: true, connectingText: 'Connecting…').label, 'Still connecting…');
+      expect(connectingLook(slow: true, connectingText: Loaders.resolve(null).text.connecting).label,
+          'Still connecting…');
+      expect(
+          connectingLook(
+                  slow: true,
+                  connectingText: Loaders.resolve(<String, Object?>{
+                    'text': <String, Object?>{'connecting': 'Hold on…'},
+                  }).text.connecting)
+              .label,
+          isNull);
+    });
+
+    test('a stage this SDK does not know is no stage at all', () {
+      expect(ConnectStage.from('dialling'), ConnectStage.dialling);
+      expect(ConnectStage.from('failed'), isNull, reason: 'failed ends a connect; it is not a stage of one');
+      expect(ConnectStage.from('nonsense'), isNull);
+      expect(ConnectStage.from(null), isNull);
+      expect(ConnectStage.values.map((ConnectStage s) => s.wire),
+          <String>['registering', 'dialling', 'retrying', 'switching']);
+      expect(ConnectProgress.slowConnectMs, 4000);
+      expect(const GraineTiming().slowConnectMs, ConnectProgress.slowConnectMs);
     });
 
     test('in the chat, none of the call\'s words are true: "Online", or connecting', () {

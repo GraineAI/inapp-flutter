@@ -56,6 +56,7 @@ class BrandMark extends StatelessWidget {
     this.stroke = 2,
     this.logoUrl,
     this.origin,
+    this.logoSize,
   });
 
   /// Null: the brand chose its logo.
@@ -72,6 +73,10 @@ class BrandMark extends StatelessWidget {
 
   /// Where glyph images come from: the SDK's baseUrl.
   final String? origin;
+
+  /// The square the logo is fitted into, whole ([BrandLogo.box] of the
+  /// shape it sits in). Default: [size].
+  final double? logoSize;
 
   /// The painted glyph, for a test to find.
   static const Key glyphKey = ValueKey<String>('graine-glyph');
@@ -105,14 +110,8 @@ class BrandMark extends StatelessWidget {
   Widget _logo(Color color) {
     final url = logoUrl;
     if (url == null || url.isEmpty) return _letter(color);
-    return Image.network(
-      url,
-      width: size,
-      height: size,
-      fit: BoxFit.contain,
-      excludeFromSemantics: true,
-      errorBuilder: (BuildContext c, Object e, StackTrace? s) => _letter(color),
-    );
+    // Whole, never cropped (contract/DESIGN.md, "The brand's logo").
+    return logoWhole(url, logoSize ?? size, fallback: () => _letter(color));
   }
 
   Widget _letter(Color color) {

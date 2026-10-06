@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.4.0
+  graine_inapp: ^0.5.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -106,17 +106,26 @@ at mount, so a tap is an INVITE away rather than a page load away.
 its phone preview, drawn by the SDK from the brand's design (see Design
 below). Your app passes nothing about how it looks:
 
-- the avatar with the design's launcher glyph (or the logo, or the name's
-  first letter), the name, and a status line; the microphone starts a call,
-  mutes it during one and retries a load that failed; the end button hangs up
+- the avatar with the design's launcher glyph (or the brand's logo — drawn
+  whole, fitted into the circle and never cropped, on the plate the dashboard
+  chose for it: the accent, or white with a hairline — or the name's first
+  letter), the name, and a status line; the microphone starts a call, mutes
+  it during one, retries a load that failed and places a new call after one
+  that could not connect; the end button hangs up
   during a call and closes the bar off one (`onClose` hears both — hide the
   bar there, and bring it back with a `GraineLauncher`);
 - names the network before the agent takes the blame: *Unavailable*,
   *No connection*, *Reconnecting…*, *Needs microphone*,
-  *Couldn’t load · tap to retry*, *Connecting…*, *Muted*, *Thinking…*,
-  *Speaking*, *Weak connection*, *Listening*, *Tap to talk* — the dashboard's
-  loader stands in for the words while it connects, reconnects or thinks, and
-  a four-bar meter moves beside *Listening* and *Speaking* at the design's pace;
+  *Couldn’t load · tap to retry*, *Couldn’t connect · tap to retry*,
+  *Connecting…*, *Muted*, *Thinking…*, *Speaking*, *Weak connection*,
+  *Listening*, *Tap to talk* — the dashboard's loader stands in for the words
+  while it connects, reconnects or thinks, and a four-bar meter moves beside
+  *Listening* and *Speaking* at the design's pace;
+- says where a connect is: a retry or a switch to the other transport is the
+  loader's *reconnecting* moment in the brand's own words, and a connect the
+  customer has waited on for 4 s says *Still connecting…* — only while the
+  brand's connecting words are the default *Connecting…*; a wording the brand
+  chose is never replaced;
 - **draggable** up and down (a movement under 8 px is still a tap), clamped to
   the screen, restored from `initialOffset`, reported by `onPlacementChange`;
 - **keyboard-aware**: rises by `MediaQuery.viewInsets.bottom` (0 below a route
@@ -136,8 +145,16 @@ Draw your own instead from `GraineInApp.instance.voice` — a `ChangeNotifier`
 implementing `GraineCallState` (`connected`, `connecting`, `ready`, `muted`,
 `quality`, `online`, `reconnecting`, `connectivity`, `captions`, `caption`,
 `agentSpeaking`, `micDenied`; `start()`, `end()`, `setMuted()`, `retry()`),
-plus `phase` (idle, connecting, reconnecting, thinking, speaking, listening)
-and `error`. `voiceBarStatus(...)` gives the bar's words for any state.
+plus `phase` (idle, connecting, reconnecting, thinking, speaking, listening),
+`error`, and — as `GraineConnectProgress` — `connectStage` (registering,
+dialling, retrying, switching, or null outside a connect), `slowConnect`
+(after `GraineTiming.slowConnectMs`, 4 s by default, of a connect the customer
+is waiting on: a call being placed, or a bar on screen — `viewOpened()` /
+`viewClosed()` — while the page loads) and `callFailed` (nothing could carry
+the call; a `start()` tries again). `voiceBarStatus(...)` gives the bar's
+words for any state. The brand's logo arrives as `Appearance.resolve(...)`'s
+`logoUrl` and `logoPlate` (`LogoPlate.accent` or `.white`); `BrandLogo.box`
+and `BrandLogo.plateLook` give the square to fit it into and its plate.
 
 ## 4. Tell the agent what is happening
 
@@ -204,8 +221,9 @@ offset, glass, the meter, the SDK's icons in the design's icon style); the
 components and loaders follow it too; so do two optional widgets:
 
 - `GraineLauncher` — a floating button in the design's shape (circle,
-  squircle, rounded square, square, or a pill with a label) and glyph; a tap
-  starts the call, or runs `onPressed`.
+  squircle, rounded square, square, or a pill with a label) and glyph — or
+  the brand's logo, whole, on its plate; a tap starts the call, or runs
+  `onPressed`.
 - `GraineTranscriptView` — the conversation so far as the design's chat
   window, in its bubble style (filled, outline, minimal).
 
