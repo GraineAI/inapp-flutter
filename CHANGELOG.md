@@ -1,3 +1,7 @@
+## 0.6.1
+
+- 0.6.0 was released without the native call engine inside the package, so an app could not build with it. 0.6.1 carries it. Use 0.6.1; nothing else changed.
+
 ## 0.6.0
 
 - Calls like WhatsApp: `GraineCalls.instance` puts your agent in a native call — the customer calls it (`startCall(reason:, variables:)`, which returns the call's id, or null while another call is live), or your agent rings the customer through a push: CallKit and VoIP pushes on iOS (`enableVoIPPushes`), a ringing call notification and call screen on Android (`handlePush(message.data)` from your Firebase handlers, foreground and background). The call's audio runs natively, with the platform's echo canceller, and goes on with the screen off.

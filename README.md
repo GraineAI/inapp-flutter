@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.6.0
+  graine_inapp: ^0.6.1
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -266,7 +266,7 @@ actions, friction, errors.
 
 ## Calls like WhatsApp
 
-From 0.6.0, `GraineCalls.instance` puts your agent in a native call: the
+From 0.6.1, `GraineCalls.instance` puts your agent in a native call: the
 customer calls it from your app, or your agent rings the customer through a
 push — CallKit and VoIP pushes on iOS, a ringing call notification and call
 screen on Android — and the call goes on with the screen off. The audio runs
