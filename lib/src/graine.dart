@@ -13,6 +13,7 @@ import 'dart:convert';
 import 'dart:io' show Directory;
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show EventChannel, MethodChannel, MissingPluginException;
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 
@@ -21,6 +22,7 @@ import 'fonts.dart';
 
 part 'voice.dart';
 part 'components.dart';
+part 'calls.dart';
 
 /// Everything the SDK reports. Every method is optional; override what you
 /// draw. Use it with `extends` or `with`.

@@ -400,6 +400,11 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   /// customer meant.
   @override
   Future<void> start() async {
+    if (GraineCalls._nativeLive) {
+      // One call at a time: a native call has the line.
+      _graine._report((GraineListener l) => l.onError('A call is already in progress.'));
+      return;
+    }
     if (_page == null) {
       _graine._report((GraineListener l) =>
           l.onError('Place GraineEngine near the root of the app before starting a call.'));

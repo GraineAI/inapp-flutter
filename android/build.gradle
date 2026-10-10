@@ -1,0 +1,62 @@
+// The Android side of the graine_inapp plugin: its calls channels
+// (src/main/kotlin/ai/graine/inapp/flutter) compiled together with Graine's
+// Android SDK, which the package carries in src/main/kotlin/ai/graine/inapp
+// with its manifest (the call screen, the microphone service, the receiver and
+// their permissions merge into the app from there).
+group = "ai.graine.inapp.flutter"
+version = "0.6.0"
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        // Only for building this module on its own: inside an app, the app's
+        // Android Gradle plugin and Kotlin are the ones used.
+        classpath("com.android.tools.build:gradle:8.13.2")
+        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:2.1.20")
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: "com.android.library"
+// Kotlin is built into the Android Gradle plugin from 9.0 — unless the app
+// turns it off (android.builtInKotlin=false, which Flutter's own app template
+// sets while plugins migrate). Wherever it is not built in, this plugin's
+// Kotlin is compiled by the Kotlin plugin, as plugins always did.
+def agpMajor = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION.tokenize(".")[0].toInteger()
+def builtInKotlinSetting = project.findProperty("android.builtInKotlin")
+def kotlinIsBuiltIn = agpMajor >= 9 && (builtInKotlinSetting == null || builtInKotlinSetting.toString().toBoolean())
+if (!kotlinIsBuiltIn) {
+    apply plugin: "kotlin-android"
+}
+
+android {
+    namespace = "ai.graine.inapp.flutter"
+    compileSdk = 36
+
+    defaultConfig {
+        minSdk = 24
+        consumerProguardFiles("consumer-rules.pro")
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main.java.srcDirs += "src/main/kotlin"
+    }
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+}

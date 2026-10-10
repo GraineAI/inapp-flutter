@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.5.0
+  graine_inapp: ^0.6.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -100,7 +100,7 @@ MaterialApp(
 
 Place `GraineEngine` ONCE near the root: a call must outlive every screen, and
 the agent's job is to move the customer between them. It loads the engine idle
-at mount, so a tap is an INVITE away rather than a page load away.
+at mount, so a tap starts the call at once instead of waiting for a page load.
 
 `GraineAgentBar` is optional — the voice bar the dashboard's Garage shows in
 its phone preview, drawn by the SDK from the brand's design (see Design
@@ -264,10 +264,55 @@ Every callback is optional: session ready, call state, captions, components,
 ended, mic denied, quality, network, reconnecting, transport, connectivity,
 actions, friction, errors.
 
+## Calls like WhatsApp
+
+From 0.6.0, `GraineCalls.instance` puts your agent in a native call: the
+customer calls it from your app, or your agent rings the customer through a
+push — CallKit and VoIP pushes on iOS, a ringing call notification and call
+screen on Android — and the call goes on with the screen off. The audio runs
+natively, with the platform's echo canceller.
+
+```dart
+@pragma('vm:entry-point')
+Future<void> onBackgroundPush(RemoteMessage message) async {
+  await GraineCalls.instance.handlePush(message.data);   // rings, even when the app was closed
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  FirebaseMessaging.onBackgroundMessage(onBackgroundPush);
+  FirebaseMessaging.onMessage.listen((m) => GraineCalls.instance.handlePush(m.data));
+
+  GraineInApp.init(const GraineConfig(baseUrl: 'https://www.graine.ai', publishableKey: 'pk_live_…'));
+  final calls = GraineCalls.instance;
+  await calls.configure(const GraineCallsOptions(publishableKey: 'pk_live_…', displayName: 'Acme Assistant'));
+  calls.enableVoIPPushes((token) => myServer.saveVoipToken(token));   // iOS
+  calls.attach();                                                      // your screen context and actions
+  calls.outcomes.listen((o) => myServer.reportCall(o.callId, o.wire));
+  runApp(const MyApp());
+}
+
+// A "Call support" button:
+await GraineCalls.instance.startCall(reason: 'card_blocked');
+```
+
+- **iOS** — Signing & Capabilities: Push Notifications, and Background Modes →
+  *Audio, AirPlay, and Picture in Picture* and *Voice over IP*. A real iPhone:
+  CallKit and VoIP pushes do not run in the simulator.
+- **Android** — nothing to add: the plugin's manifest declares the call screen,
+  the microphone service and their permissions.
+- **Your call screen** — `callScreen: GraineCallScreen.sdk` (the default) shows
+  the SDK's; with `GraineCallScreen.app`, draw your own from
+  `GraineCalls.instance` (a `ValueListenable<GraineCallSnapshot>`).
+
+The push your server sends and the rest of the build:
+https://www.graine.ai/docs/in-app/calling#flutter
+
 ## Tests
 
 ```bash
-flutter test          # core, contract (contract/*.json), the call on a fake page, the widgets on fakes
+flutter test          # core, contract (contract/*.json), the call on a fake page, native calls on a mocked channel, the widgets on fakes
 flutter analyze
 ```
 

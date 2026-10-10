@@ -4,3 +4,14 @@ build/
 pubspec.lock
 .flutter-plugins
 .flutter-plugins-dependencies
+# The native call engine, generated from sdk/ios and sdk/android
+# (node ../scripts/vendor-native.mjs flutter); publish-sdk-repo.sh vendors it into the export.
+ios/Classes/GraineInApp/
+android/src/main/kotlin/ai/graine/inapp/*.kt
+android/src/main/AndroidManifest.xml
+android/consumer-rules.pro
+android/.gradle/
+android/build/
+
+# Written by Flutter tooling when the module is opened on its own
+android/local.properties
