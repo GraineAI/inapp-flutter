@@ -1,3 +1,7 @@
+## 0.6.3
+
+- The native call engine of iOS and Android 0.6.2: on Android a call goes on hold while a phone call or another app has the audio, and ends if the customer answers a phone call; on iOS a call keeps its own variables however many the app has; a call the customer places gets a `call_` id on both.
+
 ## 0.6.2
 
 - The native call engine of iOS and Android 0.6.1: calls follow Bluetooth and wired headsets on Android, answering a call checks the microphone on iOS, a repeated push for the call in progress is ignored, and a microphone that stops mid-call is rebuilt or ends the call with a reason.

@@ -3,7 +3,7 @@ description: >-
   Graine's in-app voice agent for Flutter: the hosted engine page in a WebView
   the SDK owns, plus screen context, in-app actions, components the agent
   draws, and a default agent bar.
-version: 0.6.2
+version: 0.6.3
 homepage: https://www.graine.ai
 documentation: https://www.graine.ai/docs/in-app/flutter
 repository: https://github.com/GraineAI/inapp-flutter
