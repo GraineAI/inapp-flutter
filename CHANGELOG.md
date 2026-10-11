@@ -1,3 +1,8 @@
+## 0.6.2
+
+- The native call engine of iOS and Android 0.6.1: calls follow Bluetooth and wired headsets on Android, answering a call checks the microphone on iOS, a repeated push for the call in progress is ignored, and a microphone that stops mid-call is rebuilt or ends the call with a reason.
+- `GraineCallsOptions(debug: true)` turns on the native SDK's debug log for calls.
+
 ## 0.6.1
 
 - 0.6.0 was released without the native call engine inside the package, so an app could not build with it. 0.6.1 carries it. Use 0.6.1; nothing else changed.

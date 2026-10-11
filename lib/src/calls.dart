@@ -203,6 +203,7 @@ class GraineCallsOptions {
     this.ringTimeout = const Duration(seconds: 30),
     this.appVersion,
     this.callScreen = GraineCallScreen.sdk,
+    this.debug = false,
     this.androidSmallIcon,
     this.iosIconTemplate,
     this.iosIncludesCallsInRecents = false,
@@ -233,6 +234,12 @@ class GraineCallsOptions {
   /// always shows the system's call screen.
   final GraineCallScreen callScreen;
 
+  /// The native SDK's debug log, in Xcode's console or logcat: how a call
+  /// connected and what its audio did, for finding out why one did not. Off
+  /// by default; turn it on in debug builds. Read once, when the app
+  /// launches: a change takes effect at the next launch.
+  final bool debug;
+
   /// Android: a monochrome drawable for the call notifications, by name.
   final String? androidSmallIcon;
 
@@ -250,6 +257,7 @@ class GraineCallsOptions {
         'ringTimeoutMs': ringTimeout.inMilliseconds,
         if (appVersion != null) 'appVersion': appVersion,
         'callScreen': callScreen.name,
+        'debug': debug,
         'android': <String, Object?>{if (androidSmallIcon != null) 'smallIcon': androidSmallIcon},
         'ios': <String, Object?>{
           if (iosIconTemplate != null) 'iconTemplate': iosIconTemplate,

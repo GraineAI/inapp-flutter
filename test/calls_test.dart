@@ -68,10 +68,17 @@ void main() {
       'baseUrl': 'https://www.graine.ai',
       'ringTimeoutMs': 45000,
       'callScreen': 'app',
+      'debug': false,
       'android': <String, Object?>{'smallIcon': 'ic_call'},
       'ios': <String, Object?>{'includesCallsInRecents': false},
     });
     expect(argsOf('snapshot'), hasLength(1), reason: 'the state a screen opens on must be read, not waited for');
+  });
+
+  test("debug reaches the engine as `debug`, for the native SDK's log", () async {
+    await GraineCalls.instance
+        .configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme', debug: true));
+    expect((argsOf('configure').single! as Map<Object?, Object?>)['debug'], isTrue);
   });
 
   test("the engine's state reaches the call screen, filled in", () async {
