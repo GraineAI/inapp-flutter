@@ -32,10 +32,21 @@ class GraineTranscriptView extends StatelessWidget {
     this.design,
     this.scheme,
     this.maxHeight = 320,
+    this.app,
   });
 
-  /// The call whose words to show. Default: [GraineInApp.instance]'s voice.
+  /// The call whose words to show. Default: [app]'s voice.
   final GraineCallState? call;
+
+  /// The agent whose call this is: its call, session and design. Default:
+  /// the agent [call] belongs to, else the default agent ([GraineInApp.instance]).
+  final GraineInApp? app;
+
+  /// The agent this view draws for.
+  GraineInApp? get _agent {
+    final c = call;
+    return app ?? (c is GraineVoice ? c.app : null) ?? GraineInApp.maybeInstance;
+  }
 
   /// The header's words. Default: the dashboard's heading, else "Assistant".
   final String? title;
@@ -57,21 +68,22 @@ class GraineTranscriptView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final c = call ?? GraineInApp.maybeInstance?.voice;
+    final app = _agent;
+    final c = call ?? app?.voice;
     if (c == null) return const SizedBox.shrink();
     // A design handed over directly has its typeface fetched too (each face once).
-    if (design != null) GraineInApp.maybeInstance?.loadDesignFonts(design);
+    if (design != null) app?.loadDesignFonts(design);
     return ListenableBuilder(
-      listenable: surfaceListenable(<Listenable?>[c]),
+      listenable: surfaceListenable(<Listenable?>[c], app: app),
       builder: (BuildContext context, Widget? _) => _build(context, c),
     );
   }
 
   Widget _build(BuildContext context, GraineCallState c) {
-    final app = GraineInApp.maybeInstance;
+    final app = _agent;
     final appearance = c.appearance;
     final dash = Appearance.resolve(appearance, accent: Appearance.defaultAccent, heading: 'Assistant', origin: app?.config.baseUrl);
-    final tokens = tokensFor(context, design: design, scheme: scheme);
+    final tokens = tokensFor(context, design: design, scheme: scheme, app: app);
     final look = tokens != null
         ? _ChatLook.design(tokens)
         : _ChatLook.appearance(context, appearance, dash.accent, dash.radius);

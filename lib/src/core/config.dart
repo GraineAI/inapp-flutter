@@ -1,5 +1,7 @@
+import 'chat_size.dart';
 import 'design.dart';
 import 'friction.dart';
+import 'identity.dart';
 import 'js.dart';
 import 'protocol.dart';
 
@@ -50,6 +52,8 @@ class GraineConfig {
     this.friction,
     this.requestMicrophone,
     this.fonts = const <String>[],
+    this.captureTaps = true,
+    this.chatSize,
   });
 
   /// "https://www.graine.ai" unless self-hosted.
@@ -106,10 +110,196 @@ class GraineConfig {
   /// is never fetched. Empty (the default): the SDK fetches every family the
   /// design draws with, and until one arrives draws the platform's font.
   final List<String> fonts;
+
+  /// TELL THE AGENT WHAT THE CUSTOMER TAPS, while a screen is set: a tap on a
+  /// control with an accessibility label (`Semantics(label: …)`) as
+  /// "tap:<label>", anywhere else as "tap:screen" with where — in the recent
+  /// events, at most two a second, masked like everything else. On by
+  /// default; [GraineEngine] sees the taps.
+  final bool captureTaps;
+
+  /// HOW BIG THE CHAT WINDOW OPENS, over the dashboard's choice (Embed &
+  /// Widgets → Appearance → Chat window → Window size): `compact` above the
+  /// bar, `large` a sheet over most of a phone (a panel on a tablet), `full`
+  /// the whole screen. Null, the default, follows the dashboard; a size passed
+  /// to `GraineChat.open` wins for that open.
+  final GraineChatSize? chatSize;
 }
 
 /// Whether the page that carries the call is actually there.
 enum GraineConnectivity { loading, ready, retrying, failed }
+
+/// The agent's memory switch, as the session serves it.
+class MemorySetting {
+  const MemorySetting({this.enabled = false});
+
+  /// The agent remembers identified users between conversations.
+  final bool enabled;
+
+  static MemorySetting? fromJson(Object? raw) {
+    final r = Js.asMap(raw);
+    if (r == null) return null;
+    return MemorySetting(enabled: r['enabled'] == true);
+  }
+}
+
+/// What users may book from the app (Agent → Calls & scheduling).
+class SchedulingSetting {
+  const SchedulingSetting({
+    this.usersCanBook = false,
+    this.maxDaysAhead = 14,
+    this.minLeadMinutes = 5,
+    this.maxPendingPerUser = 3,
+  });
+
+  /// `scheduleCall` is allowed at all.
+  final bool usersCanBook;
+  final int maxDaysAhead;
+  final int minLeadMinutes;
+  final int maxPendingPerUser;
+
+  static SchedulingSetting? fromJson(Object? raw) {
+    final r = Js.asMap(raw);
+    if (r == null) return null;
+    int n(Object? v, int fallback, int min, int max) {
+      final d = Js.finite(v);
+      return d == null ? fallback : d.round().clamp(min, max);
+    }
+
+    return SchedulingSetting(
+      usersCanBook: r['usersCanBook'] == true,
+      maxDaysAhead: n(r['maxDaysAhead'], 14, 1, 30),
+      minLeadMinutes: n(r['minLeadMinutes'], 5, 2, 1440),
+      maxPendingPerUser: n(r['maxPendingPerUser'], 3, 1, 10),
+    );
+  }
+}
+
+/// Calls Graine rings on this workspace's apps (hosted ringing).
+class CallsSetting {
+  const CallsSetting({
+    this.hosted = false,
+    this.platforms = const <String>[],
+    this.ringTimeoutSeconds = 45,
+    this.callName,
+    this.scheduling,
+  });
+
+  /// The workspace uploaded push credentials: Graine rings its users' devices.
+  final bool hosted;
+
+  /// Where it can ring: `ios`, `android`.
+  final List<String> platforms;
+  final int ringTimeoutSeconds;
+
+  /// What the phone shows for the agent's calls; null — the agent's display name.
+  final String? callName;
+  final SchedulingSetting? scheduling;
+
+  static CallsSetting? fromJson(Object? raw) {
+    final r = Js.asMap(raw);
+    if (r == null) return null;
+    final ring = Js.finite(r['ringTimeoutSeconds']);
+    return CallsSetting(
+      hosted: r['hosted'] == true,
+      platforms: <String>[
+        for (final p in Js.asList(r['platforms']))
+          if (p is String && p.trim().isNotEmpty) p.trim().toLowerCase(),
+      ],
+      ringTimeoutSeconds: ring == null ? 45 : ring.round().clamp(20, 60),
+      callName: r['callName'] is String && (r['callName']! as String).trim().isNotEmpty
+          ? (r['callName']! as String).trim()
+          : null,
+      scheduling: SchedulingSetting.fromJson(r['scheduling']),
+    );
+  }
+}
+
+/// WHY GRAINE SAID NO — the wire's codes, typed (WIRE.md, "Errors"), plus
+/// [network] (Graine could not be reached) and [unknown] (a code this build
+/// does not know: its word is kept beside it).
+enum GraineErrorCode {
+  invalidKey('invalid_key'),
+  originRefused('origin_refused'),
+
+  /// Too many requests: wait `retryAfterSeconds` when given.
+  rateLimited('rate_limited'),
+  invalidRequest('invalid_request'),
+  identityRequired('identity_required'),
+  deviceLimit('device_limit'),
+  schedulingOff('scheduling_off'),
+  tooSoon('too_soon'),
+  tooFar('too_far'),
+  outsideWindow('outside_window'),
+  tooManyPending('too_many_pending'),
+  notFound('not_found'),
+  unavailable('unavailable'),
+  network('network'),
+  unknown('unknown');
+
+  const GraineErrorCode(this.wire);
+
+  /// The word on the wire.
+  final String wire;
+
+  static GraineErrorCode fromWire(String? s) {
+    final w = (s ?? '').trim().toLowerCase();
+    for (final v in values) {
+      if (v.wire == w) return v;
+    }
+    return unknown;
+  }
+}
+
+/// A refusal from one of the SDK's routes: `{ error, code }`, with the
+/// sentence written for whoever has to act on it.
+class EmbedRefusal {
+  const EmbedRefusal(this.message, {required this.code, this.codeName, this.statusCode, this.retryAfterSeconds});
+
+  final String message;
+
+  /// The wire's code, typed; [GraineErrorCode.unknown] when the server gave
+  /// one this build does not know (see [codeName]) or none the status explains.
+  final GraineErrorCode code;
+
+  /// The code as the server said it, or null when it said none.
+  final String? codeName;
+  final int? statusCode;
+
+  /// How long to wait before asking again, from `Retry-After`.
+  final int? retryAfterSeconds;
+
+  /// Null for a 2xx. [retryAfter] is the response's `Retry-After` header.
+  static EmbedRefusal? of(int status, Map<String, Object?> body, {String? retryAfter}) {
+    if (status >= 200 && status <= 299) return null;
+    final said = Js.strOrEmpty(body['error']).trim();
+    final rawCode = Js.strOrEmpty(body['code']).trim();
+    final code = rawCode.isNotEmpty
+        ? GraineErrorCode.fromWire(rawCode)
+        : switch (status) {
+            400 => GraineErrorCode.invalidRequest,
+            401 => GraineErrorCode.invalidKey,
+            403 => GraineErrorCode.originRefused,
+            404 => GraineErrorCode.notFound,
+            429 => GraineErrorCode.rateLimited,
+            503 => GraineErrorCode.unavailable,
+            _ => GraineErrorCode.unknown,
+          };
+    final wait = int.tryParse((retryAfter ?? '').trim());
+    final message = switch (code) {
+      GraineErrorCode.invalidKey => 'Publishable key was rejected. Check it against Embed & Widgets in the dashboard.',
+      GraineErrorCode.originRefused => 'This agent does not accept connections from a mobile app yet. Add "app://" to '
+          'its Allowed domains in the dashboard, under Embed & Widgets.',
+      GraineErrorCode.rateLimited => said.isEmpty ? 'Too many requests. Try again in a moment.' : said,
+      _ => said.isEmpty ? 'Request refused ($status)' : said,
+    };
+    return EmbedRefusal(message,
+        code: code,
+        codeName: rawCode.isEmpty ? null : rawCode,
+        statusCode: status,
+        retryAfterSeconds: wait == null || wait < 0 ? null : wait);
+  }
+}
 
 /// What the dashboard says about this agent, fetched once per launch from
 /// `POST {baseUrl}/api/embed/session`.
@@ -123,6 +313,10 @@ class SessionConfig {
     this.declaredActions = const <String>{},
     this.friction,
     this.design,
+    this.wsHost,
+    this.identity,
+    this.memory,
+    this.calls,
   });
 
   final String agentId;
@@ -151,6 +345,22 @@ class SessionConfig {
   /// [appearance], as before.
   final ResolvedDesign? design;
 
+  /// Where the chat socket goes when there is no ticket. Null: the default host.
+  final String? wsHost;
+
+  /// Which trait identifies a user. Null from an older server, which means
+  /// the `user_id` trait ([identitySetting]).
+  final IdentitySetting? identity;
+
+  /// The agent's memory switch; null from an older server.
+  final MemorySetting? memory;
+
+  /// Hosted ringing and what users may book; null from an older server.
+  final CallsSetting? calls;
+
+  /// [identity], or what a server that does not say means.
+  IdentitySetting get identitySetting => identity ?? IdentitySetting.standard;
+
   /// The dashboard's Call audio setting.
   Transport get preferredTransport =>
       appearance['audioTransport'] == 'rtc' ? Transport.webrtc : Transport.websocket;
@@ -176,6 +386,7 @@ class SessionConfig {
     }
     final webcall = s(data['webcallAgentId']);
     final page = s(data['pageVersion']);
+    final wsHost = data['wsHost'] is String ? (data['wsHost']! as String).trim() : '';
     return SessionConfig(
       agentId: agentId,
       webcallAgentId: webcall.isEmpty ? agentId : webcall,
@@ -185,6 +396,10 @@ class SessionConfig {
       declaredActions: declared,
       friction: Js.asMap(data['friction']),
       design: ResolvedDesign.fromJson(data['design']),
+      wsHost: wsHost.isEmpty ? null : wsHost,
+      identity: IdentitySetting.fromJson(data['identity']),
+      memory: MemorySetting.fromJson(data['memory']),
+      calls: CallsSetting.fromJson(data['calls']),
     );
   }
 

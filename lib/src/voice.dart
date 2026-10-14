@@ -176,6 +176,9 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   /// The configuration this call was set up with.
   GraineConfig get config => _graine.config;
 
+  /// The instance this call belongs to.
+  GraineInApp get app => _graine;
+
   // ── state ────────────────────────────────────────────────────────────────
 
   bool _connected = false;
@@ -269,6 +272,13 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   /// UIs showing this call on screen ([viewOpened]).
   int _views = 0;
 
+  /// `graine:identity` has reached the page since it last became ready.
+  bool _identityPosted = false;
+
+  /// A start waiting for the identity to reach the page first.
+  bool _startAwaitingIdentity = false;
+  int _identityToken = 0;
+
   /// Mount the engine: [GraineEngine] calls this with its WebView page; a
   /// test calls it with a fake. Loads the page idle — nothing registered,
   /// nothing dialled, no microphone. Attaching another page ends any call on
@@ -284,6 +294,11 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
       }),
       _graine._onContext((Map<String, Object?> frame) {
         if (_connected) _postContext(frame);
+      }),
+      // Who the user is, for the tickets the page mints: a change reaches the
+      // next call (one already live keeps the identity it started with).
+      _graine._onIdentity(() {
+        if (_ready) _postIdentity();
       }),
       () => _graine._foregroundWatchers.remove(_foregroundChanged),
     ];
@@ -314,6 +329,8 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
     _ready = false;
     _startedCall = false;
     _pendingStart = false;
+    _startAwaitingIdentity = false;
+    _identityPosted = false;
     _error = null;
     _clearProgress();
     _setCall(false, false);
@@ -397,7 +414,8 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   /// Place the call. With [GraineConfig.requestMicrophone] set, the app is
   /// asked for the microphone first and a refusal places nothing. Before the
   /// page is ready the start is held and fired on ready — which is what the
-  /// customer meant.
+  /// customer meant. One conversation at a time: a call or a chat another
+  /// agent of the app holds ends.
   @override
   Future<void> start() async {
     if (GraineCalls._nativeLive) {
@@ -406,10 +424,13 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
       return;
     }
     if (_page == null) {
-      _graine._report((GraineListener l) =>
-          l.onError('Place GraineEngine near the root of the app before starting a call.'));
+      _graine._report((GraineListener l) => l.onError(_graine.name == GraineInApp.defaultName
+          ? 'Place GraineEngine near the root of the app before starting a call.'
+          : 'Place GraineEngine(app: GraineInApp.named(\'${_graine.name}\')) near the root of the app '
+              'before starting a call with this agent.'));
       return;
     }
+    _graine._takeConversation();
     _micDenied = false;
     _error = null;
     // A new attempt: the last one's failure and stage are not news.
@@ -462,6 +483,11 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   @override
   void end() {
     _pendingStart = false;
+    if (_startAwaitingIdentity) {
+      // The start never reached the page: there is nothing to tear down.
+      _startAwaitingIdentity = false;
+      _startedCall = false;
+    }
     _post(Protocol.out(ProtocolOut.endCall));
     _endWatchdog?.cancel();
     _endWatchdog = null;
@@ -483,7 +509,7 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   }
 
   /// The customer answered a component. [summary] is the sentence the agent
-  /// hears ("Let's compare Creta and Seltos.") — without it the tap lands and
+  /// hears ("Compare: Creta and Seltos") — without it the tap lands and
   /// the conversation does not move.
   void answerWidget(String widgetId, Map<String, Object?> data, String summary) {
     _graine.clearPendingWidget();
@@ -550,7 +576,41 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
     _endNotified = true;
     // A new call: the last one's unanswered component must not come back over it.
     _graine.clearPendingWidget();
-    _post(Protocol.out(ProtocolOut.startCall));
+    if (_identityPosted) {
+      _post(Protocol.out(ProtocolOut.startCall));
+      return;
+    }
+    // The page mints the call's ticket at the start: who the user is must be
+    // there first, or the call is anonymous — and has no memory.
+    _startAwaitingIdentity = true;
+    final token = _loadToken;
+    _graine._identityMessage().then((Map<String, Object?> message) {
+      if (!_startAwaitingIdentity || token != _loadToken || _page == null || !_ready) return;
+      _startAwaitingIdentity = false;
+      _post(message);
+      _identityPosted = true;
+      _post(Protocol.out(ProtocolOut.startCall));
+      notifyListeners();
+    });
+  }
+
+  /// Tell the page who the user is — now when it can be said without
+  /// waiting (the usual case: it was read as the SDK started), else as soon
+  /// as it can.
+  void _postIdentity() {
+    final token = ++_identityToken;
+    final now = _graine._identityMessageNow();
+    if (now != null) {
+      _post(now);
+      _identityPosted = true;
+      return;
+    }
+    final load = _loadToken;
+    _graine._identityMessage().then((Map<String, Object?> message) {
+      if (token != _identityToken || load != _loadToken || _page == null || !_ready) return;
+      _post(message);
+      _identityPosted = true;
+    });
   }
 
   /// Deliver one message into the page.
@@ -587,7 +647,7 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
     final liveChanged = connected != _connected;
     _connected = connected;
     _connecting = connecting;
-    if (liveChanged) _graine._callStateChanged(connected);
+    if (liveChanged) _graine._conversationStateChanged();
     if (changed) {
       _graine.components._onCall(connected || connecting);
       _graine._report((GraineListener l) => l.onCallState(connected, connecting));
@@ -609,6 +669,7 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
 
   void _onPageStarted() {
     _ready = false;
+    _identityPosted = false;
     _watchdog.start(_graine._clock());
     _checkTimer?.cancel();
     final first = _graine.config.timing.stallMs < 1000 ? _graine.config.timing.stallMs : 1000;
@@ -645,6 +706,8 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
         // Who the customer is, before anything else: the greeting is composed
         // from these and nothing later can repair it.
         _post(Protocol.out(ProtocolOut.variables, <String, Object?>{'variables': _graine.currentVariables()}));
+        _identityPosted = false;
+        _postIdentity();
         final frame = _graine._currentContextFrame();
         if (frame != null) _postContext(frame);
         if (_pendingStart && !_askingMic && _micGranted != false) {
@@ -679,13 +742,9 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
         if (role == Role.agent) _graine.components._agentStarted();
         _graine._report((GraineListener l) => l.onCaption(role, text, live));
       case PageWidget(widget: final widget):
-        // Retained before it is dispatched, so a view mounted later still finds it.
-        _graine._pendingWidget = widget;
-        _graine.components._onWidget(widget);
-        _graine._report((GraineListener l) => l.onWidget(widget));
+        _graine._widgetArrived(widget, fromChat: false);
       case PageWidgetPending(widget: final hint):
-        _graine.components._onPending(hint);
-        _graine._report((GraineListener l) => l.onWidgetPending(hint));
+        _graine._widgetPending(hint, fromChat: false);
       case PageAppAction(actionId: final actionId, name: final name, arguments: final args):
         _graine.executeAction(name, args).then((ActionResult r) {
           _post(Protocol.out(ProtocolOut.appActionResult, <String, Object?>{

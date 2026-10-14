@@ -313,15 +313,18 @@ abstract final class Widgets {
     return 'ios';
   }
 
-  /// The sentence the agent hears when several were chosen:
-  /// "Let's compare Creta and Seltos."
-  static String manySummary(List<String> titles, [String verb = 'compare']) {
+  /// The sentence the agent hears when several were chosen — and the user's
+  /// own bubble in a text chat: the button's label as written, then the names
+  /// ("Taken: Morning and Evening"). Never the label read as a verb. No label:
+  /// the names alone.
+  static String manySummary(List<String> titles, [String label = 'Compare']) {
     final names = titles.map((String t) => t.trim()).where((String t) => t.isNotEmpty).toList();
     if (names.isEmpty) return '';
     final list = names.length == 1
         ? names.first
         : '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
-    return "Let's $verb $list.";
+    final lead = label.trim();
+    return lead.isEmpty ? list : '$lead: $list';
   }
 
   static final RegExp _actionName = RegExp(r'^[a-z][a-z0-9_]{0,63}$');

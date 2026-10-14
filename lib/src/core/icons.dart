@@ -1,5 +1,6 @@
 /// THE SDK'S OWN ICONS — the microphone, hang up, send, chat, call, chevron
-/// and close the bar draws — as 24×24 path data, the very strings the
+/// and close the bar draws, and the call screen's loudspeaker — as 24×24 path
+/// data, the very strings the
 /// dashboard's Garage draws and every other SDK paints (contract/DESIGN.md,
 /// "Icons"; the tests hold them to contract/design.json → `icons`).
 ///
@@ -89,6 +90,14 @@ abstract final class SdkIcons {
   static const SdkIcon chevron = SdkIcon(lines: 'M6 15l6-6 6 6');
   static const SdkIcon close = SdkIcon(lines: 'M6 6l12 12M18 6 6 18');
 
+  /// "New conversation" in a chat window's header: a page and a pen.
+  static const SdkIcon compose =
+      SdkIcon(lines: 'M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7M18.4 2.6a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z');
+
+  /// The call screen's loudspeaker, for an app drawing its own call screen.
+  static const SdkIcon speaker =
+      SdkIcon(body: 'M4 9.5h3.5L12 5.5v13l-4.5-4H4z', lines: 'M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11');
+
   /// The whole set, by the names the contract uses.
   static const Map<String, SdkIcon> all = <String, SdkIcon>{
     'mic': mic,
@@ -99,6 +108,8 @@ abstract final class SdkIcons {
     'call': call,
     'chevron': chevron,
     'close': close,
+    'compose': compose,
+    'speaker': speaker,
   };
 
   /// HOW [style] DRAWS AN ICON AT [stroke] (contract/DESIGN.md, "Icons"):

@@ -14,6 +14,7 @@
 /// every surface keeps drawing from `appearance` as it always has.
 library;
 
+import 'chat_size.dart';
 import 'js.dart';
 
 /// One drop shadow: `{ y, blur, spread, opacity, color }`.
@@ -467,6 +468,435 @@ class ThemeGlass {
   Map<String, Object?> toJson() => <String, Object?>{'blur': blur, 'surfaceOpacity': surfaceOpacity};
 }
 
+/// THE CHAT WINDOW'S TOKENS (contract §7, `ThemeTokens.chat`): the brand's
+/// words — or "" for the default named on each — and colours already checked
+/// against what they sit on.
+class ThemeChat {
+  const ThemeChat({
+    this.title = '',
+    this.subtitle = '',
+    this.avatar = 'logo',
+    this.placeholder = '',
+    this.showTimestamps = false,
+    this.suggestions = const <String>[],
+    required this.background,
+    this.pattern = 'none',
+    required this.patternColor,
+    required this.headerBackground,
+    required this.headerText,
+    required this.headerSubtext,
+    required this.composerBackground,
+    required this.composerText,
+    required this.composerPlaceholder,
+    required this.composerBorder,
+    this.size = GraineChatSize.compact,
+    this.showUpcomingCalls = true,
+    this.upcomingTitle = '',
+    this.showHistory = true,
+    this.newConversation = true,
+  });
+
+  static const List<String> avatars = <String>['logo', 'glyph', 'none'];
+  static const List<String> patterns = <String>['none', 'dots'];
+
+  /// The most conversation starters a chat shows.
+  static const int maxSuggestions = 4;
+
+  /// The header's title; "" is the dashboard's heading.
+  final String title;
+
+  /// Under the title while online; "" is "Online".
+  final String subtitle;
+
+  /// What stands for the agent in the header: `logo`, `glyph` or `none`.
+  final String avatar;
+
+  /// The composer's placeholder; "" is "Message…".
+  final String placeholder;
+  final bool showTimestamps;
+
+  /// Conversation starters for a new chat, at most [maxSuggestions].
+  final List<String> suggestions;
+
+  /// Behind the messages and the composer strip.
+  final String background;
+
+  /// `dots`: a dot pattern in [patternColor] over [background].
+  final String pattern;
+  final String patternColor;
+  final String headerBackground;
+  final String headerText;
+  final String headerSubtext;
+  final String composerBackground;
+  final String composerText;
+  final String composerPlaceholder;
+  final String composerBorder;
+
+  /// How big the window opens (Window size in the dashboard): compact unless the design says otherwise.
+  final GraineChatSize size;
+
+  /// The card of the user's booked calls at the top of the chat (Booked calls in the dashboard).
+  final bool showUpcomingCalls;
+
+  /// That card's title; "" is "Upcoming call" / "Upcoming calls".
+  final String upcomingTitle;
+
+  /// The conversation kept from before, on screen (Earlier messages). Off, the agent still has it.
+  final bool showHistory;
+
+  /// The header's compose control (New conversation button). Off,
+  /// `GraineChatSession.newConversation()` still works.
+  final bool newConversation;
+
+  /// WHAT AN OLDER SERVER'S CHAT LOOKS LIKE — the window as it was drawn
+  /// before these tokens: the page, the surface header, the raised composer,
+  /// and the launcher's mark (its glyph when the design has one).
+  factory ThemeChat.fallback(ThemeColors c, {required bool dark, required bool hasGlyph}) => ThemeChat(
+        avatar: hasGlyph ? 'glyph' : 'logo',
+        background: c.background,
+        patternColor: Design.mixHex(c.background, c.text, dark ? 0.14 : 0.1),
+        headerBackground: c.surface,
+        headerText: c.text,
+        headerSubtext: c.textMuted,
+        composerBackground: c.surfaceRaised,
+        composerText: c.text,
+        composerPlaceholder: c.textMuted,
+        composerBorder: c.border,
+      );
+
+  static ThemeChat fromJson(Map<String, Object?> r, ThemeChat d) {
+    String words(Object? v, String fallback) => v is String ? v : fallback;
+    String c(String key, String fallback) => Design.normaliseHex(r[key]) ?? fallback;
+    final raw = r['suggestions'];
+    return ThemeChat(
+      title: words(r['title'], d.title),
+      subtitle: words(r['subtitle'], d.subtitle),
+      avatar: _pick(r['avatar'], avatars) ?? d.avatar,
+      placeholder: words(r['placeholder'], d.placeholder),
+      showTimestamps: r['showTimestamps'] is bool ? r['showTimestamps']! as bool : d.showTimestamps,
+      suggestions: raw is List
+          ? <String>[
+              for (final s in raw)
+                if (s is String && s.trim().isNotEmpty) s,
+            ].take(maxSuggestions).toList()
+          : d.suggestions,
+      background: c('background', d.background),
+      pattern: _pick(r['pattern'], patterns) ?? d.pattern,
+      patternColor: c('patternColor', d.patternColor),
+      headerBackground: c('headerBackground', d.headerBackground),
+      headerText: c('headerText', d.headerText),
+      headerSubtext: c('headerSubtext', d.headerSubtext),
+      composerBackground: c('composerBackground', d.composerBackground),
+      composerText: c('composerText', d.composerText),
+      composerPlaceholder: c('composerPlaceholder', d.composerPlaceholder),
+      composerBorder: c('composerBorder', d.composerBorder),
+      // Absent (an older server) or a word this build does not know: the compact window.
+      size: GraineChatSize.fromWire(r['size']) ?? d.size,
+      // The pieces the brand can leave out: absent, or anything but a boolean, is on.
+      showUpcomingCalls: r['showUpcomingCalls'] is bool ? r['showUpcomingCalls']! as bool : d.showUpcomingCalls,
+      upcomingTitle: r['upcomingTitle'] is String ? (r['upcomingTitle']! as String).trim() : d.upcomingTitle,
+      showHistory: r['showHistory'] is bool ? r['showHistory']! as bool : d.showHistory,
+      newConversation: r['newConversation'] is bool ? r['newConversation']! as bool : d.newConversation,
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'title': title,
+        'subtitle': subtitle,
+        'avatar': avatar,
+        'placeholder': placeholder,
+        'showTimestamps': showTimestamps,
+        'suggestions': List<String>.of(suggestions),
+        'background': background,
+        'pattern': pattern,
+        'patternColor': patternColor,
+        'headerBackground': headerBackground,
+        'headerText': headerText,
+        'headerSubtext': headerSubtext,
+        'composerBackground': composerBackground,
+        'composerText': composerText,
+        'composerPlaceholder': composerPlaceholder,
+        'composerBorder': composerBorder,
+        'size': size.wire,
+        'showUpcomingCalls': showUpcomingCalls,
+        'upcomingTitle': upcomingTitle,
+        'showHistory': showHistory,
+        'newConversation': newConversation,
+      };
+}
+
+/// The words a call screen says at each moment.
+class ThemeCallStatusText {
+  const ThemeCallStatusText({
+    this.ringing = 'Incoming call',
+    this.scheduled = 'Scheduled call',
+    this.connecting = 'Connecting…',
+    this.ended = 'Call ended',
+    this.missed = 'Missed call',
+  });
+
+  /// Another ring.
+  final String ringing;
+
+  /// A ring Graine placed for a time the user (or the agent) booked.
+  final String scheduled;
+  final String connecting;
+  final String ended;
+  final String missed;
+
+  static ThemeCallStatusText fromJson(Object? raw, ThemeCallStatusText d) {
+    final r = Js.asMap(raw) ?? const <String, Object?>{};
+    String w(Object? v, String fallback) => v is String && v.trim().isNotEmpty ? v : fallback;
+    return ThemeCallStatusText(
+      ringing: w(r['ringing'], d.ringing),
+      scheduled: w(r['scheduled'], d.scheduled),
+      connecting: w(r['connecting'], d.connecting),
+      ended: w(r['ended'], d.ended),
+      missed: w(r['missed'], d.missed),
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'ringing': ringing,
+        'scheduled': scheduled,
+        'connecting': connecting,
+        'ended': ended,
+        'missed': missed,
+      };
+}
+
+/// THE CALL SCREEN'S TOKENS (contract §7, `ThemeTokens.call`) — the same for
+/// ringing, connecting, on a call and ended. The SDK's own call screens are
+/// the native ones; these are for a screen an app draws itself
+/// (`GraineCallScreen.app`).
+class ThemeCall {
+  const ThemeCall({
+    required this.background,
+    this.backgroundTo,
+    required this.text,
+    required this.textMuted,
+    this.avatar = 'logo',
+    this.avatarShape = 'circle',
+    required this.avatarFill,
+    required this.avatarText,
+    required this.buttonFill,
+    required this.buttonIcon,
+    required this.buttonActiveFill,
+    required this.buttonActiveIcon,
+    required this.endFill,
+    required this.endIcon,
+    this.endShape = 'round',
+    required this.acceptFill,
+    required this.acceptIcon,
+    required this.declineFill,
+    required this.declineIcon,
+    required this.callbackFill,
+    required this.callbackIcon,
+    this.captions = true,
+    this.timer = true,
+    this.controls = defaultControls,
+    this.ringtone = 'system',
+    this.statusText = const ThemeCallStatusText(),
+  });
+
+  static const List<String> avatars = <String>['logo', 'glyph', 'initials'];
+  static const List<String> avatarShapes = <String>['circle', 'squircle', 'rounded-square'];
+  static const List<String> endShapes = <String>['round', 'pill'];
+  static const List<String> ringtones = <String>['system', 'graine', 'soft'];
+  static const List<String> allControls = <String>['mute', 'speaker', 'chat', 'end'];
+  static const List<String> defaultControls = <String>['mute', 'speaker', 'chat', 'end'];
+
+  /// The fill, or a gradient's top.
+  final String background;
+
+  /// A gradient's bottom; null for one solid fill.
+  final String? backgroundTo;
+  final String text;
+  final String textMuted;
+  final String avatar;
+  final String avatarShape;
+  final String avatarFill;
+  final String avatarText;
+  final String buttonFill;
+  final String buttonIcon;
+  final String buttonActiveFill;
+  final String buttonActiveIcon;
+  final String endFill;
+  final String endIcon;
+  final String endShape;
+  final String acceptFill;
+  final String acceptIcon;
+  final String declineFill;
+  final String declineIcon;
+
+  /// "Call back", on a missed call.
+  final String callbackFill;
+  final String callbackIcon;
+
+  /// Show the line being said.
+  final bool captions;
+
+  /// Show the call's running time.
+  final bool timer;
+
+  /// The in-call buttons, in order; `end` is always among them.
+  final List<String> controls;
+  final String ringtone;
+  final ThemeCallStatusText statusText;
+
+  /// WHAT AN OLDER SERVER'S CALL SCREEN LOOKS LIKE — the fixed dark screen
+  /// the native SDKs drew before these tokens.
+  factory ThemeCall.fallback(ThemeColors c) => ThemeCall(
+        background: '#0F1115',
+        text: '#FFFFFF',
+        textMuted: '#A3A8B3',
+        avatarFill: c.accent,
+        avatarText: c.onAccent,
+        buttonFill: '#2A2D35',
+        buttonIcon: '#FFFFFF',
+        buttonActiveFill: '#FFFFFF',
+        buttonActiveIcon: '#0F1115',
+        endFill: '#E5484D',
+        endIcon: '#FFFFFF',
+        acceptFill: '#1FAD5B',
+        acceptIcon: '#FFFFFF',
+        declineFill: '#E5484D',
+        declineIcon: '#FFFFFF',
+        callbackFill: c.accent,
+        callbackIcon: c.onAccent,
+      );
+
+  static ThemeCall fromJson(Map<String, Object?> r, ThemeCall d) {
+    String c(String key, String fallback) => Design.normaliseHex(r[key]) ?? fallback;
+    final rawControls = r['controls'];
+    var controls = d.controls;
+    if (rawControls is List) {
+      final list = <String>[];
+      for (final x in rawControls) {
+        final k = _pick(x, allControls);
+        if (k != null && !list.contains(k)) list.add(k);
+      }
+      if (list.isNotEmpty) {
+        if (!list.contains('end')) list.add('end'); // always a way to hang up
+        controls = list;
+      }
+    }
+    return ThemeCall(
+      background: c('background', d.background),
+      backgroundTo: r.containsKey('backgroundTo') ? Design.normaliseHex(r['backgroundTo']) : d.backgroundTo,
+      text: c('text', d.text),
+      textMuted: c('textMuted', d.textMuted),
+      avatar: _pick(r['avatar'], avatars) ?? d.avatar,
+      avatarShape: _pick(r['avatarShape'], avatarShapes) ?? d.avatarShape,
+      avatarFill: c('avatarFill', d.avatarFill),
+      avatarText: c('avatarText', d.avatarText),
+      buttonFill: c('buttonFill', d.buttonFill),
+      buttonIcon: c('buttonIcon', d.buttonIcon),
+      buttonActiveFill: c('buttonActiveFill', d.buttonActiveFill),
+      buttonActiveIcon: c('buttonActiveIcon', d.buttonActiveIcon),
+      endFill: c('endFill', d.endFill),
+      endIcon: c('endIcon', d.endIcon),
+      endShape: _pick(r['endShape'], endShapes) ?? d.endShape,
+      acceptFill: c('acceptFill', d.acceptFill),
+      acceptIcon: c('acceptIcon', d.acceptIcon),
+      declineFill: c('declineFill', d.declineFill),
+      declineIcon: c('declineIcon', d.declineIcon),
+      callbackFill: c('callbackFill', d.callbackFill),
+      callbackIcon: c('callbackIcon', d.callbackIcon),
+      captions: r['captions'] is bool ? r['captions']! as bool : d.captions,
+      timer: r['timer'] is bool ? r['timer']! as bool : d.timer,
+      controls: controls,
+      ringtone: _pick(r['ringtone'], ringtones) ?? d.ringtone,
+      statusText: ThemeCallStatusText.fromJson(r['statusText'], d.statusText),
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'background': background,
+        'backgroundTo': backgroundTo,
+        'text': text,
+        'textMuted': textMuted,
+        'avatar': avatar,
+        'avatarShape': avatarShape,
+        'avatarFill': avatarFill,
+        'avatarText': avatarText,
+        'buttonFill': buttonFill,
+        'buttonIcon': buttonIcon,
+        'buttonActiveFill': buttonActiveFill,
+        'buttonActiveIcon': buttonActiveIcon,
+        'endFill': endFill,
+        'endIcon': endIcon,
+        'endShape': endShape,
+        'acceptFill': acceptFill,
+        'acceptIcon': acceptIcon,
+        'declineFill': declineFill,
+        'declineIcon': declineIcon,
+        'callbackFill': callbackFill,
+        'callbackIcon': callbackIcon,
+        'captions': captions,
+        'timer': timer,
+        'controls': List<String>.of(controls),
+        'ringtone': ringtone,
+        'statusText': statusText.toJson(),
+      };
+}
+
+/// One note of a ring: a frequency (0 is a rest) for a duration.
+class RingNote {
+  const RingNote(this.hz, this.ms);
+
+  final double hz;
+  final int ms;
+
+  Map<String, Object?> toJson() => <String, Object?>{'hz': hz, 'ms': ms};
+}
+
+/// A RING EVERY SDK PLAYS THE SAME (contract/DESIGN.md → `ringtones`): the
+/// notes once, then [pauseMs] of silence, until the call is answered, declined
+/// or stops ringing — each note a [wave] at [gain] (0–1 of full scale), with a
+/// 10 ms rise and a 40 ms fall inside it. `call.ringtone` "system" is the
+/// phone's own ring. For an app drawing its own call screen
+/// (`GraineCallScreen.app`): the SDK's call screens play these themselves.
+class Ringtone {
+  const Ringtone({required this.label, required this.wave, required this.gain, required this.notes, required this.pauseMs});
+
+  final String label;
+
+  /// `sine` or `triangle`.
+  final String wave;
+  final double gain;
+  final List<RingNote> notes;
+  final int pauseMs;
+
+  /// The rings by their `call.ringtone` names.
+  static const Map<String, Ringtone> all = <String, Ringtone>{
+    // Two rising notes, twice: E5 → B5.
+    'graine': Ringtone(
+      label: 'Graine',
+      wave: 'sine',
+      gain: 0.5,
+      notes: <RingNote>[RingNote(659.25, 150), RingNote(987.77, 230), RingNote(0, 110), RingNote(659.25, 150), RingNote(987.77, 230)],
+      pauseMs: 1500,
+    ),
+    // A low, rounded pair: C5 → G5, slower and quieter.
+    'soft': Ringtone(
+      label: 'Soft',
+      wave: 'triangle',
+      gain: 0.35,
+      notes: <RingNote>[RingNote(523.25, 420), RingNote(783.99, 560)],
+      pauseMs: 2000,
+    ),
+  };
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'label': label,
+        'wave': wave,
+        'gain': gain,
+        'notes': <Object?>[for (final n in notes) n.toJson()],
+        'pauseMs': pauseMs,
+      };
+}
+
 /// EVERYTHING A RENDERER NEEDS for one scheme, as flat numbers and #RRGGBB
 /// strings — the `ThemeTokens` of contract/DESIGN.md, key for key.
 class ThemeTokens {
@@ -484,6 +914,8 @@ class ThemeTokens {
     this.glass,
     required this.bubbles,
     this.chrome = 'none',
+    this.servedChat,
+    this.servedCall,
   });
 
   final int v;
@@ -511,10 +943,26 @@ class ThemeTokens {
   /// plain surface.
   final String chrome;
 
+  /// The chat window's tokens exactly as the session carried them; null from
+  /// a server that predates them. Draw from [chat].
+  final ThemeChat? servedChat;
+
+  /// The call screen's tokens exactly as the session carried them; null from
+  /// a server that predates them. Draw from [call].
+  final ThemeCall? servedCall;
+
   bool get dark => scheme == 'dark';
 
   /// The design opens its surfaces as desktop windows.
   bool get window => chrome == 'window';
+
+  /// The chat window's tokens — the session's, else the window as it was
+  /// drawn before they existed.
+  ThemeChat get chat =>
+      servedChat ?? ThemeChat.fallback(colors, dark: dark, hasGlyph: icons.launcher != null);
+
+  /// The call screen's tokens — the session's, else the fixed dark screen.
+  ThemeCall get call => servedCall ?? ThemeCall.fallback(colors);
 
   /// One scheme's tokens. [scheme] is the slot they arrived in, used when the
   /// tokens do not say. Null when [raw] is not an object with a `colors` object
@@ -527,20 +975,28 @@ class ThemeTokens {
     final d = said == 'dark' ? _Fallback.dark : _Fallback.light;
     final preset = r['preset'] is String ? (r['preset']! as String).trim() : '';
     final v = Js.finite(r['v']);
+    final colors = ThemeColors.fromJson(Js.asMap(r['colors'])!, d.colors);
+    final icons = ThemeIcons.fromJson(r['icons'], d.icons);
+    final chat = Js.asMap(r['chat']);
+    final call = Js.asMap(r['call']);
     return ThemeTokens(
       v: v == null ? 1 : v.round(),
       preset: preset.isEmpty ? d.preset : preset,
       scheme: said,
-      colors: ThemeColors.fromJson(Js.asMap(r['colors'])!, d.colors),
+      colors: colors,
       font: ThemeFont.fromJson(r['font'], d.font),
       shape: ThemeShape.fromJson(r['shape'], d.shape),
       spacing: ThemeSpacing.fromJson(r['spacing'], d.spacing),
       elevation: ThemeElevation.fromJson(r['elevation'], d.elevation),
       motion: ThemeMotion.fromJson(r['motion'], d.motion),
-      icons: ThemeIcons.fromJson(r['icons'], d.icons),
+      icons: icons,
       glass: r.containsKey('glass') ? ThemeGlass.fromJson(r['glass']) : d.glass,
       bubbles: _pick(r['bubbles'], Design.bubbleStyles) ?? d.bubbles,
       chrome: _pick(r['chrome'], Design.chromes) ?? d.chrome,
+      servedChat: chat == null
+          ? null
+          : ThemeChat.fromJson(chat, ThemeChat.fallback(colors, dark: said == 'dark', hasGlyph: icons.launcher != null)),
+      servedCall: call == null ? null : ThemeCall.fromJson(call, ThemeCall.fallback(colors)),
     );
   }
 
@@ -559,6 +1015,9 @@ class ThemeTokens {
         'glass': glass?.toJson(),
         'bubbles': bubbles,
         'chrome': chrome,
+        // Only what was served: an older session read back is what it said.
+        if (servedChat != null) 'chat': servedChat!.toJson(),
+        if (servedCall != null) 'call': servedCall!.toJson(),
       };
 }
 
@@ -647,6 +1106,19 @@ abstract final class Design {
     final three = _hex3.firstMatch(s);
     if (three != null) return '#${three[1]!.split('').map((String c) => '$c$c').join().toUpperCase()}';
     return null;
+  }
+
+  /// [a] a fraction [t] of the way to [b], channel by channel, as #RRGGBB —
+  /// the design system's mixHex. A colour that does not read is black.
+  static String mixHex(String a, String b, double t) {
+    int ch(String hex, int i) => int.parse((normaliseHex(hex) ?? '#000000').substring(1 + i * 2, 3 + i * 2), radix: 16);
+    final k = t.clamp(0.0, 1.0);
+    final out = StringBuffer('#');
+    for (var i = 0; i < 3; i++) {
+      final v = Js.round(ch(a, i) + (ch(b, i) - ch(a, i)) * k).toInt().clamp(0, 255);
+      out.write(v.toRadixString(16).padLeft(2, '0').toUpperCase());
+    }
+    return out.toString();
   }
 
   /// THE APP'S OWN COPY OF A FAMILY, or null.

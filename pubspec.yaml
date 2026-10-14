@@ -1,12 +1,24 @@
 name: graine_inapp
+# pub.dev shows 60-180 characters of this.
 description: >-
-  Graine's in-app voice agent for Flutter: the hosted engine page in a WebView
-  the SDK owns, plus screen context, in-app actions, components the agent
-  draws, and a default agent bar.
-version: 0.6.3
+  An AI agent inside your Flutter app: it sees the screen, acts in the app,
+  shows components, talks, and takes calls with CallKit on iOS and a call
+  screen on Android.
+version: 0.7.0
 homepage: https://www.graine.ai
 documentation: https://www.graine.ai/docs/in-app/flutter
 repository: https://github.com/GraineAI/inapp-flutter
+issue_tracker: https://www.graine.ai/support
+topics:
+  - ai
+  - chatbot
+  - voice
+  - callkit
+  - customer-support
+# The plugin declares these too; stated here so pub.dev never infers more.
+platforms:
+  android:
+  ios:
 
 environment:
   sdk: ">=3.3.0 <4.0.0"

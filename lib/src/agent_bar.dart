@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart' show ValueListenable;
@@ -5,6 +6,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
+import 'chat_frames.dart';
 import 'chat_window.dart';
 import 'core/core.dart';
 import 'glyph.dart';
@@ -72,15 +74,23 @@ class GraineAgentBar extends StatefulWidget {
     this.showCaptions = true,
     this.onClose,
     this.chat,
+    this.builtInChat = true,
     this.surface,
     this.onSurfaceChange,
+    this.app,
   });
 
-  /// The call to draw. Default: [GraineInApp.instance]'s voice.
+  /// The call to draw. Default: [app]'s voice.
   final GraineCallState? call;
 
-  /// The components to draw above the bar. Default: [GraineInApp.instance]'s.
+  /// The components to draw above the bar. Default: [app]'s.
   final GraineComponents? components;
+
+  /// THE AGENT THIS BAR TALKS TO, in an app with several
+  /// (`GraineAgentBar(app: GraineInApp.named('support'))`): its call, chat,
+  /// components, session and design. Default: the agent [call] belongs to,
+  /// else the default agent ([GraineInApp.instance]).
+  final GraineInApp? app;
 
   /// #RRGGBB for the avatar, the microphone, the meter and components. Default: the design's accent, else the dashboard's.
   final String? accent;
@@ -131,12 +141,18 @@ class GraineAgentBar extends StatefulWidget {
   /// the bar. Hide it here if your app shows the bar on demand.
   final VoidCallback? onClose;
 
-  /// THE CHAT, for an agent the dashboard offers as both a call and a chat
-  /// (Embed & Widgets → mode). This SDK carries the call; an app that runs
-  /// the chat conversation hands it here, and the bar offers the switch
-  /// between them and draws the chat window above itself. Without one the
-  /// bar is the call alone.
+  /// THE CHAT, for an agent the dashboard offers as a chat, or as both a call
+  /// and a chat (Embed & Widgets → mode). Default: the SDK's own ([app]'s
+  /// [GraineInApp.chat]) — the bar offers the switch between them as the
+  /// dashboard allows, draws the chat window above itself, and opens the chat
+  /// while the customer is in it (ending the call first: one conversation at
+  /// a time) and closes it when they leave. An app that runs the chat itself
+  /// hands its own here.
   final GraineChatState? chat;
+
+  /// Use the SDK's own chat when [chat] is null. Off: without a [chat] the
+  /// bar is the call alone, whatever the dashboard offers.
+  final bool builtInChat;
 
   /// Which to open when both are offered — the dashboard's `start` otherwise.
   /// A surface the dashboard does not allow is never opened.
@@ -330,8 +346,35 @@ class _BarLook {
 
 const Color _white = Color(0xFFFFFFFF);
 
-class _GraineAgentBarState extends State<GraineAgentBar> {
+/// The bars on screen, newest last — so [GraineChat.open] can ask its agent's
+/// bar to open the chat where the customer already talks to it.
+final List<_GraineAgentBarState> _bars = <_GraineAgentBarState>[];
+
+/// Open the chat in [app]'s bar, at [size] for this open: the future completes
+/// when the chat window closes. Null when no bar of [app]'s, with a chat to
+/// carry, is on screen.
+Future<void>? openChatInBar(GraineInApp? app, GraineChatSize? size) {
+  for (final bar in _bars.reversed) {
+    if (bar.mounted && identical(bar._app, app) && bar._chatState != null) return bar.openChat(size);
+  }
+  return null;
+}
+
+class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObserver {
   final GlobalKey _unitKey = GlobalKey();
+
+  /// The size the app's last open asked for ([GraineChat.open]), until the bar
+  /// closes: moving to the call and back keeps it.
+  GraineChatSize? _openedSize;
+
+  /// That open's future, completed when the chat window closes.
+  Completer<void>? _openDone;
+
+  /// Whether the last build drew the chat — to hear it close.
+  bool _wasInChat = false;
+
+  /// What closes the chat now (the chevron's action), while a bigger window shows it.
+  VoidCallback? _closeShown;
   late int _offset = widget.initialOffset ?? 0;
   double _barHeight = 0;
   bool _dragging = false;
@@ -344,15 +387,44 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
   /// The surface last announced to [GraineAgentBar.onSurfaceChange].
   AgentSurface? _announced;
 
-  GraineCallState get _call => widget.call ?? GraineInApp.instance.voice;
-  GraineComponents? get _components => widget.components ?? GraineInApp.maybeInstance?.components;
+  /// The agent this bar talks to: the one it was handed, else the one its
+  /// call belongs to, else the default agent.
+  GraineInApp? get _app {
+    final call = widget.call;
+    return widget.app ?? (call is GraineVoice ? call.app : null) ?? GraineInApp.maybeInstance;
+  }
+
+  GraineCallState get _call => widget.call ?? (widget.app ?? GraineInApp.instance).voice;
+  GraineComponents? get _components => widget.components ?? _app?.components;
 
   /// The call this bar has told it is on screen ([GraineVoice.viewOpened]):
   /// while it is, a page still loading is a customer waiting.
   GraineVoice? _viewing;
 
+  /// The chat this bar opened because the customer is in it — closed when
+  /// they leave it, and when the bar goes.
+  GraineChatConnection? _openedChat;
+
+  /// The chat to draw: the app's, else the SDK's own.
+  GraineChatState? get _chatState => widget.chat ?? (widget.builtInChat ? _app?.chat : null);
+
+  /// Open the chat while the customer is in it; close the one this bar opened
+  /// when they are not. After the frame: opening notifies, and this runs
+  /// while the bar is being built.
+  void _syncChat(GraineChatState? chat, bool inChat) {
+    GraineChatConnection? wanted;
+    if (inChat && chat is GraineChatConnection) wanted = chat as GraineChatConnection;
+    if (identical(wanted, _openedChat)) return;
+    final before = _openedChat;
+    _openedChat = wanted;
+    SchedulerBinding.instance.addPostFrameCallback((Duration _) {
+      before?.close();
+      if (mounted && identical(_openedChat, wanted)) wanted?.open();
+    });
+  }
+
   void _holdView() {
-    final call = widget.call ?? GraineInApp.maybeInstance?.voice;
+    final call = widget.call ?? _app?.voice;
     final next = call is GraineVoice ? call : null;
     if (identical(next, _viewing)) return;
     _viewing?.viewClosed();
@@ -364,13 +436,45 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
   void initState() {
     super.initState();
     _holdView();
+    _bars.add(this);
+    WidgetsBinding.instance.addObserver(this);
   }
 
   @override
   void dispose() {
+    _bars.remove(this);
+    WidgetsBinding.instance.removeObserver(this);
+    _finishOpen();
     _viewing?.viewClosed();
     _viewing = null;
+    _openedChat?.close();
+    _openedChat = null;
     super.dispose();
+  }
+
+  /// The app opened the chat ([GraineChat.open]): move to it, where the agent
+  /// offers one, at [size] for this open.
+  Future<void> openChat(GraineChatSize? size) {
+    _openedSize = size;
+    final done = _openDone ??= Completer<void>();
+    setState(() => _chosen = AgentSurface.chat);
+    return done.future;
+  }
+
+  /// The chat window closed: an open waiting on it is done.
+  void _finishOpen() {
+    final done = _openDone;
+    _openDone = null;
+    if (done != null && !done.isCompleted) done.complete();
+  }
+
+  /// Back closes a bigger chat window — once the app's own screens have nothing to go back to.
+  @override
+  Future<bool> didPopRoute() async {
+    final close = _closeShown;
+    if (close == null) return false;
+    close();
+    return true;
   }
 
   @override
@@ -435,6 +539,8 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
   /// The end button: hang up (or cancel a call being placed), then tell the app.
   void _endOrClose(GraineCallState call) {
     call.end();
+    // The bar closes: so does an open's own size.
+    _openedSize = null;
     widget.onClose?.call();
   }
 
@@ -445,20 +551,21 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
     _holdView();
     // A design handed to this bar directly has its typeface fetched too; the
     // session's is fetched when the session arrives. Each face once.
-    if (widget.design != null) GraineInApp.maybeInstance?.loadDesignFonts(widget.design);
+    final app = _app;
+    if (widget.design != null) app?.loadDesignFonts(widget.design);
     return ListenableBuilder(
-      listenable: surfaceListenable(<Listenable?>[call, widget.chat]),
+      listenable: surfaceListenable(<Listenable?>[call, _chatState], app: app),
       builder: (BuildContext context, Widget? _) => _build(context, call),
     );
   }
 
   Widget _build(BuildContext context, GraineCallState call) {
-    final app = GraineInApp.maybeInstance;
+    final app = _app;
     final appearance = call.appearance;
     final dash = Appearance.resolve(appearance,
         accent: Appearance.defaultAccent, heading: 'Assistant', origin: app?.config.baseUrl);
     final ownAccent = (widget.accent != null && Appearance.argb(widget.accent) != null) ? colorOf(widget.accent) : null;
-    final tokens = tokensFor(context, design: widget.design, scheme: widget.scheme);
+    final tokens = tokensFor(context, design: widget.design, scheme: widget.scheme, app: app);
     final _BarLook p;
     if (tokens != null) {
       p = _BarLook.design(tokens, accent: ownAccent, radius: widget.radius);
@@ -476,14 +583,31 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
     final motion = motionOf(context, tokens);
     final curve = curveOf(tokens);
 
-    // The call or the chat: the chat only when the app runs one, and only
-    // as the dashboard allows.
-    final chat = widget.chat;
+    // The call or the chat — the chat as the dashboard allows (the React
+    // Native SDK's resolveSurface), the SDK's own unless the app runs one.
+    final chat = _chatState;
     final policy = Surfaces.resolve(appearance, _chosen ?? widget.surface);
     final surface = chat == null ? AgentSurface.voice : policy.start;
     final isChat = surface == AgentSurface.chat;
     final canSwitch = chat != null && policy.canSwitch;
     _announce(surface);
+    _syncChat(chat, isChat);
+    if (_wasInChat && !isChat) _finishOpen();
+    _wasInChat = isChat;
+
+    // How big the chat is (contract/DESIGN.md "Chat window" → Size): the
+    // compact window above the bar, a phone's sheet or a tablet's panel, or
+    // the whole screen — the open's size, then the app's, then the design's.
+    final media = MediaQuery.of(context);
+    final presentation = ChatWindowLayout.barPresentation(
+      inChat: isChat && tokens != null,
+      open: _openedSize,
+      config: app?.config.chatSize,
+      token: tokens?.chat.size,
+      width: media.size.width,
+      height: media.size.height,
+    );
+    final big = presentation != null && presentation != ChatPresentation.window;
 
     // A host's own call state need not say; GraineVoice does.
     final fault = switch (call) { GraineCallFault(:final error) => error, _ => null };
@@ -676,8 +800,12 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
       child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: row),
     );
 
+    // What the chevron does — and closing a sheet, a panel or the screen.
+    void closeChat() => canSwitch ? _setSurface(AgentSurface.voice, call) : _endOrClose(call);
+    _closeShown = big ? closeChat : null;
+
     Widget? above;
-    if (isChat) {
+    if (isChat && !big) {
       above = _Rise(
         key: const ValueKey<String>('graine-rise-chat'),
         duration: motion,
@@ -689,10 +817,19 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
             look: p.chat,
             heading: name,
             messages: chat!.messages,
+            turns: chat is GraineChatSession ? chat.turns : null,
             online: chat.connected,
+            typing: switch (chat) { GraineChatTyping(:final agentTyping) => agentTyping, _ => false },
             onSend: chat.send,
+            connectingText: loader.text.connecting,
+            // The SDK's own chat knows the user's booked calls: the Upcoming calls card.
+            upcoming: chat is GraineChatSession ? chat.upcomingCalls : const <GraineScheduledCall>[],
+            cancelStateOf: chat is GraineChatSession ? chat.cancelStateOf : null,
+            onCancelUpcoming: chat is GraineChatSession ? (String id) => chat.cancelUpcoming(id) : null,
+            onNewConversation: chat is GraineChatSession ? () => chat.newConversation().catchError((Object _) {}) : null,
+            callName: app?.session?.calls?.callName ?? name,
             // Back to the call — or, for an agent that is only a chat, closed.
-            onCollapse: canSwitch ? () => _setSurface(AgentSurface.voice, call) : () => _endOrClose(call),
+            onCollapse: closeChat,
             logoUrl: dash.logoUrl,
             logoPlate: dash.logoPlate,
             origin: app?.config.baseUrl,
@@ -757,9 +894,11 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        if (components != null)
+        // A bigger chat window carries the components itself, above its composer.
+        if (components != null && !big)
           GraineWidgetView(
             components: components,
+            app: app,
             accent: widget.accent,
             radius: widget.radius,
             scheme: widget.scheme,
@@ -774,7 +913,67 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
 
     WidgetsBinding.instance.addPostFrameCallback((Duration _) => _measure());
 
-    return DefaultTextStyle(
+    // A bigger chat window, over the app: the same chat window, filling a
+    // sheet, a tablet's panel (keeping its frame) or the screen (the chevron
+    // leading), the agent's components above its composer.
+    Widget? over;
+    if (big && chat != null) {
+      final window = KeyedSubtree(
+        key: GraineAgentBar.chatKey,
+        child: ChatWindow(
+          look: p.chat,
+          heading: name,
+          messages: chat.messages,
+          turns: chat is GraineChatSession ? chat.turns : null,
+          online: chat.connected,
+          typing: switch (chat) { GraineChatTyping(:final agentTyping) => agentTyping, _ => false },
+          onSend: chat.send,
+          connectingText: loader.text.connecting,
+          upcoming: chat is GraineChatSession ? chat.upcomingCalls : const <GraineScheduledCall>[],
+          cancelStateOf: chat is GraineChatSession ? chat.cancelStateOf : null,
+          onCancelUpcoming: chat is GraineChatSession ? (String id) => chat.cancelUpcoming(id) : null,
+          // A sheet, a panel and a screen offer New conversation like the compact window.
+          onNewConversation: chat is GraineChatSession ? () => chat.newConversation().catchError((Object _) {}) : null,
+          callName: app?.session?.calls?.callName ?? name,
+          onCollapse: closeChat,
+          collapseLabel: canSwitch ? 'Collapse' : 'Close',
+          logoUrl: dash.logoUrl,
+          logoPlate: dash.logoPlate,
+          origin: app?.config.baseUrl,
+          fill: true,
+          keepFrame: presentation == ChatPresentation.panel,
+          leadingChevron: presentation == ChatPresentation.screen,
+          below: components == null
+              ? null
+              : GraineWidgetView(
+                  components: components,
+                  app: app,
+                  accent: widget.accent,
+                  radius: widget.radius,
+                  scheme: widget.scheme,
+                  appearance: appearance,
+                  design: widget.design,
+                  maxHeight: math.max(160, media.size.height * 0.4),
+                ),
+        ),
+      );
+      over = DefaultTextStyle(
+        style: textStyle(p.text, 14),
+        child: chatOverScreen(
+          presentation: presentation,
+          media: media,
+          look: p.chat,
+          scrim: tokenColor(tokens!.colors.scrim),
+          onClose: closeChat,
+          window: window,
+          motion: motion,
+          // The floating shadow, unless the design draws a hard offset.
+          sheetShadows: tokens.elevation.hardOffset == null ? shadowsOf(tokens.elevation.floating) : null,
+        ),
+      );
+    }
+
+    final barLayer = DefaultTextStyle(
       style: textStyle(p.text, 14),
       child: Align(
         alignment: Alignment.bottomCenter,
@@ -805,6 +1004,8 @@ class _GraineAgentBarState extends State<GraineAgentBar> {
         ),
       ),
     );
+    if (over == null) return barLayer;
+    return Stack(children: <Widget>[barLayer, Positioned.fill(child: over)]);
   }
 
   /// Tell the app when the surface moved — by the customer's switch, or by a

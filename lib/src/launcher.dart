@@ -31,10 +31,15 @@ class GraineLauncher extends StatelessWidget {
     this.label,
     this.design,
     this.scheme,
+    this.app,
   });
 
-  /// The call a tap starts. Default: [GraineInApp.instance]'s voice.
+  /// The call a tap starts. Default: [app]'s voice.
   final GraineCallState? call;
+
+  /// The agent a tap calls: its call, session and design. Default: the
+  /// agent [call] belongs to, else the default agent ([GraineInApp.instance]).
+  final GraineInApp? app;
 
   /// What a tap does instead of starting the call.
   final VoidCallback? onPressed;
@@ -52,27 +57,33 @@ class GraineLauncher extends StatelessWidget {
   /// The button, for a test to find.
   static const Key launcherKey = ValueKey<String>('graine-launcher');
 
-  GraineCallState? get _call => call ?? GraineInApp.maybeInstance?.voice;
+  /// The agent this launcher calls.
+  GraineInApp? get _agent {
+    final c = call;
+    return app ?? (c is GraineVoice ? c.app : null) ?? GraineInApp.maybeInstance;
+  }
+
+  GraineCallState? get _call => call ?? _agent?.voice;
 
   @override
   Widget build(BuildContext context) {
     final c = _call;
-    final app = GraineInApp.maybeInstance;
+    final app = _agent;
     if (c == null && app == null) return _build(context, c);
     // A design handed over directly has its typeface fetched too (each face once).
     if (design != null) app?.loadDesignFonts(design);
     return ListenableBuilder(
-      listenable: surfaceListenable(<Listenable?>[c]),
+      listenable: surfaceListenable(<Listenable?>[c], app: app),
       builder: (BuildContext context, Widget? _) => _build(context, c),
     );
   }
 
   Widget _build(BuildContext context, GraineCallState? c) {
-    final app = GraineInApp.maybeInstance;
+    final app = _agent;
     final appearance = c?.appearance ?? app?.session?.appearance ?? const <String, Object?>{};
     final dash = Appearance.resolve(appearance, accent: Appearance.defaultAccent, heading: '', origin: app?.config.baseUrl);
     final words = label ?? (dash.heading.isNotEmpty ? dash.heading : 'Talk to us');
-    final tokens = tokensFor(context, design: design, scheme: scheme);
+    final tokens = tokensFor(context, design: design, scheme: scheme, app: app);
     const double h = Design.launcherSize;
     final glyphSize = h * Design.launcherGlyphScale;
 

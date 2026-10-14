@@ -47,12 +47,13 @@ bool deviceDark(BuildContext context) =>
 // ── the design ──────────────────────────────────────────────────────────────
 
 /// THE TOKENS A SURFACE DRAWS WITH, or null — and then it draws exactly as it
-/// did before designs. [design] is a widget's own; else the session's.
+/// did before designs. [design] is a widget's own; else the session's — of
+/// [app], the agent the surface draws (the default agent unless handed one).
 /// [scheme] is a widget's override ("light", "dark", "auto"). Reads the
 /// device's brightness through MediaQuery, so a surface re-picks the moment
 /// the device switches.
-ThemeTokens? tokensFor(BuildContext context, {ResolvedDesign? design, String? scheme}) {
-  final d = design ?? GraineInApp.maybeInstance?.design;
+ThemeTokens? tokensFor(BuildContext context, {ResolvedDesign? design, String? scheme, GraineInApp? app}) {
+  final d = design ?? (app ?? GraineInApp.maybeInstance)?.design;
   if (d == null) return null;
   final b = MediaQuery.maybePlatformBrightnessOf(context);
   return d.pick(deviceDark: b == null ? null : b == Brightness.dark, scheme: scheme);
@@ -66,8 +67,11 @@ ThemeTokens? tokensFor(BuildContext context, {ResolvedDesign? design, String? sc
 ///    bold face would embolden it twice;
 ///  - neither, yet or ever → the platform's font at the weight, silently.
 ({String? family, FontWeight weight}) faceOf(String family, int weight) {
+  // The app's agents share one loader, and one app bundle: every agent's.
   final app = GraineInApp.maybeInstance;
-  final own = Design.fontFamily(family, app?.config.fonts ?? const <String>[]);
+  final own = Design.fontFamily(family, <String>{
+    for (final g in GraineInApp.all.values) ...g.config.fonts,
+  });
   if (own != null) return (family: own, weight: weightOf(weight));
   final face = DesignFonts.faceFor(family, weight);
   final name = face == null ? null : app?.fontFaces.value[face.key];
@@ -103,16 +107,17 @@ String initialOf(String name) {
   return t.isEmpty ? 'A' : String.fromCharCodes(t.runes.take(1)).toUpperCase();
 }
 
-/// What a surface redraws on: its own state, the session arriving, and the
-/// design's typefaces landing — a face that loads after the first frame
-/// redraws everything set in it.
-Listenable surfaceListenable(List<Listenable?> own) {
-  final app = GraineInApp.maybeInstance;
+/// What a surface redraws on: its own state, the session of [app] (the agent
+/// it draws; the default agent unless handed one) arriving, and the design's
+/// typefaces landing — a face that loads after the first frame redraws
+/// everything set in it.
+Listenable surfaceListenable(List<Listenable?> own, {GraineInApp? app}) {
+  final a = app ?? GraineInApp.maybeInstance;
   final all = <Listenable>[
     for (final l in own)
       if (l != null) l,
-    if (app != null) app.sessionListenable,
-    if (app != null) app.fontFaces,
+    if (a != null) a.sessionListenable,
+    if (a != null) a.fontFaces,
   ];
   return all.length == 1 ? all.single : Listenable.merge(all);
 }

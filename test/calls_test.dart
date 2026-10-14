@@ -83,7 +83,7 @@ void main() {
 
   test("the engine's state reaches the call screen, filled in", () async {
     await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
-    final seen = <GraineCallStatus>[];
+    final seen = <GraineNativeCallStatus>[];
     void listener() => seen.add(GraineCalls.instance.value.status);
     GraineCalls.instance.addListener(listener);
     emit('state', <String, Object?>{'state': 'ringing', 'callId': 'c1', 'direction': 'incoming', 'reason': 'payment_due'});
@@ -97,7 +97,7 @@ void main() {
     });
     await pumpEventQueue();
     GraineCalls.instance.removeListener(listener);
-    expect(seen, <GraineCallStatus>[GraineCallStatus.ringing, GraineCallStatus.active]);
+    expect(seen, <GraineNativeCallStatus>[GraineNativeCallStatus.ringing, GraineNativeCallStatus.active]);
     final s = GraineCalls.instance.value;
     expect(s.callId, 'c1');
     expect(s.direction, GraineCallDirection.incoming);
@@ -122,9 +122,10 @@ void main() {
     expect(rings.single.callId, 'c9');
     expect(rings.single.reason, 'delivery_delayed');
     expect(outcomes.map((GraineCallOutcome o) => o.wire), <String>['ended', 'failed']);
-    expect(outcomes.first.endReason, 'remote');
-    expect(outcomes.last.error, 'no network');
-    expect(outcomes.last.endReason, isNull);
+    expect(outcomes.first.reason, 'remote');
+    expect(outcomes.first.outcome, GraineCallOutcomeKind.ended);
+    expect(outcomes.last.reason, 'no network', reason: "a failure's reason is why it never connected");
+    expect(outcomes.last.outcome, GraineCallOutcomeKind.failed);
   });
 
   test('outcomes and rings from before the app listened reach its first listener, oldest first', () async {
@@ -273,6 +274,73 @@ void main() {
     });
   });
 
+  group('who the user is, for the native engine', () {
+    GraineInApp app() => GraineInApp.forTesting(
+          const GraineConfig(baseUrl: 'https://example.test', publishableKey: 'pk_test_1'),
+          httpClient: MockClient((http.Request _) async => http.Response('{}', 404)),
+          install: true,
+        );
+
+    test('configure hands the engine the traits as the app passed them — raw — and the memory choice', () async {
+      final g = app();
+      g.identify(<String, Object?>{'name': 'Asha', 'email': 'asha@example.com', 'orders': 3}, memory: false);
+      expect(argsOf('setIdentity'), isEmpty, reason: 'no engine configured in this run yet');
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      await pumpEventQueue();
+      expect(argsOf('setIdentity').last, <String, Object?>{'name': 'Asha', 'email': 'asha@example.com', 'orders': 3},
+          reason: 'the engine masks for the agent and keeps the identity raw for Graine');
+      expect(argsOf('setMemory').last, isFalse);
+
+      g.setMemory(true);
+      await pumpEventQueue();
+      expect(argsOf('setMemory').last, isTrue);
+      g.identify(null);
+      await pumpEventQueue();
+      expect(argsOf('setIdentity').last, isNull, reason: 'signed out');
+    });
+
+    test('an engine from before setMemory is not an error', () async {
+      reply = (MethodCall c) {
+        if (c.method == 'setMemory') throw MissingPluginException();
+        return c.method == 'snapshot' ? <String, Object?>{'state': 'idle'} : null;
+      };
+      final g = app();
+      g.identify(<String, Object?>{'user_id': 'P-1'});
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      await pumpEventQueue();
+      expect(argsOf('setIdentity').last, <String, Object?>{'user_id': 'P-1'});
+    });
+
+    test("Android: FCM's token reaches the engine; iOS needs none", () async {
+      await GraineCalls.instance.registerPushToken('  fcm-token-1  ');
+      expect(argsOf('registerPushToken').single, <String, Object?>{'token': 'fcm-token-1', 'tokenKind': 'fcm'});
+      await GraineCalls.instance.registerPushToken('');
+      expect(argsOf('registerPushToken'), hasLength(1), reason: 'no token is no registration');
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      await GraineCalls.instance.registerPushToken('apns');
+      expect(argsOf('registerPushToken'), hasLength(1));
+    });
+
+    test('a ring and an outcome say when Graine rang the call, and how long it lasted', () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      final rings = <GraineIncomingCall>[];
+      final outcomes = <GraineCallOutcome>[];
+      final a = GraineCalls.instance.incomingCalls.listen(rings.add);
+      final b = GraineCalls.instance.outcomes.listen(outcomes.add);
+      emit('incoming', <String, Object?>{'callId': 'c1', 'callerName': 'Acme', 'hosted': '1'});
+      emit('outcome', <String, Object?>{'callId': 'c1', 'outcome': 'ended', 'reason': 'remote', 'durationSeconds': 42.4, 'hosted': true});
+      emit('outcome', <String, Object?>{'callId': 'c2', 'outcome': 'missed'});
+      await pumpEventQueue();
+      await a.cancel();
+      await b.cancel();
+      expect(rings.single.hosted, isTrue);
+      expect(outcomes.first.hosted, isTrue);
+      expect(outcomes.first.durationSeconds, 42);
+      expect(outcomes.last.hosted, isFalse);
+      expect(outcomes.last.durationSeconds, isNull);
+    });
+  });
+
   test('a native call takes the line: the WebView engine will not start beside it', () async {
     final g = GraineInApp.forTesting(
       const GraineConfig(baseUrl: 'https://example.test', publishableKey: 'pk_test_1'),
@@ -288,7 +356,7 @@ void main() {
     expect(errors, <String>['A call is already in progress.']);
     emit('state', <String, Object?>{'state': 'idle'});
     await pumpEventQueue();
-    expect(GraineCalls.instance.value.status, GraineCallStatus.idle);
+    expect(GraineCalls.instance.value.status, GraineNativeCallStatus.idle);
   });
 }
 

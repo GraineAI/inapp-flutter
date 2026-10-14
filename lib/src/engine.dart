@@ -1,3 +1,5 @@
+import 'package:flutter/gestures.dart' show HitTestResult;
+import 'package:flutter/rendering.dart' show RenderSemanticsAnnotations;
 import 'package:flutter/widgets.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import 'package:webview_flutter_android/webview_flutter_android.dart';
@@ -23,13 +25,36 @@ import 'graine.dart';
 /// One pixel and 1% opacity rather than removed or invisible: a platform
 /// view that is not composited can have its media suspended by the OS,
 /// which would kill the call the moment your own UI hid it.
+///
+/// With a [child] it also sees the customer's taps — without taking one — and
+/// tells the agent what they tapped while a screen is set
+/// ([GraineConfig.captureTaps]): a control with an accessibility label by its
+/// label, anywhere else as "tap:screen" with where.
+///
+/// SEVERAL AGENTS: one engine per agent the customer can call, each holding
+/// that agent's own page — nest them, all near the root:
+///
+///     builder: (context, child) => GraineEngine(
+///       app: GraineInApp.named('support'),
+///       child: GraineEngine(child: child!),     // the default agent
+///     ),
+///
+/// Each page stays loaded and idle, so a call with any agent starts at once
+/// whichever screen the customer is on; one conversation at a time holds
+/// across them (starting one ends another). An agent the app only chats with
+/// needs no engine — the chat has its own connection. Nested engines report
+/// a tap once.
 class GraineEngine extends StatefulWidget {
-  const GraineEngine({super.key, this.child, this.voice});
+  const GraineEngine({super.key, this.child, this.voice, this.app});
 
   final Widget? child;
 
-  /// The call to attach. Default: [GraineInApp.instance]'s.
+  /// The call to attach. Default: [app]'s.
   final GraineVoice? voice;
+
+  /// The agent whose calls this engine carries. Default: the default agent
+  /// ([GraineInApp.instance]).
+  final GraineInApp? app;
 
   @override
   State<GraineEngine> createState() => _GraineEngineState();
@@ -39,13 +64,78 @@ class _GraineEngineState extends State<GraineEngine> {
   WebViewEnginePage? _page;
   GraineVoice? _voice;
 
+  /// Where and when each finger went down, while it is down.
+  final Map<int, ({Offset at, Duration when})> _downs = <int, ({Offset at, Duration when})>{};
+
+  /// More than one finger was down at once: a pinch, not a tap.
+  bool _multi = false;
+
+  /// A touch that moved less than this, for less than [_tapMaxMs], is a tap —
+  /// the React Native SDK's rule.
+  static const double _tapMaxMove = 12;
+  static const int _tapMaxMs = 400;
+
+  void _down(PointerDownEvent e) {
+    _downs[e.pointer] = (at: e.position, when: e.timeStamp);
+    if (_downs.length > 1) _multi = true;
+  }
+
+  void _up(PointerUpEvent e) {
+    final d = _downs.remove(e.pointer);
+    final multi = _multi;
+    if (_downs.isEmpty) _multi = false;
+    if (d == null || multi) return;
+    if ((e.position - d.at).distance > _tapMaxMove) return;
+    if (e.timeStamp - d.when > const Duration(milliseconds: _tapMaxMs)) return;
+    // Tracking must never break a touch.
+    try {
+      final app = (widget.voice ?? _voice)?.app ?? widget.app ?? GraineInApp.maybeInstance;
+      if (app == null) return;
+      // Engines nested for several agents all see this touch — the same event
+      // under each one's transform: it is one tap, and captureTap tells it to
+      // every agent.
+      final seen = e.original ?? e;
+      if (identical(_lastTap, seen)) return;
+      _lastTap = seen;
+      if (!app.config.captureTaps && !GraineInApp.all.values.any((GraineInApp g) => g.config.captureTaps)) return;
+      app.captureTap(x: e.position.dx, y: e.position.dy, label: _labelAt(e.position));
+    } catch (_) {}
+  }
+
+  /// The last touch an engine reported as a tap.
+  static PointerEvent? _lastTap;
+
+  void _cancel(PointerCancelEvent e) {
+    _downs.remove(e.pointer);
+    if (_downs.isEmpty) _multi = false;
+  }
+
+  /// The accessibility label (else the tooltip) of the innermost labelled
+  /// control under [position], or null. Words the app gave the control, never
+  /// text it shows — which may be the customer's own.
+  String? _labelAt(Offset position) {
+    final view = View.maybeOf(context);
+    if (view == null) return null;
+    final result = HitTestResult();
+    WidgetsBinding.instance.hitTestInView(result, position, view.viewId);
+    for (final entry in result.path) {
+      final target = entry.target;
+      if (target is RenderSemanticsAnnotations) {
+        for (final words in <String?>[target.properties.label, target.properties.tooltip]) {
+          if (words != null && words.trim().isNotEmpty) return words;
+        }
+      }
+    }
+    return null;
+  }
+
   @override
   void initState() {
     super.initState();
     // No platform implementation (a widget test of the host app): draw the
     // box, attach nothing.
     if (WebViewPlatform.instance == null) return;
-    final voice = widget.voice ?? GraineInApp.instance.voice;
+    final voice = widget.voice ?? (widget.app ?? GraineInApp.instance).voice;
     final page = WebViewEnginePage(baseUrl: voice.config.baseUrl, debug: voice.config.debug);
     _voice = voice;
     _page = page;
@@ -79,7 +169,14 @@ class _GraineEngineState extends State<GraineEngine> {
       alignment: Alignment.topLeft,
       fit: StackFit.passthrough,
       children: <Widget>[
-        child,
+        // Translucent: it sees every touch on the way to the app and keeps none.
+        Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: _down,
+          onPointerUp: _up,
+          onPointerCancel: _cancel,
+          child: child,
+        ),
         Positioned(left: 0, bottom: 0, width: 1, height: 1, child: engine),
       ],
     );

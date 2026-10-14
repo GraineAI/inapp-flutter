@@ -2,6 +2,9 @@ import 'context.dart';
 import 'js.dart';
 import 'widgets.dart';
 
+/// WIRE.md's name for a component the agent drew: the same thing.
+typedef GraineComponent = GraineWidget;
+
 /// A component the agent put on screen, adopted from the page's frame
 /// exactly as the React Native SDK's useGraineWidget adopts it.
 class GraineWidget {
@@ -331,7 +334,7 @@ class WidgetContent {
         'titles': titles.join(', '),
         'count': chosen.length,
       },
-      Widgets.manySummary(titles, selectLabel.toLowerCase()),
+      Widgets.manySummary(titles, selectLabel),
     );
   }
 
@@ -357,10 +360,21 @@ class WidgetContent {
     return <String>[...ticked, id];
   }
 
-  /// The one button under a multi-select list. Below two it says how many more.
-  String manyButtonLabel(int chosen) => chosen < 2
-      ? 'Pick ${2 - chosen} more to ${selectLabel.toLowerCase()}'
-      : '$selectLabel $chosen';
+  /// The one button under a multi-select list. Below two it says how many
+  /// more — and not "to <label>": the author's label is a button's word
+  /// ("Compare", "Taken"), not always a verb, and "Pick 2 more to taken" is
+  /// what reading it as one said.
+  String manyButtonLabel(int chosen) => chosen < 2 ? 'Pick ${2 - chosen} more' : '$selectLabel $chosen';
+
+  /// A full-screen component's footer: on a call, "STILL LISTENING" and how
+  /// to answer — the agent is still there, listening. A component that
+  /// arrived in the chat is on no call: no footer at all.
+  static ({String label, String line})? screenFooter(String prompt, {required bool typed}) =>
+      typed ? null : (label: 'STILL LISTENING', line: prompt.isEmpty ? 'Tap one, or just say it.' : prompt);
+
+  /// The component's close control, for a screen reader: in the chat there is
+  /// no talking to keep on with.
+  static String closeLabel({required bool typed}) => typed ? 'Close' : 'Close and keep talking';
 
   /// The line that stays on screen after an answer, as the RN AnsweredLine
   /// reads the answer's data: a title (name, title, label or slot) and a

@@ -4,6 +4,8 @@ import ai.graine.inapp.GraineCallsHost
 import ai.graine.inapp.GraineCallsHostException
 import android.content.Context
 import android.content.Intent
+import java.io.File
+import java.util.TimeZone
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
@@ -22,6 +24,11 @@ import io.flutter.plugin.common.PluginRegistry
  * activity. One instance per Flutter engine: the app's, and a background
  * isolate's (firebase_messaging runs one for pushes), each with its own sink,
  * so a push can ring before any of the app's Dart has run.
+ *
+ * And `ai.graine.inapp/device`: what Dart needs from the device for the
+ * identity channel (contract 1.2-1.3) — the install id the native SDK keeps
+ * (the SAME id its call engine sends), the IANA zone, and the Dart side's
+ * own few bytes of preferences (its users' memory choices, by fingerprint).
  */
 class GraineInAppPlugin :
     FlutterPlugin,
@@ -34,6 +41,7 @@ class GraineInAppPlugin :
     private var context: Context? = null
     private var methods: MethodChannel? = null
     private var events: EventChannel? = null
+    private var device: MethodChannel? = null
     private var activity: ActivityPluginBinding? = null
 
     /** The host's token for this engine's event sink, while Dart listens. */
@@ -45,6 +53,7 @@ class GraineInAppPlugin :
         context = binding.applicationContext
         methods = MethodChannel(binding.binaryMessenger, METHODS).also { it.setMethodCallHandler(this) }
         events = EventChannel(binding.binaryMessenger, EVENTS).also { it.setStreamHandler(this) }
+        device = MethodChannel(binding.binaryMessenger, DEVICE).also { it.setMethodCallHandler(::onDeviceCall) }
         // A launch the last configure() can answer for: calls ring from the kept options.
         GraineCallsHost.restore(binding.applicationContext)
     }
@@ -52,9 +61,11 @@ class GraineInAppPlugin :
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         methods?.setMethodCallHandler(null)
         events?.setStreamHandler(null)
+        device?.setMethodCallHandler(null)
         stopListening()
         methods = null
         events = null
+        device = null
         context = null
     }
 
@@ -93,7 +104,19 @@ class GraineInAppPlugin :
                 "end" -> done(result) { GraineCallsHost.end() }
                 "setMuted" -> flag(call, result) { GraineCallsHost.setMuted(it) }
                 "setSpeaker" -> flag(call, result) { GraineCallsHost.setSpeaker(it) }
+                // The traits as the app passed them: the SDK masks them for the
+                // agent and keeps the identity raw for Graine, as its own identify does.
                 "setIdentity" -> done(result) { GraineCallsHost.setIdentity(call.arguments as? Map<*, *>) }
+                // The current user's memory choice, for the calls this engine places
+                // and answers; the host holds it until the SDK's instance exists.
+                "setMemory" -> flag(call, result) { GraineCallsHost.setMemory(it) }
+                // Android hosted ringing: FCM's token, kept and registered with Graine.
+                "registerPushToken" -> {
+                    val token = (call.arguments as? Map<*, *>)?.get("token") as? String
+                        ?: return result.error("invalid_arguments", "registerPushToken takes {token}.", null)
+                    GraineCallsHost.onNewToken(ctx, token)
+                    result.success(null)
+                }
                 "setVariables" -> done(result) { GraineCallsHost.setVariables(call.arguments as? Map<*, *>) }
                 "setScreen" -> done(result) { GraineCallsHost.setScreen(call.arguments as? Map<*, *>) }
                 // The agent's actions come to the engine that lists them — this one's sink.
@@ -111,6 +134,34 @@ class GraineInAppPlugin :
             result.error(e.code, e.message, null)
         }
     }
+
+    // ── the device ──────────────────────────────────────────────────────────
+
+    private fun onDeviceCall(call: MethodCall, result: MethodChannel.Result) {
+        val ctx = context ?: return result.error("unavailable", "The plugin is not attached to an engine.", null)
+        when (call.method) {
+            "installId" -> result.success(runCatching { GraineCallsHost.installId(ctx) }.getOrNull())
+            "timezone" -> result.success(runCatching { TimeZone.getDefault().id }.getOrNull())
+            "readPrefs" -> result.success(runCatching { prefsFile(ctx)?.takeIf { it.exists() }?.readText() }.getOrNull())
+            "writePrefs" -> {
+                val json = call.arguments as? String
+                    ?: return result.error("invalid_arguments", "writePrefs takes a string.", null)
+                runCatching {
+                    val f = prefsFile(ctx) ?: return@runCatching
+                    f.parentFile?.mkdirs()
+                    val tmp = File(f.parentFile, f.name + ".tmp")
+                    tmp.writeText(json)
+                    if (!tmp.renameTo(f)) { f.writeText(json); tmp.delete() }
+                }
+                result.success(null)
+            }
+            else -> result.notImplemented()
+        }
+    }
+
+    /** Beside the native SDK's own store: never backed up, so never restored onto another phone. */
+    private fun prefsFile(ctx: Context): File? =
+        runCatching { File(File(ctx.applicationContext.noBackupFilesDir, "graine-inapp"), "flutter.json") }.getOrNull()
 
     private inline fun done(result: MethodChannel.Result, block: () -> Unit) {
         block()
@@ -159,5 +210,6 @@ class GraineInAppPlugin :
     private companion object {
         const val METHODS = "ai.graine.inapp/calls"
         const val EVENTS = "ai.graine.inapp/calls/events"
+        const val DEVICE = "ai.graine.inapp/device"
     }
 }

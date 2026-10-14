@@ -13,6 +13,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
 import 'contract_files.dart';
+import 'device_mock.dart';
 
 const String base = 'https://www.graine.ai';
 
@@ -109,6 +110,11 @@ Future<void> finish(WidgetTester tester, GraineInApp g) async {
 }
 
 void main() {
+  // The platform side answers: the install id and the zone are known by the
+  // time the page is ready, so who the user is reaches it before any start.
+  setUp(() => DeviceMock().install());
+  tearDown(DeviceMock.uninstall);
+
   testWidgets("the session's design is kept, and re-picked when the device switches light and dark",
       (WidgetTester tester) async {
     Map<String, Object?> tokens(String scheme, String surface) => <String, Object?>{
@@ -154,7 +160,9 @@ void main() {
       clock: () => tester.binding.clock.now().millisecondsSinceEpoch,
       httpClient: MockClient((http.Request req) async {
         if (req.method == 'POST') {
-          return http.Response(jsonEncode(<String, Object?>{'agentId': 'agent-1', 'design': neo['design']}), 200);
+          // UTF-8, as the server sends it: the design's words carry "…".
+          return http.Response.bytes(utf8.encode(jsonEncode(<String, Object?>{'agentId': 'agent-1', 'design': neo['design']})), 200,
+              headers: const <String, String>{'content-type': 'application/json'});
         }
         fonts.add(req.url.toString());
         return http.Response.bytes(Uint8List.fromList(<int>[0, 1, 0, 0, ...List<int>.filled(32, 0)]), 200);
@@ -242,7 +250,7 @@ void main() {
     await tester.pump();
     page.sink.pageStarted();
     page.say(<String, Object?>{'type': 'graine:ready'});
-    expect(page.types, <String>['graine:variables', 'graine:app-context', 'graine:warm']);
+    expect(page.types, <String>['graine:variables', 'graine:identity', 'graine:app-context', 'graine:warm']);
     expect(page.posted[0]['variables'], <String, Object?>{
       'brand': 'Graine',
       'plan': 'Plus',
@@ -250,7 +258,7 @@ void main() {
       'name': 'Asha',
       'phone': '[PHONE]',
     });
-    final context = page.posted[1]['context']! as Map<String, Object?>;
+    final context = page.posted[2]['context']! as Map<String, Object?>;
     expect(context['screen'], 'kyc_pan');
     expect(((context['fields']! as List<Object?>).first! as Map<String, Object?>)['value'], '[PAN]');
     expect(context['app_version'], '2.4.0');
@@ -275,7 +283,7 @@ void main() {
     expect(g.voice.connecting, isTrue, reason: 'the customer pressed the button; "not connected" while loading is not idle');
 
     page.say(<String, Object?>{'type': 'graine:ready'});
-    expect(page.types, <String>['graine:variables', 'graine:start-call']);
+    expect(page.types, <String>['graine:variables', 'graine:identity', 'graine:start-call']);
 
     page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
     expect(g.voice.connected, isTrue);
@@ -526,11 +534,17 @@ void main() {
     g.setScreen(const GraineScreen('pan', fields: <GraineField>[GraineField('pan', value: 'A')]));
     g.setScreen(const GraineScreen('pan', fields: <GraineField>[GraineField('pan', value: 'AB')]));
     g.setScreen(const GraineScreen('pan', fields: <GraineField>[GraineField('pan', value: 'ABC')]));
+    String valueIn(Map<String, Object?> m) =>
+        (((m['context']! as Map<String, Object?>)['fields']! as List<Object?>).single! as Map<String, Object?>)['value']!
+            as String;
+    expect(page.types, <String>['graine:app-context'], reason: 'the first change goes out at once');
+    expect(valueIn(page.posted.single), 'A');
     await tester.pump(const Duration(milliseconds: 399));
-    expect(page.types, isEmpty);
+    expect(page.types, hasLength(1), reason: 'the rest of the burst waits for the end of the window');
     await tester.pump(const Duration(milliseconds: 1));
-    expect(page.types, <String>['graine:app-context'], reason: 'three changes, one frame');
-    final field = ((page.posted.single['context']! as Map<String, Object?>)['fields']! as List<Object?>).single;
+    expect(page.types, <String>['graine:app-context', 'graine:app-context'], reason: 'three changes, two frames');
+    expect(valueIn(page.posted.last), 'ABC');
+    final field = ((page.posted.last['context']! as Map<String, Object?>)['fields']! as List<Object?>).single;
     expect((field! as Map<String, Object?>)['value'], 'ABC');
 
     page.say(<String, Object?>{

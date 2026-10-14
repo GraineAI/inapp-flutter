@@ -73,10 +73,19 @@ class GraineWidgetView extends StatefulWidget {
     this.appearance,
     this.design,
     this.maxHeight = 460,
+    this.app,
   });
 
-  /// The state to draw. Default: [GraineInApp.instance]'s.
+  /// The state to draw. Default: [app]'s.
   final GraineComponents? components;
+
+  /// The agent whose components these are: its components, session and
+  /// design. Default: the agent [components] belong to, else the default
+  /// agent ([GraineInApp.instance]).
+  final GraineInApp? app;
+
+  /// The agent this view draws for.
+  GraineInApp? get _agent => app ?? components?.app ?? GraineInApp.maybeInstance;
 
   /// #RRGGBB for buttons and badges. Default: the component's own, then the dashboard's.
   final String? accent;
@@ -129,14 +138,14 @@ class _Skin {
   });
 
   factory _Skin.resolve(BuildContext context, GraineWidgetView w, WidgetLook? look) {
-    final app = GraineInApp.maybeInstance;
+    final app = w._agent;
     final appearance = w.appearance ?? app?.session?.appearance;
     final dash = Appearance.resolve(appearance,
         accent: Appearance.defaultAccent, heading: '', origin: app?.config.baseUrl);
     final os = defaultTargetPlatform == TargetPlatform.android ? 'android' : 'ios';
     final grammar = Widgets.grammar[Widgets.resolvePlatform(look?.platform ?? 'auto', os)]!;
     final explicitPlatform = look != null && look.platform != 'auto';
-    final tokens = tokensFor(context, design: w.design, scheme: w.scheme);
+    final tokens = tokensFor(context, design: w.design, scheme: w.scheme, app: app);
     // An accent the host or the component chose — which beats the design's.
     final ownAccent = (w.accent != null && Appearance.argb(w.accent) != null) ? w.accent! : look?.accent;
     final accentHex = ownAccent ?? tokens?.colors.accent ?? dash.accent;
@@ -292,16 +301,17 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
   /// Which spotlight card is in view.
   int _page = 0;
 
-  GraineComponents? get _components => widget.components ?? GraineInApp.maybeInstance?.components;
+  GraineComponents? get _components => widget.components ?? widget._agent?.components;
 
   @override
   Widget build(BuildContext context) {
     final c = _components;
     if (c == null) return const SizedBox.shrink();
+    final app = widget._agent;
     // A design handed over directly has its typeface fetched too (each face once).
-    if (widget.design != null) GraineInApp.maybeInstance?.loadDesignFonts(widget.design);
+    if (widget.design != null) app?.loadDesignFonts(widget.design);
     return ListenableBuilder(
-      listenable: surfaceListenable(<Listenable?>[c]),
+      listenable: surfaceListenable(<Listenable?>[c], app: app),
       builder: (BuildContext context, Widget? _) => _draw(context, c),
     );
   }
@@ -571,7 +581,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
 
   Widget _closeButton(GraineComponents c, _Skin s, {double size = 44}) => Tap(
         key: const ValueKey<String>('graine-close'),
-        label: 'Close and keep talking',
+        label: WidgetContent.closeLabel(typed: c.fromChat),
         onTap: c.dismiss,
         child: Container(
           width: size,
@@ -595,6 +605,8 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
     if (surface == 'screen') {
       // The component IS the screen. The agent is still on the call; saying so is
       // the difference between a screen it opened and a screen that replaced it.
+      // In the chat there is no call to be on: no footer (WidgetContent.screenFooter).
+      final footer = WidgetContent.screenFooter(prompt, typed: c.fromChat);
       return _surface(
         s,
         key: const ValueKey<String>('graine-surface-screen'),
@@ -625,21 +637,23 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
               ),
             ),
             Flexible(child: Padding(padding: EdgeInsets.symmetric(horizontal: s.pad(14)), child: body)),
-            Container(
-              margin: const EdgeInsets.only(top: 10),
-              padding: EdgeInsets.fromLTRB(s.pad(14), 10, s.pad(14), s.pad(12)),
-              decoration: BoxDecoration(border: Border(top: BorderSide(color: s.border, width: s.borderWidth))),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  Text('STILL LISTENING', style: textStyle(s.muted, 10.5, weight: 800, letterSpacing: 0.4)),
-                  const SizedBox(height: 2),
-                  Text(prompt.isNotEmpty ? prompt : 'Tap one, or just say it.',
-                      maxLines: 1, overflow: TextOverflow.ellipsis, style: s.body(13.5)),
-                ],
-              ),
-            ),
+            if (footer != null)
+              Container(
+                margin: const EdgeInsets.only(top: 10),
+                padding: EdgeInsets.fromLTRB(s.pad(14), 10, s.pad(14), s.pad(12)),
+                decoration: BoxDecoration(border: Border(top: BorderSide(color: s.border, width: s.borderWidth))),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Text(footer.label, style: textStyle(s.muted, 10.5, weight: 800, letterSpacing: 0.4)),
+                    const SizedBox(height: 2),
+                    Text(footer.line, maxLines: 1, overflow: TextOverflow.ellipsis, style: s.body(13.5)),
+                  ],
+                ),
+              )
+            else
+              SizedBox(height: s.pad(12)),
           ],
         ),
       );

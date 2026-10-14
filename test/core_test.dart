@@ -562,9 +562,11 @@ void widgetStyleTests() {
       expect(Widgets.resolveLook(const WidgetStyle(preset: 'hologram'), 'x').preset, 'cards');
     });
 
-    test('several chosen are named the way a person would', () {
-      expect(Widgets.manySummary(<String>['Creta', ' Seltos ', '', 'Venue']), "Let's compare Creta, Seltos and Venue.");
-      expect(Widgets.manySummary(<String>['Creta'], 'choose'), "Let's choose Creta.");
+    test('several chosen are named after the button, never with its label read as a verb', () {
+      expect(Widgets.manySummary(<String>['Creta', ' Seltos ', '', 'Venue']), 'Compare: Creta, Seltos and Venue');
+      expect(Widgets.manySummary(<String>['Creta'], 'Choose'), 'Choose: Creta');
+      expect(Widgets.manySummary(<String>['Morning', 'Evening'], 'Taken'), 'Taken: Morning and Evening');
+      expect(Widgets.manySummary(<String>['Morning'], '  '), 'Morning');
       expect(Widgets.manySummary(<String>[' ']), '');
     });
   });
@@ -662,7 +664,7 @@ void widgetContentTests() {
       expect(a.data['ids'], 'creta,seltos');
       expect(a.data['titles'], 'Creta, Seltos');
       expect(a.data['items'], hasLength(2));
-      expect(a.summary, "Let's compare Creta and Seltos.");
+      expect(a.summary, 'Compare: Creta and Seltos');
     });
 
     test('ticking several: the oldest gives way at the cap, and the button counts down to two', () {
@@ -670,8 +672,8 @@ void widgetContentTests() {
       expect(WidgetContent.toggle(<String>['a', 'b'], 'a', 2), <String>['b']);
       expect(WidgetContent.toggle(<String>[], 'a', 3), <String>['a']);
       final c = content(cars());
-      expect(c.manyButtonLabel(0), 'Pick 2 more to compare');
-      expect(c.manyButtonLabel(1), 'Pick 1 more to compare');
+      expect(c.manyButtonLabel(0), 'Pick 2 more');
+      expect(c.manyButtonLabel(1), 'Pick 1 more');
       expect(c.manyButtonLabel(3), 'Compare 3');
     });
 
@@ -1792,8 +1794,8 @@ void fontTests() {
 
 void iconTests() {
   group('SdkIcons', () {
-    test('the eight icons, each a body a fill can sit in and lines that are only stroked', () {
-      expect(SdkIcons.all.keys, <String>['mic', 'micOff', 'end', 'send', 'chat', 'call', 'chevron', 'close']);
+    test('the nine icons, each a body a fill can sit in and lines that are only stroked', () {
+      expect(SdkIcons.all.keys, <String>['mic', 'micOff', 'end', 'send', 'chat', 'call', 'chevron', 'close', 'compose', 'speaker']);
       for (final e in SdkIcons.all.entries) {
         final icon = e.value;
         expect(icon.body != null || icon.lines != null, isTrue, reason: e.key);

@@ -167,7 +167,7 @@ void main() {
     parity('names several choices in the same sentence', (Map<String, Object?> fx) {
       for (final c in cases(fx, 'manySummary')) {
         final titles = <String>[for (final t in c['titles']! as List<Object?>) t! as String];
-        expect(Widgets.manySummary(titles, c['verb']! as String), c['output']);
+        expect(Widgets.manySummary(titles, c['label']! as String), c['output']);
       }
     });
 
@@ -318,7 +318,7 @@ void main() {
 
     test('every section is covered — a new one fails here until this suite checks it', () {
       const covered = <String>{
-        'generatedBy', 'cases', 'legacy', 'glyphs', 'icons', 'fontWeights', 'fontAssetVersion', 'fontOrigin',
+        'generatedBy', 'cases', 'legacy', 'glyphs', 'icons', 'ringtones', 'fontWeights', 'fontAssetVersion', 'fontOrigin',
       };
       expect(fx.keys.toSet().difference(covered), isEmpty, reason: 'a section this suite does not check');
       for (final c in cases(fx, 'cases')) {
@@ -350,7 +350,12 @@ void main() {
       expect(fx['fontOrigin'], Design.defaultOrigin, reason: "the SDK's default origin is the one the faces are served from");
     });
 
-    test('draws the same eight icons from the same path data the dashboard draws', () {
+    test('plays the same rings, note for note', () {
+      final want = fx['ringtones']! as Map<String, Object?>;
+      expect(canon(<String, Object?>{for (final e in Ringtone.all.entries) e.key: e.value.toJson()}), canon(want));
+    });
+
+    test('draws the same nine icons from the same path data the dashboard draws', () {
       final want = fx['icons']! as Map<String, Object?>;
       expect(<String, Object?>{for (final e in SdkIcons.all.entries) e.key: e.value.toJson()}, want);
       for (final e in SdkIcons.all.entries) {

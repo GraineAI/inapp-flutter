@@ -15,8 +15,10 @@
 library;
 
 export 'src/agent_bar.dart' show GraineAgentBar;
+export 'src/chat_view.dart' show GraineChat;
 export 'src/core/core.dart'
-    hide Js, SocketTrace, SvgPath, PathCommand, PathMoveTo, PathLineTo, PathCubicTo, PathQuadTo, PathArcTo, PathClose;
+    hide Js, SocketTrace, SvgPath, PathCommand, PathMoveTo, PathLineTo, PathCubicTo, PathQuadTo, PathArcTo, PathClose,
+        ChatPresentation, ChatClose, ChatWindowLayout;
 export 'src/engine.dart' show GraineEngine, WebViewEnginePage;
 export 'src/graine.dart';
 export 'src/launcher.dart' show GraineLauncher;

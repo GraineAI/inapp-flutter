@@ -1,20 +1,21 @@
 part of 'graine.dart';
 
-/// Where a native call is.
-enum GraineCallStatus {
+/// Where a native call is. (Until 0.6.3 this was `GraineCallStatus`; that
+/// name is now a booked call's status, as in every Graine SDK.)
+enum GraineNativeCallStatus {
   idle('idle'),
   ringing('ringing'),
   connecting('connecting'),
   active('active'),
   ended('ended');
 
-  const GraineCallStatus(this.wire);
+  const GraineNativeCallStatus(this.wire);
   final String wire;
 
   /// Ringing, connecting or connected.
   bool get isLive => this == ringing || this == connecting || this == active;
 
-  static GraineCallStatus fromWire(Object? s) {
+  static GraineNativeCallStatus fromWire(Object? s) {
     for (final v in values) {
       if (v.wire == s) return v;
     }
@@ -50,7 +51,7 @@ class GraineCallCaption {
 /// when no call is live.
 class GraineCallSnapshot {
   const GraineCallSnapshot({
-    this.status = GraineCallStatus.idle,
+    this.status = GraineNativeCallStatus.idle,
     this.callId,
     this.direction,
     this.reason,
@@ -61,6 +62,7 @@ class GraineCallSnapshot {
     this.caption,
     this.connectedAt,
     this.error,
+    this.agent,
   });
 
   /// No call.
@@ -73,7 +75,7 @@ class GraineCallSnapshot {
     final connectedAt = m['connectedAt'];
     final direction = m['direction'];
     return GraineCallSnapshot(
-      status: GraineCallStatus.fromWire(m['state']),
+      status: GraineNativeCallStatus.fromWire(m['state']),
       callId: _string(m['callId']),
       direction: direction == 'incoming'
           ? GraineCallDirection.incoming
@@ -95,10 +97,11 @@ class GraineCallSnapshot {
       connectedAt:
           connectedAt is num ? DateTime.fromMillisecondsSinceEpoch(connectedAt.toInt()) : null,
       error: _string(m['error']),
+      agent: _string(m['agent']),
     );
   }
 
-  final GraineCallStatus status;
+  final GraineNativeCallStatus status;
 
   /// Your server's id for a call it rang; a generated one for a call the
   /// customer placed. Every outcome carries it.
@@ -128,6 +131,12 @@ class GraineCallSnapshot {
   /// Why the last call could not connect. Cleared when the next call starts.
   final String? error;
 
+  /// The agent the call is with, by the name the app configured it under
+  /// ([GraineInApp.init]; `'default'` for the default agent) — the one
+  /// [GraineCalls.startCall] named, or the one a ring was routed to by its
+  /// push. Null with no call, and from an engine that does not say.
+  final String? agent;
+
   @override
   bool operator ==(Object other) =>
       other is GraineCallSnapshot &&
@@ -141,56 +150,98 @@ class GraineCallSnapshot {
       other.agentSpeaking == agentSpeaking &&
       other.caption == caption &&
       other.connectedAt == connectedAt &&
-      other.error == error;
+      other.error == error &&
+      other.agent == agent;
 
   @override
   int get hashCode => Object.hash(status, callId, direction, reason, callerName, muted, speakerOn,
-      agentSpeaking, caption, connectedAt, error);
+      agentSpeaking, caption, connectedAt, error, agent);
 }
 
-/// What became of a call.
-enum GraineCallOutcomeKind { answered, declined, missed, ended, failed }
+/// What became of a call (WIRE.md: ringing · answered · declined · missed ·
+/// failed · ended).
+enum GraineCallOutcomeKind { ringing, answered, declined, missed, ended, failed }
 
-/// What became of a call — tell your server, with [callId].
+/// WHAT BECAME OF A CALL — WIRE.md's `GraineCallOutcome`. A call Graine rang
+/// ([hosted]) is reported to Graine by the SDK itself; tell your own server
+/// about the others, with [callId].
 class GraineCallOutcome {
-  const GraineCallOutcome(this.callId, this.kind, {this.endReason, this.error});
+  const GraineCallOutcome(this.callId, this.outcome,
+      {this.reason, this.durationSeconds, this.hosted = false, this.agent});
 
   factory GraineCallOutcome.fromMap(Map<Object?, Object?> m) {
     final word = m['outcome'];
-    final kind = GraineCallOutcomeKind.values.firstWhere((GraineCallOutcomeKind k) => k.name == word,
+    final outcome = GraineCallOutcomeKind.values.firstWhere((GraineCallOutcomeKind k) => k.name == word,
         orElse: () => GraineCallOutcomeKind.failed);
+    final seconds = m['durationSeconds'];
+    final reason = switch (outcome) {
+      GraineCallOutcomeKind.failed => _string(m['error']) ?? _string(m['reason']),
+      _ => _string(m['reason']),
+    };
     return GraineCallOutcome(
       _string(m['callId']) ?? '',
-      kind,
-      endReason: kind == GraineCallOutcomeKind.ended ? _string(m['reason']) : null,
-      error: kind == GraineCallOutcomeKind.failed ? _string(m['error']) : null,
+      outcome,
+      reason: reason,
+      durationSeconds: seconds is num && seconds.isFinite && seconds >= 0 ? seconds.round() : null,
+      hosted: m['hosted'] == true || m['hosted'] == '1',
+      agent: _string(m['agent']),
     );
   }
 
   final String callId;
-  final GraineCallOutcomeKind kind;
+  final GraineCallOutcomeKind outcome;
 
-  /// With [GraineCallOutcomeKind.ended]: `local` (this app hung up), `remote`
-  /// (the agent did) or `failed` (the connection broke mid-call).
-  final String? endReason;
+  /// With `ended`: `local` (this app hung up), `remote` (the agent did) or
+  /// `failed` (the connection broke mid-call). With `failed`: why the call
+  /// never connected.
+  final String? reason;
 
-  /// With [GraineCallOutcomeKind.failed]: why the call never connected.
-  final String? error;
+  /// How long the conversation lasted, when the engine says.
+  final int? durationSeconds;
 
-  /// One word for your server: answered · declined · missed · ended · failed.
-  String get wire => kind.name;
+  /// Graine rang this call (hosted ringing); the SDK has already told Graine
+  /// what became of it.
+  final bool hosted;
+
+  /// The agent the call was with, by the name the app configured it under
+  /// (`'default'` for the default agent); null when the engine does not know.
+  final String? agent;
+
+  /// One word for your server: ringing · answered · declined · missed · ended · failed.
+  String get wire => outcome.name;
+
+  /// [outcome], by its 0.6 name.
+  @Deprecated('Use outcome.')
+  GraineCallOutcomeKind get kind => outcome;
+
+  /// [reason] of an `ended` call, by its 0.6 name.
+  @Deprecated('Use reason.')
+  String? get endReason => outcome == GraineCallOutcomeKind.ended ? reason : null;
+
+  /// [reason] of a `failed` call, by its 0.6 name.
+  @Deprecated('Use reason.')
+  String? get error => outcome == GraineCallOutcomeKind.failed ? reason : null;
 
   @override
-  String toString() => 'GraineCallOutcome($callId, $wire${endReason != null ? ', $endReason' : ''})';
+  String toString() => 'GraineCallOutcome($callId, $wire${reason != null ? ', $reason' : ''})';
 }
 
 /// An agent's call ringing on this device.
 class GraineIncomingCall {
-  const GraineIncomingCall(this.callId, {this.reason, this.callerName});
+  const GraineIncomingCall(this.callId, {this.reason, this.callerName, this.hosted = false, this.agent});
 
   final String callId;
   final String? reason;
   final String? callerName;
+
+  /// Graine rang it (hosted ringing) rather than your own server's push.
+  final bool hosted;
+
+  /// The agent ringing, by the name the app configured it under (`'default'`
+  /// for the default agent): the native engine matches the push's `agent_id`
+  /// to a configured agent's — the default agent when none matches. Null from
+  /// an engine that does not say.
+  final String? agent;
 }
 
 /// How native calls ring and what they show. Passed to [GraineCalls.configure].
@@ -209,16 +260,22 @@ class GraineCallsOptions {
     this.iosIncludesCallsInRecents = false,
   });
 
-  /// Agent → Embed & Widgets. Public by design.
+  /// Agent → Embed & Widgets. Public by design. The default agent's: the
+  /// agents the app configured under a name of their own go with it, each
+  /// with its own key ([GraineCalls.configure]).
   final String publishableKey;
 
-  /// The name on the ring and the call screen — your agent's or your brand's.
-  /// A push's `caller_name` wins for its own call.
+  /// The name on the calls the customer places, and on a ring whose push
+  /// names nobody. A push's `caller_name` wins for its own call — so a call
+  /// Graine rings shows the agent's call name from the dashboard (Calls &
+  /// scheduling).
   final String displayName;
   final String baseUrl;
 
   /// iOS: a sound file of 30 seconds or less in the app bundle. Android: a
-  /// `res/raw` resource name. Null: the phone's own ringtone.
+  /// `res/raw` resource name. Null (the default): the ring the brand chose in
+  /// the dashboard's call screen design — the phone's own ringtone unless it
+  /// chose one. Set, it replaces the brand's ring.
   final String? ringtoneSound;
 
   /// How long an agent's call rings before it is missed.
@@ -228,10 +285,13 @@ class GraineCallsOptions {
   final String? appVersion;
 
   /// Who draws the call while the app is open. [GraineCallScreen.sdk] (the
-  /// default): the SDK's call screen — on Android its full-screen call
-  /// activity, on iOS a full-screen view over your app. [GraineCallScreen.app]:
-  /// your own screen, drawn from [GraineCalls.instance]. A locked iPhone
-  /// always shows the system's call screen.
+  /// default): the SDK's call screen, drawn from the brand's call screen
+  /// design — on Android its full-screen call activity, on iOS a full-screen
+  /// view over your app. [GraineCallScreen.app]: your own screen, drawn from
+  /// [GraineCalls.instance] (the design's call colours are
+  /// `GraineInApp.instance.tokens?.call` — with several agents, those of the
+  /// agent the call is with, `GraineInApp.named(snapshot.agent ?? 'default')`).
+  /// A locked iPhone always shows the system's call screen.
   final GraineCallScreen callScreen;
 
   /// The native SDK's debug log, in Xcode's console or logcat: how a call
@@ -282,6 +342,14 @@ class GraineCallsOptions {
 /// One call at a time. A native call ends any call the WebView engine holds,
 /// and [GraineVoice.start] waits until it is over. Listen to it as a
 /// [ValueListenable] of [GraineCallSnapshot] to draw your own call screen.
+///
+/// SEVERAL AGENTS: the engine is the app's, one for every agent. The agents
+/// the app configured under a name of their own ([GraineInApp.init]) reach
+/// it with [configure]; `startCall(agent: 'support')` calls one of them, and
+/// a ring Graine sends for one of them (its push names the agent) rings as
+/// that agent — the snapshot, the ring and the outcome say which
+/// ([GraineCallSnapshot.agent]), and the agent's actions run in its own
+/// handlers.
 class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSnapshot> {
   GraineCalls._(this._channel, this._events);
 
@@ -312,6 +380,30 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   final List<void Function(String?)> _tokenWatchers = <void Function(String?)>[];
   GraineInApp? _attached;
 
+  /// [configure] reached the engine in this run.
+  bool _configured = false;
+
+  /// The options [configure] last sent — sent again, with the agents, when
+  /// the app configures another agent.
+  GraineCallsOptions? _options;
+
+  /// The named agents the engine was last told about, as it reads them.
+  Map<String, Object?> _agentsSent = const <String, Object?>{};
+
+  /// The app's named agents whose key IS the options' own. To the engine
+  /// they are its default agent: they are not listed again, a call with one
+  /// of them is a call with the default agent, and — in an app that named
+  /// every agent — the engine's "default" is the first of them.
+  List<String> _sameAsDefault = const <String>[];
+
+  /// Whose variables, screen and actions the engine holds — the agent its
+  /// call is with, else the attached one — and how to stop following them.
+  GraineInApp? _held;
+  void Function()? _unhold;
+
+  /// The agent the last [startCall] named, while its call lasts.
+  GraineInApp? _calling;
+
   /// The call, as it is now.
   @override
   GraineCallSnapshot get value => _snapshot;
@@ -334,6 +426,13 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   /// native side, so a push that wakes the app before any Dart has run still
   /// rings. Throws [ArgumentError] for a missing key or name, and a
   /// `PlatformException` with the code `invalid_options` for anything else.
+  ///
+  /// [GraineCallsOptions.publishableKey] is the default agent's. Every agent
+  /// the app configured under a name of its own goes with the options
+  /// (`agents: {name: {publishableKey, baseUrl}}`), so [startCall] can call it
+  /// and Graine's rings for it ring as it; one configured later reaches the
+  /// engine then. A named agent with the options' own key is the engine's
+  /// default agent, not listed again.
   Future<void> configure(GraineCallsOptions options) async {
     if (options.publishableKey.trim().isEmpty) {
       throw ArgumentError.value(options.publishableKey, 'publishableKey', 'is required');
@@ -343,8 +442,30 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     }
     if (!isSupported) return;
     _listen();
-    await _channel.invokeMethod<void>('configure', options.toMap());
+    final engine = _engineAgents(options);
+    await _channel.invokeMethod<void>('configure', _configureArgs(options, engine.agents));
+    _options = options;
+    _agentsSent = engine.agents;
+    _sameAsDefault = engine.sameAsDefault;
+    _configured = true;
     _apply(await _channel.invokeMapMethod<Object?, Object?>('snapshot'));
+    // Who the user is — for the calls this engine places and answers, and the
+    // device Graine rings for them.
+    final g = _attached ?? GraineInApp.maybeInstance;
+    if (g != null) unawaited(_sendIdentity(g));
+  }
+
+  /// HOSTED RINGING ON ANDROID: the token your Firebase messaging hands the
+  /// app — call it from `FirebaseMessaging.instance.getToken()` and
+  /// `onTokenRefresh`. The SDK registers this device with Graine (when the
+  /// workspace has Graine ring its users) together with who is signed in, and
+  /// again whenever they change; Graine's calls then ring through
+  /// [handlePush]. iOS needs nothing: its VoIP token is registered natively.
+  Future<void> registerPushToken(String token) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    final t = token.trim();
+    if (t.isEmpty) return;
+    await _invokeOptional('registerPushToken', <String, Object?>{'token': t, 'tokenKind': 'fcm'});
   }
 
   /// iOS: receive your agent's calls as VoIP pushes. [onToken] gets the token
@@ -379,22 +500,46 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     }
   }
 
-  /// The customer calls the agent. The agent hears `who_called = "customer"`
-  /// and `call_reason`, with [variables] over the app's own. Returns the
-  /// call's id — every outcome carries it — or null when a call is already
-  /// live (one at a time).
-  Future<String?> startCall({String? reason, Map<String, Object?> variables = const <String, Object?>{}}) async {
+  /// The customer calls the agent — [agent], by the name the app configured
+  /// it under ([GraineInApp.init]); the default agent without one. The agent
+  /// hears `who_called = "customer"` and `call_reason`, with [variables] over
+  /// the app's own. Returns the call's id — every outcome carries it — or
+  /// null when a call is already live (one at a time).
+  Future<String?> startCall(
+      {String? reason, Map<String, Object?> variables = const <String, Object?>{}, String? agent}) async {
     if (!isSupported) return null;
     _listen();
+    final name = agent == null ? null : GraineInApp._normaliseName(agent);
+    // An agent with the options' own key is the engine's default agent.
+    final engineName = name != null && _sameAsDefault.contains(name) ? null : name;
+    if (!_snapshot.status.isLive) {
+      // What the app tells the agent goes to the engine before it calls it.
+      _calling = GraineInApp._agentNamed(name);
+      _follow();
+    }
     try {
-      return await _channel.invokeMethod<String>('startCall', <String, Object?>{
+      final id = await _channel.invokeMethod<String>('startCall', <String, Object?>{
         if (reason != null) 'reason': reason,
         'variables': Protocol.toJson(variables),
+        if (engineName != null) 'agent': engineName,
       });
+      if (id == null) _notCalling();
+      return id;
     } on MissingPluginException {
       debugPrint('[Graine] native calls are not available in this build (rebuild the app).');
+      _notCalling();
       return null;
+    } catch (_) {
+      _notCalling();
+      rethrow;
     }
+  }
+
+  /// [startCall] placed nothing: the engine holds the attached agent's again.
+  void _notCalling() {
+    if (_snapshot.status.isLive) return;
+    _calling = null;
+    _follow();
   }
 
   /// Answer the ringing call from your own screen. The SDK's call screens and
@@ -418,15 +563,50 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   /// who the customer is, the prompt variables, the screen and the actions
   /// the app registered — kept in step as they change, and answer the agent's
   /// actions through the app's own handlers. Returns a function that detaches.
+  ///
+  /// With several agents, attach the default one: while a call is with
+  /// another agent of the app ([startCall]'s `agent`, or a ring for it), the
+  /// engine holds THAT agent's variables and actions, and its actions run in
+  /// that agent's handlers; after the call, the attached agent's again.
   void Function() attach([GraineInApp? graine]) {
     final g = graine ?? GraineInApp.instance;
     _attached = g;
     if (!isSupported) return () {};
     _listen();
-    void pushVariables() {
-      _invoke('setIdentity', g._variables.identity());
-      _invoke('setVariables', g.currentVariables());
+    unawaited(_sendIdentity(g));
+    // Handed over at once — again to an engine that held this agent already.
+    _hold(null);
+    _follow();
+    return () {
+      if (!identical(_attached, g)) return;
+      _attached = null;
+      _hold(null);
+      _invoke('setActions', const <String>[]);
+    };
+  }
+
+  /// The agent whose variables, screen and actions the engine should hold:
+  /// the one its call is with, else the attached one — none while no app is
+  /// attached.
+  void _follow() {
+    final attached = _attached;
+    if (attached == null) {
+      _hold(null);
+      return;
     }
+    final live = _snapshot.status.isLive ? GraineInApp._agentNamed(_snapshot.agent) : null;
+    _hold(live ?? _calling ?? attached);
+  }
+
+  /// Hand the engine [g]'s variables, screen and actions now, and keep them
+  /// in step until another agent's are held.
+  void _hold(GraineInApp? g) {
+    if (identical(g, _held)) return;
+    _unhold?.call();
+    _unhold = null;
+    _held = g;
+    if (g == null) return;
+    void pushVariables() => _invoke('setVariables', g.currentVariables());
 
     void pushScreen() {
       _invoke('setScreen', _screenMap(g._screen));
@@ -437,14 +617,95 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     pushScreen();
     final offVariables = g._onVariables((Map<String, String> _) => pushVariables());
     final offContext = g._onContext((Map<String, Object?> _) => pushScreen());
-    return () {
+    _unhold = () {
       offVariables();
       offContext();
-      if (identical(_attached, g)) {
-        _attached = null;
-        _invoke('setActions', const <String>[]);
-      }
     };
+  }
+
+  /// The configure arguments: the options, and the named agents when there are any.
+  static Map<String, Object?> _configureArgs(GraineCallsOptions options, Map<String, Object?> agents) =>
+      <String, Object?>{
+        ...options.toMap(),
+        if (agents.isNotEmpty) 'agents': agents,
+      };
+
+  /// THE APP'S OTHER AGENTS, AS THE ENGINE READS THEM: every agent configured
+  /// under a name of its own, `{name: {publishableKey, baseUrl}}` — except
+  /// those whose key is the options' own, which to the engine are its
+  /// default agent ([_sameAsDefault]).
+  static ({Map<String, Object?> agents, List<String> sameAsDefault}) _engineAgents(GraineCallsOptions options) {
+    final agents = <String, Object?>{};
+    final same = <String>[];
+    for (final g in GraineInApp.all.values) {
+      if (g.name == GraineInApp.defaultName) continue;
+      if (g.config.publishableKey == options.publishableKey) {
+        same.add(g.name);
+      } else {
+        agents[g.name] = <String, Object?>{'publishableKey': g.config.publishableKey, 'baseUrl': g.config.baseUrl};
+      }
+    }
+    return (agents: agents, sameAsDefault: same);
+  }
+
+  /// The app configured another agent: an engine configured in this run
+  /// hears of it (the kept options, with every named agent).
+  static void _agentsChanged() {
+    final calls = instance;
+    final options = calls._options;
+    if (!calls._configured || options == null || !calls.isSupported) return;
+    final engine = _engineAgents(options);
+    calls._sameAsDefault = engine.sameAsDefault;
+    if (deepEquals(engine.agents, calls._agentsSent)) return;
+    calls._agentsSent = engine.agents;
+    unawaited(calls._invokeOptional('configure', _configureArgs(options, engine.agents)));
+  }
+
+  /// The app's name for an agent the engine names: the engine's default
+  /// agent is the app's default — or, in an app that named every agent, the
+  /// one configured with the options' key.
+  String? _appAgent(String? engine) {
+    if (engine != GraineInApp.defaultName || _sameAsDefault.isEmpty) return engine;
+    if (GraineInApp.all.containsKey(GraineInApp.defaultName)) return engine;
+    return _sameAsDefault.first;
+  }
+
+  /// [payload] with its `agent` as the app names it.
+  Map<Object?, Object?> _withAppAgent(Map<Object?, Object?> payload) {
+    final engine = payload['agent'];
+    if (engine is! String) return payload;
+    final app = _appAgent(engine);
+    return app == engine ? payload : <Object?, Object?>{...payload, 'agent': app};
+  }
+
+  /// [g]'s user changed: the engine hears it if it is [g]'s — configured in
+  /// this run, or attached to [g]. One user for the app: with no app
+  /// attached, the engine hears it from the default agent alone.
+  static void _identityChanged(GraineInApp g) {
+    final calls = instance;
+    final attached = calls._attached;
+    if (attached != null) {
+      if (!identical(attached, g)) return;
+    } else {
+      if (!calls._configured) return;
+      final primary = GraineInApp.maybeInstance;
+      if (primary != null && !identical(primary, g) && GraineInApp._everyAgent().contains(g)) return;
+    }
+    unawaited(calls._sendIdentity(g));
+  }
+
+  /// WHO THE USER IS, FOR THE NATIVE ENGINE: the traits as the app passed
+  /// them — the engine masks them for the agent and keeps the identity raw
+  /// for Graine, exactly as the app's own `identify` would — and their memory
+  /// choice.
+  Future<void> _sendIdentity(GraineInApp g) async {
+    if (!isSupported) return;
+    final traits = g._traits;
+    await _invoke('setIdentity', traits == null ? null : Protocol.toJson(traits));
+    // Not waiting for the session: when it arrives, the identity is announced
+    // again with the choice that user made.
+    final id = await g._identityState(waitForSession: false);
+    await _invokeOptional('setMemory', id.memory);
   }
 
   void _listen() {
@@ -456,7 +717,7 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   void _onEvent(Object? raw) {
     if (raw is! Map) return;
     final data = raw['data'];
-    final payload = data is Map ? data : const <Object?, Object?>{};
+    final payload = _withAppAgent(data is Map ? data : const <Object?, Object?>{});
     switch (raw['event']) {
       case 'state':
         _apply(payload);
@@ -467,7 +728,10 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
             _incoming,
             _heldIncoming,
             GraineIncomingCall(_string(payload['callId']) ?? '',
-                reason: _string(payload['reason']), callerName: _string(payload['callerName'])));
+                reason: _string(payload['reason']),
+                callerName: _string(payload['callerName']),
+                hosted: payload['hosted'] == true || payload['hosted'] == '1',
+                agent: _string(payload['agent'])));
       case 'voipToken':
         final token = _string(payload['token']);
         for (final w in List<void Function(String?)>.of(_tokenWatchers)) {
@@ -495,16 +759,20 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   }
 
   void _apply(Map<Object?, Object?>? m) {
-    final next = GraineCallSnapshot.fromMap(m);
+    final next = GraineCallSnapshot.fromMap(m == null ? null : _withAppAgent(m));
     if (next == _snapshot) return;
     final wasLive = _snapshot.status.isLive;
     _snapshot = next;
     _nativeLive = next.status.isLive;
     if (!wasLive && next.status.isLive) {
-      // One call at a time: the native call takes the line from the WebView engine.
-      final voice = (_attached ?? GraineInApp.maybeInstance)?.voice;
-      if (voice != null && (voice.connected || voice.connecting)) voice.end();
+      // One call at a time: the native call takes the line from every agent's WebView engine.
+      for (final g in GraineInApp._everyAgent(_attached)) {
+        final voice = g.voice;
+        if (voice.connected || voice.connecting) voice.end();
+      }
     }
+    if (wasLive && !next.status.isLive) _calling = null;
+    _follow();
     notifyListeners();
   }
 
@@ -513,7 +781,8 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     final name = _string(request['name']) ?? '';
     if (requestId == null) return;
     final arguments = request['arguments'];
-    final g = _attached;
+    // The agent the call is with answers in its own handlers.
+    final g = _attached == null ? null : (GraineInApp._agentNamed(_string(request['agent'])) ?? _held ?? _attached);
     ActionResult result;
     if (g == null) {
       result = ActionResult.refused('This app build does not implement "$name".');
@@ -541,6 +810,18 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
       await _channel.invokeMethod<void>(method, arguments);
     } on MissingPluginException {
       debugPrint('[Graine] native calls are not available in this build (rebuild the app).');
+    }
+  }
+
+  /// A method an older engine may not have: its absence is not news.
+  Future<void> _invokeOptional(String method, [Object? arguments]) async {
+    if (!isSupported) return;
+    try {
+      await _channel.invokeMethod<void>(method, arguments);
+    } on MissingPluginException {
+      // An engine from before this method: nothing to tell it.
+    } on PlatformException catch (e) {
+      debugPrint('[Graine] calls: $method failed (${e.code}).');
     }
   }
 
@@ -585,6 +866,14 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     _heldOutcomes.clear();
     _heldIncoming.clear();
     _attached = null;
+    _configured = false;
+    _options = null;
+    _agentsSent = const <String, Object?>{};
+    _sameAsDefault = const <String>[];
+    _unhold?.call();
+    _unhold = null;
+    _held = null;
+    _calling = null;
   }
 }
 

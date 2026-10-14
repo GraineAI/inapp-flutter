@@ -601,10 +601,10 @@ void main() {
       comps.present(cars(style: <String, Object?>{'select': 'many', 'maxSelect': 2}));
       await tester.pumpWidget(host(GraineWidgetView(components: comps, appearance: const <String, Object?>{})));
 
-      expect(find.text('Pick 2 more to compare'), findsOneWidget);
+      expect(find.text('Pick 2 more'), findsOneWidget);
       await tester.tap(row('creta'));
       await tester.pump();
-      expect(find.text('Pick 1 more to compare'), findsOneWidget);
+      expect(find.text('Pick 1 more'), findsOneWidget);
 
       // One ticked: the button answers nothing — a comparison of one is not one.
       await tester.tap(find.byKey(submitKey));
@@ -626,7 +626,7 @@ void main() {
       expect(data['ids'], 'seltos,venue');
       expect(data['titles'], 'Seltos, Venue');
       expect(data['count'], 2);
-      expect(answers.single[2], "Let's compare Seltos and Venue.");
+      expect(answers.single[2], 'Compare: Seltos and Venue');
       expect(comps.widget, isNull, reason: 'answered: the component goes');
       await done(tester, comps);
     });

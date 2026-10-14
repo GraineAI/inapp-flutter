@@ -162,6 +162,36 @@ class GraineScreen {
   /// Which actions work HERE. Null allows everything registered.
   final List<String>? availableActions;
 
+  /// This screen with [fields] in place of its own.
+  GraineScreen copyWith({List<GraineField>? fields}) => GraineScreen(
+        screen,
+        title: title,
+        journey: journey,
+        fields: fields ?? this.fields,
+        error: error,
+        data: data,
+        availableActions: availableActions,
+      );
+
+  /// This screen with [field] in place of the field of the same name — or
+  /// added, after the others, when it has none.
+  GraineScreen withField(GraineField field) {
+    final i = fields.indexWhere((GraineField f) => f.name == field.name);
+    final next = List<GraineField>.of(fields);
+    if (i >= 0) {
+      next[i] = field;
+    } else {
+      next.add(field);
+    }
+    return copyWith(fields: next);
+  }
+
+  /// This screen without the field named [name] (itself when it has none).
+  GraineScreen withoutField(String name) {
+    if (!fields.any((GraineField f) => f.name == name)) return this;
+    return copyWith(fields: <GraineField>[for (final f in fields) if (f.name != name) f]);
+  }
+
   @override
   bool operator ==(Object other) =>
       other is GraineScreen &&
@@ -183,6 +213,15 @@ class GraineScreen {
 /// the way out.
 abstract final class ContextFrame {
   /// `{context, availableActions?}`, or null when there is nothing to say.
+  ///
+  /// With [registeredActions] (what this build can actually do), the actions
+  /// are the React Native SDK's intersection: the screen's stated list — or,
+  /// when it states none, everything registered — narrowed to what is
+  /// registered. A screen that states its actions is honoured exactly, `[]`
+  /// included; a list empty only because nothing is registered is left out,
+  /// so the dashboard's catalogue stands (an absent key is "everything
+  /// declared"; `[]` is "nothing here" — opposite instructions). Without it,
+  /// the screen's list goes as stated.
   static Map<String, Object?>? build({
     required GraineScreen? screen,
     required int screenSinceMs,
@@ -190,6 +229,7 @@ abstract final class ContextFrame {
     Map<String, String> identity = const <String, String>{},
     String? appVersion,
     List<Map<String, Object?>> recentEvents = const <Map<String, Object?>>[],
+    List<String>? registeredActions,
   }) {
     if (screen == null && identity.isEmpty && recentEvents.isEmpty) return null;
     final ctx = <String, Object?>{};
@@ -230,11 +270,20 @@ abstract final class ContextFrame {
         for (final e in recentEvents) Protocol.toJson(e),
       ];
     }
+    final available = availableActions(screen?.availableActions, registeredActions);
     return <String, Object?>{
       'context': Masking.deep(ctx),
-      if (screen?.availableActions != null)
-        'availableActions': List<String>.of(screen!.availableActions!),
+      if (available != null) 'availableActions': available,
     };
+  }
+
+  /// The actions a frame offers — see [build]. Null: leave the key out.
+  static List<String>? availableActions(List<String>? stated, List<String>? registered) {
+    if (registered == null) return stated == null ? null : List<String>.of(stated);
+    final usable = (stated ?? registered).where(registered.contains).toList();
+    if (usable.isNotEmpty) return usable;
+    if (stated != null) return const <String>[]; // the screen said so
+    return null;
   }
 }
 

@@ -23,27 +23,35 @@ class GraineComponents extends ChangeNotifier {
     final c = GraineComponents(
       baseUrl: g.config.baseUrl,
       clock: g._clock,
-      onAnswer: (String id, Map<String, Object?> data, String summary) => g.voice.answerWidget(id, data, summary),
+      onAnswer: g._answerWidget,
       onAction: g.executeAction,
       onReport: (String name, String detail, Map<String, Object?> data) =>
-          g.voice.reportEvent(name, detail: detail, data: data),
+          g._reportEvent(name, detail: detail, data: data),
     );
     c._app = g;
     return c;
   }
 
-  /// The customer answered: send it to the agent (the SDK: [GraineVoice.answerWidget]).
+  /// The customer answered: send it to the agent (the SDK: to the call or the
+  /// chat, whichever drew it).
   final void Function(String widgetId, Map<String, Object?> data, String summary)? onAnswer;
 
   /// Run a component's in-app action (the SDK: [GraineInApp.executeAction]).
   final Future<ActionResult> Function(String name, Map<String, Object?> args)? onAction;
 
-  /// Tell the agent something quietly (the SDK: [GraineVoice.reportEvent]).
+  /// Tell the agent something quietly (the SDK: the live call and chat).
   final void Function(String name, String detail, Map<String, Object?> data)? onReport;
 
   final WidgetFlow _flow;
   final int Function() _clock;
   GraineInApp? _app;
+
+  /// The agent whose components these are; null for a standalone one.
+  GraineInApp? get app => _app;
+
+  /// The component on screen arrived in the typed chat, not on a call:
+  /// nothing is listening, so its view says nothing about listening.
+  bool get fromChat => _app?._componentsFromChat ?? false;
   Timer? _timer;
   bool _wasLive = false;
   GraineWidget? _contentFor;

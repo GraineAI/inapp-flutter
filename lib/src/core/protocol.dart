@@ -178,6 +178,67 @@ abstract final class Protocol {
     }
   }
 
+  /// A frame off a socket — text, or UTF-8 bytes — as JSON. Throws on
+  /// anything that is not JSON.
+  static Object? decodeJson(Object? raw) {
+    if (raw is String) return jsonDecode(raw);
+    if (raw is List<int>) return jsonDecode(utf8.decode(raw, allowMalformed: true));
+    throw const FormatException('not a text frame');
+  }
+
+  /// THE VARIABLES ON THE ONE CHANNEL A DIRECT SOCKET'S RUNTIME READS —
+  /// `?context_token=` (the React Native SDK's contextToken, byte for byte):
+  /// base64 of the UTF-8 JSON `{...vals, call_type, recipient_data: {...vals,
+  /// call_type}}`, where `vals` are the values with nulls, maps and lists
+  /// dropped and every other value as JavaScript's `String()` writes it. Null
+  /// when there is nothing to say.
+  static String? contextToken(Map<String, Object?>? variables, {String callType = 'webcall'}) {
+    final vals = <String, Object?>{};
+    variables?.forEach((String k, Object? v) {
+      if (v == null || v is Map || v is Iterable) return;
+      final key = k.trim();
+      if (key.isNotEmpty) vals[key] = v is String ? v : Js.str(v);
+    });
+    if (vals.isEmpty) return null;
+    final payload = <String, Object?>{
+      ...vals,
+      'call_type': callType,
+      'recipient_data': <String, Object?>{...vals, 'call_type': callType},
+    };
+    return base64.encode(utf8.encode(jsonEncode(payload)));
+  }
+
+  /// The ticket's limits on variables: it travels in a subprotocol header.
+  static const int ticketMaxKeys = 12;
+  static const int ticketMaxKeyLength = 40;
+  static const int ticketMaxValueLength = 200;
+  static const int ticketMaxBytes = 1024;
+
+  /// THE VARIABLES THAT RIDE A TICKET as its `metadata` (the React Native
+  /// SDK's variablesForTicket): the first 12 usable values, keys cut to 40
+  /// characters and values to 200 — and nothing at all when the whole would
+  /// pass a kilobyte, exactly as the server would drop it. Null when empty.
+  static Map<String, String>? ticketMetadata(Map<String, Object?>? variables) {
+    if (variables == null) return null;
+    final out = <String, String>{};
+    for (final e in variables.entries) {
+      if (out.length >= ticketMaxKeys) break;
+      final v = e.value;
+      if (v == null || v is Map || v is Iterable) continue;
+      final key = _cut(e.key, ticketMaxKeyLength);
+      final value = _cut(v is String ? v : Js.str(v), ticketMaxValueLength);
+      if (key.isEmpty || value.isEmpty) continue;
+      out[key] = value;
+    }
+    if (out.isEmpty) return null;
+    var bytes = 2;
+    out.forEach((String k, String v) => bytes += utf8.encode(k).length + utf8.encode(v).length + 6);
+    return bytes > ticketMaxBytes ? null : out;
+  }
+
+  /// `String.prototype.slice(0, n)`: UTF-16 units, as JavaScript counts them.
+  static String _cut(String s, int n) => s.length <= n ? s : s.substring(0, n);
+
   /// `baseUrl` without its trailing slashes.
   static String trimTrailingSlashes(String s) {
     var end = s.length;
@@ -224,6 +285,11 @@ abstract final class ProtocolOut {
   static const String appActionResult = 'graine:app-action-result';
   static const String appEvent = 'graine:app-event';
   static const String widgetResult = 'graine:widget-result';
+
+  /// Who the user is, for the tickets the page mints:
+  /// `{value, installId, memory, timezone}` — `value` the raw identity, or
+  /// null for an anonymous user (contract §1.3).
+  static const String identity = 'graine:identity';
 }
 
 /// Messages the page sends out.
@@ -424,7 +490,7 @@ final class PageProgress extends PageMessage {
   int get hashCode => stage.hashCode;
 }
 
-/// The connection, in one word — the way LiveKit reports it.
+/// The connection, in one word: excellent, good, poor or lost (unknown before any sample).
 ///
 /// Same thresholds as the React Native SDK, the Android SDK and the website
 /// (150ms / 30ms / 2% leaves "excellent", 400ms / 80ms / 8% is "poor"), so

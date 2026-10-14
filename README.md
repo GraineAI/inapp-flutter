@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.6.3
+  graine_inapp: ^0.7.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -133,10 +133,15 @@ below). Your app passes nothing about how it looks:
 - shows the live caption (`showCaptions: false` to hide it), and the agent's
   components above itself (`showComponents: false` to draw them elsewhere
   with `GraineWidgetView`);
-- an agent the dashboard offers as both a call and a chat: this package
-  carries the call; hand the bar your chat connection (`chat:`, a
-  `GraineChatState`) and it offers the switch and draws the chat window in
-  the design — `onSurfaceChange` tells you when to open or close it;
+- **the chat**: an agent the dashboard offers as a chat, or as both a call and
+  a chat (Embed & Widgets → mode), gets the SDK's own text chat — the bar
+  offers the switch as the dashboard allows, draws the chat window in the
+  design, ends the call before it opens the chat (one conversation at a time)
+  and hangs the chat up when the customer leaves it. A typing bubble shows
+  while the agent composes; messages typed offline stay on screen and go the
+  moment it connects. Run your own chat instead with `chat:` (a
+  `GraineChatState`), or none with `builtInChat: false`; `onSurfaceChange`
+  tells you when the customer switches;
 - from a server that predates designs it keeps the colours, corners and
   depth Appearance gave it (accent, heading, logo, light/dark/auto, radius);
   `accent`, `name`, `avatarUrl`, `scheme`, `radius` override one thing each.
@@ -161,7 +166,7 @@ and `BrandLogo.plateLook` give the square to fit it into and its plate.
 ```dart
 final graine = GraineInApp.instance;
 
-graine.identify({'name': user.name, 'plan': user.plan});   // null on sign-out
+graine.identify({'user_id': user.id, 'name': user.name, 'plan': user.plan});   // null on sign-out
 graine.setVariables({'cart_total': cart.total});           // merged; null under a key removes it
 
 graine.setScreen(GraineScreen(
@@ -174,12 +179,45 @@ graine.setScreen(GraineScreen(
         error: error),
   ],
 ));
+graine.updateField(GraineField('pan', value: pan, status: FieldStatus.filled));   // one field changed
+graine.clearScreen('kyc_pan');                // in a screen's dispose: only if it is still the one described
 graine.track('otp_failed', {'attempt': 2});   // context, not an interruption; last ten kept
+graine.tap('apply_coupon');                   // a control you name, as "tap:apply_coupon"
 ```
 
 Report real values: PAN, card, phone, Aadhaar and email are masked on the
 device before anything leaves it (`Masking.addRule` for your own formats). An
-unchanged screen is not resent; bursts go out as one frame per 400 ms.
+unchanged screen is not resent; the first change goes out at once and a burst
+after it as one more frame at the end of 400 ms. A screen's
+`availableActions` are narrowed to the actions this build registered.
+`GraineEngine` also tells the agent what the customer taps while a screen is
+set — a control with an accessibility label (`Semantics(label: …)` or a
+tooltip) by its label, anywhere else as "tap:screen" with where — at most two
+a second (`GraineConfig(captureTaps: false)` to turn it off).
+
+### Who the user is, and what the agent remembers
+
+The agent's **Memory** settings (Agent → Memory, or Embed & Widgets → Users &
+memory) name the trait that identifies a user — `user_id` unless they say
+`email`, `phone` or a custom trait such as `patient_id`. Pass it in `identify`: that one value is also sent, unmasked,
+only where Graine needs it to recognise the user, and never as a prompt
+variable. A placeholder ("guest", "null", a masked value), a boolean or a
+fraction identifies nobody, and such a conversation has no memory.
+
+```dart
+graine.identify({'user_id': user.id, 'name': user.name}, memory: user.allowsMemory);
+graine.setMemory(false);            // this user's conversations are neither remembered nor recalled
+final remembered = await graine.memories();   // List<GraineMemory>: what the agent remembers, newest first
+final deleted = await graine.forgetMemory();  // how many memories were deleted
+graine.identify(null);              // sign-out: this device is no longer theirs; their chat ends
+final id = await graine.installId;  // this install's id, the same one the native call engine sends
+```
+
+The memory choice is kept on the device for each user, so it need not be
+repeated. `memories()` and `forgetMemory()` work only from a device that is the
+user's (`GraineException.code`: `identity_required`, `device_limit`). Identity
+is fixed per conversation: a change reaches the next one; someone else signing
+in without `identify(null)` first signs the last user out.
 
 ## 5. Let the agent act
 
@@ -204,7 +242,7 @@ usable, undeclared and unhandled; log it once.
 comparisons, info cards, choices and quick actions as chips, calendar slots,
 and — for a kind this build cannot draw — the agent's own fallback sentence.
 Choosing one answers at once; `select: "many"` ticks up to `maxSelect` and
-answers once ("Let's compare Creta and Seltos."). The dashboard's loader stands
+answers once ("Compare: Creta and Seltos"). The dashboard's loader stands
 where a component will appear, for at least 450 ms; the answer stays as one
 line until the agent replies. A component's `on_select` runs your registered
 action (or `open_screen` with a `path`) first.
@@ -250,7 +288,98 @@ right now (`tokensListenable` to redraw when the device switches);
 (set `fontFamily` to one with `FontWeight.normal` — a loaded face is its
 weight); `Design.glyphUrl(...)` builds the launcher glyph as an image.
 
-## 8. Listen
+## 8. Chat
+
+`GraineInApp.instance.chat` is the text chat — the same agent and context as
+the call, in writing. `GraineAgentBar` opens it for you; for a chat screen of
+its own:
+
+```dart
+Navigator.of(context).push(PageRouteBuilder<void>(
+  pageBuilder: (context, _, __) => GraineChat(onClose: () => Navigator.of(context).pop()),
+));
+```
+
+`GraineChat` fills the space it is given, opens the chat while it is on screen,
+draws the components the agent shows above the composer, and keeps clear of
+the status bar, the home indicator and the keyboard. The design's chat
+settings — title, subtitle, avatar, placeholder, conversation starters,
+timestamps, background and the header's and composer's colours — reach it
+from the dashboard. While the user has calls booked, an **Upcoming calls**
+card heads the conversation: the time in their own time zone, and Cancel. Drawing your own? `chat` is a `ChangeNotifier`:
+`turns` (`GraineChatTurn`: `id`, `role`, `text`, `at`, `delivery` — sending,
+sent, failed — `proactive`, `component`), `connected`, `connecting`,
+`agentTyping`, `upcomingCalls`, `send()`, `open()`, `close()`,
+`cancelUpcoming(id)`.
+
+### Conversations continue
+
+A user you `identify()` who comes back — later today, tomorrow, on their other
+phone — finds the chat where they left it, and the agent picks up from there
+instead of greeting them again. The chat opens with the recent messages (the
+last 50, kept for a while after the last one), earlier calls show as one
+"Voice call · 6:05 PM" row, and day lines say Today, Yesterday or the date.
+Drawing your own chat? `turn.restored` marks a message from an earlier
+conversation and `turn.channel` (`GraineChatChannel.chat`, `.voice`) where it
+was said; `ChatRows.build(turns, now: …)` gives the rows to draw.
+`await chat.newConversation()` starts a fresh thread (the chat window's header
+offers it while an earlier conversation is on screen); what the agent
+remembers about the user stays. `forgetMemory()` clears the chat on screen too.
+Anonymous users, and those with memory off, start fresh every time; each agent
+in your app keeps its own conversation.
+
+### A bigger chat window
+
+How big the bar's chat opens is set per agent in the dashboard — **Embed &
+Widgets → Appearance → Chat window → Window size** — and `GraineAgentBar` draws
+it with no code:
+
+| Size | On a phone | On a tablet |
+|---|---|---|
+| Compact | The window above the bar, as always | The same |
+| Large | A sheet over most of the screen, the app dimmed behind it; drag it down or tap outside to close | A panel 420 wide in the bottom corner |
+| Full screen | The whole screen, closed with the chevron at the top left | The whole screen |
+
+Your app can choose otherwise, for every chat or for one:
+
+```dart
+GraineInApp.init(const GraineConfig(baseUrl: 'https://www.graine.ai', publishableKey: 'pk_live_…',
+    chatSize: GraineChatSize.large));
+
+await GraineChat.open(context, size: GraineChatSize.full);   // opens the chat now, at this size, this once
+```
+
+The size passed to `GraineChat.open` wins for that open, then
+`GraineConfig.chatSize`, then the dashboard's; the future completes when the
+chat closes. With the agent's bar on screen, the bar moves to the chat and
+draws it; switching between the call and the chat keeps the size. With no bar,
+`GraineChat.open` shows the chat on your navigator — a sheet, a tablet's panel
+or a screen of its own — and `compact`, which rides on the bar, opens as
+`large`. The `GraineChat` widget stays as it is, for a chat you place yourself.
+
+## 9. Calls the user books
+
+When the agent allows it (Calls & scheduling → users may book), the user can
+ask the agent to call them back — Graine rings their devices at that time:
+
+```dart
+final rules = graine.schedulingRules;                       // GraineSchedulingRules, from the dashboard
+final call = await graine.scheduleCall(at: DateTime(2026, 10, 14, 18), reason: 'KYC follow-up');
+final upcoming = await graine.scheduledCalls();             // List<GraineScheduledCall>, upcoming first
+final status = await graine.cancelScheduledCall(call.id);   // GraineCallStatus.cancelled
+```
+
+The time is checked on the device first — `rules.usersCanBook`, and between
+`rules.earliest(now)` and `rules.latest(now)` — then by Graine (the calling
+hours, how many each user may have pending). A refusal is a `GraineException`
+whose `code` (a `GraineErrorCode`) says why: `schedulingOff`, `tooSoon`,
+`tooFar`, `outsideWindow`, `tooManyPending`, `rateLimited` (with
+`retryAfterSeconds`), `network`… A `GraineScheduledCall` has `id`, `at`,
+`status`, `source`, `reason`, `isUpcoming` and `canCancel`. The reason (at most
+120 characters) is kept with the call for the agent and never put in the push
+that rings it.
+
+## 10. Listen
 
 ```dart
 class Analytics with GraineListener {
@@ -262,7 +391,57 @@ graine.addListener(Analytics());
 
 Every callback is optional: session ready, call state, captions, components,
 ended, mic denied, quality, network, reconnecting, transport, connectivity,
-actions, friction, errors.
+actions, friction, the agent volunteering in the chat, errors.
+
+## 11. Several agents
+
+One app can run several agents — each with its own publishable key — and
+choose per screen which one the customer talks to: a support agent in Help, a
+sales agent on Plans.
+
+```dart
+GraineInApp.init(const GraineConfig(baseUrl: 'https://www.graine.ai', publishableKey: 'pk_live_main'));
+GraineInApp.init(const GraineConfig(baseUrl: 'https://www.graine.ai', publishableKey: 'pk_live_support'),
+    name: 'support');
+
+final support = GraineInApp.named('support')!;   // GraineInApp.instance is the default agent
+support.registerAction('raise_ticket', (args) => const ActionResult.ok('Ticket raised'));
+
+// The views take the agent they talk to:
+GraineChat(app: support);
+GraineAgentBar(app: support);
+
+// One engine per agent the customer can call, nested near the root:
+MaterialApp(
+  builder: (context, child) => GraineEngine(
+    app: support,
+    child: GraineEngine(child: Stack(children: [child!, const GraineAgentBar()])),
+  ),
+);
+```
+
+- **Each agent has its own** session and design, chat, call, components,
+  actions, prompt variables, and its own scheduling and memory requests.
+- **Shared by every agent:** the install id; who is signed in —
+  `identify(...)` on any agent identifies the user for all of them (each reads
+  the trait its own Memory settings name), and `identify(null)`
+  signs out everywhere; the user's memory choice; and the screen (`setScreen`,
+  `track`, `tap`) — each agent tells it to its own conversation while one is
+  live.
+- **One conversation at a time:** starting a call or a chat with one agent
+  ends a live one with another.
+- **Engines:** each agent the customer can call needs its own `GraineEngine`,
+  which keeps that agent's page loaded and idle, so a call starts at once
+  whichever agent the screen offers. An agent you only chat with needs none.
+- **Native calls:** `GraineCalls.instance.startCall(reason: 'refund', agent: 'support')`;
+  every agent configured under a name goes to the native engine with
+  `configure`. A call Graine rings for one of them rings as that agent, in its
+  call screen design, and its actions run in that agent's handlers —
+  `GraineCallSnapshot.agent`, `GraineIncomingCall.agent` and
+  `GraineCallOutcome.agent` say which.
+
+An app with one agent changes nothing: `GraineInApp.init(config)` is the
+default agent, and every view draws it.
 
 ## Calls like WhatsApp
 
@@ -304,7 +483,15 @@ await GraineCalls.instance.startCall(reason: 'card_blocked');
   the microphone service and their permissions.
 - **Your call screen** — `callScreen: GraineCallScreen.sdk` (the default) shows
   the SDK's; with `GraineCallScreen.app`, draw your own from
-  `GraineCalls.instance` (a `ValueListenable<GraineCallSnapshot>`).
+  `GraineCalls.instance` (a `ValueListenable<GraineCallSnapshot>`), in the
+  design's call colours (`GraineInApp.instance.tokens?.call`).
+- **Graine rings your users** — when your workspace has uploaded its push
+  credentials (Workspace settings → In-app calling), Graine itself rings the
+  calls the agent or the user booked: on Android hand the SDK your FCM token
+  (`GraineCalls.instance.registerPushToken(token)`, from `getToken()` and
+  `onTokenRefresh`) and keep forwarding pushes to `handlePush`; on iOS
+  `enableVoIPPushes` is all it takes. The SDK tells Graine what became of each
+  ring, and who is signed in reaches the call as it does the chat.
 
 The push your server sends and the rest of the build:
 https://www.graine.ai/docs/in-app/calling#flutter
