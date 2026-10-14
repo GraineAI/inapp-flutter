@@ -153,7 +153,7 @@ abstract final class ChatRows {
 /// (the agent still has them), the starters may show, and the compose
 /// control, which belongs to earlier messages on screen, does not.
 final class ChatPieces {
-  const ChatPieces._(this.turns, this.starters, this.newConversation, this.upcoming, this.upcomingTitle);
+  const ChatPieces._(this.turns, this.starters, this.newConversation, this.upcoming, this.upcomingTitle, this.book);
 
   /// The turns to draw, oldest first.
   final List<GraineChatTurn> turns;
@@ -170,6 +170,11 @@ final class ChatPieces {
   /// The card's title: the brand's words, else "Upcoming call" / "Upcoming calls".
   final String upcomingTitle;
 
+  /// "Book a call" in the card's place — in the card, or a compact row while
+  /// nothing is booked: kept by the design (it belongs to the booked-calls
+  /// piece), and booking available here (`Booking.available`).
+  final bool book;
+
   /// For [turns] and [upcomingCount] booked calls, as the design sets the pieces.
   static ChatPieces of(
     List<GraineChatTurn> turns, {
@@ -178,6 +183,7 @@ final class ChatPieces {
     bool showUpcomingCalls = true,
     String upcomingTitle = '',
     int upcomingCount = 0,
+    bool bookingAvailable = false,
   }) {
     final shown = showHistory ? List<GraineChatTurn>.unmodifiable(turns) : List<GraineChatTurn>.unmodifiable(turns.where((GraineChatTurn t) => !t.restored));
     final words = upcomingTitle.trim();
@@ -187,16 +193,18 @@ final class ChatPieces {
       newConversation && ChatRows.offersNewConversation(shown),
       showUpcomingCalls && upcomingCount > 0,
       words.isNotEmpty ? words : (upcomingCount == 1 ? 'Upcoming call' : 'Upcoming calls'),
+      showUpcomingCalls && bookingAvailable,
     );
   }
 
   /// The same under a session's chat tokens (null, an older server: everything on).
-  static ChatPieces ofChat(List<GraineChatTurn> turns, ThemeChat? chat, {int upcomingCount = 0}) => of(
+  static ChatPieces ofChat(List<GraineChatTurn> turns, ThemeChat? chat, {int upcomingCount = 0, bool bookingAvailable = false}) => of(
         turns,
         showHistory: chat?.showHistory ?? true,
         newConversation: chat?.newConversation ?? true,
         showUpcomingCalls: chat?.showUpcomingCalls ?? true,
         upcomingTitle: chat?.upcomingTitle ?? '',
         upcomingCount: upcomingCount,
+        bookingAvailable: bookingAvailable,
       );
 }

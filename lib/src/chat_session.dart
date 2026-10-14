@@ -381,8 +381,11 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       final identity = await _graine._identityState(waitForSession: false);
       final ticket = await _graine._ticket('text', variables, identity);
       if (!current()) return;
-      var url = ticket?.wsUrl ?? ChatWire.directUrl(session.wsHost, session.webcallAgentId);
-      url = ChatWire.withContextToken(url, Protocol.contextToken(variables, callType: ChatWire.callType));
+      // The direct socket reads the variables off its URL. The gateway builds the conversation's context
+      // from the ticket's signed claims and reads nothing else, so a token there would only reach the access logs.
+      final url = ticket?.wsUrl ??
+          ChatWire.withContextToken(ChatWire.directUrl(session.wsHost, session.webcallAgentId),
+              Protocol.contextToken(variables, callType: ChatWire.callType));
       final protocols = ticket == null ? null : <String>[ChatWire.subprotocol, ticket.ticket];
       final socket =
           await _connector(Uri.parse(url), protocols).timeout(const Duration(milliseconds: ChatWire.openTimeoutMs));

@@ -564,7 +564,8 @@ void main() {
       expect(ticket.containsKey('callId'), isFalse);
 
       expect(s.protocols, <String>['graine.embed.v1', 'tkt_1'], reason: 'the ticket in the subprotocol, never the URL');
-      expect(s.url.toString(), startsWith('$gateway?context_token='));
+      expect(s.url.toString(), gateway,
+          reason: 'the variables ride the ticket: the gateway reads nothing off its URL, and a query reaches the access logs');
       expect(s.types, <String>['init', 'app_context']);
       expect((s.sent.first['meta_data']! as Map<String, Object?>)['client'], 'graine-flutter-sdk');
       final context = s.sent[1]['context']! as Map<String, Object?>;

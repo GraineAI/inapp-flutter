@@ -1,9 +1,11 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
 import 'agent_bar.dart' show openChatInBar;
+import 'booking_sheet.dart';
 import 'chat_frames.dart';
 import 'chat_window.dart';
 import 'core/core.dart';
@@ -292,9 +294,13 @@ class _GraineChatState extends State<GraineChat> {
                 upcoming: chat is GraineChatSession ? chat.upcomingCalls : const <GraineScheduledCall>[],
                 cancelStateOf: chat is GraineChatSession ? chat.cancelStateOf : null,
                 onCancelUpcoming: chat is GraineChatSession ? (String id) => chat.cancelUpcoming(id) : null,
+                // Booking from the chat: "Book a call" in the card, the SDK's sheet over the app.
+                bookingAvailable: app?.bookingAvailable ?? false,
+                onBook: app == null ? null : () => unawaited(GraineBooking.show(context, app: app)),
                 // A refusal leaves the conversation as it was; nothing to say over it.
                 onNewConversation: chat is GraineChatSession ? () => chat.newConversation().catchError((Object _) {}) : null,
-                callName: app?.session?.calls?.callName ?? widget.name ?? dash.heading,
+                // The call's name, else the chat's title, else the heading (Booking.callName).
+                callName: app?.session?.calls?.callName,
                 onCollapse: widget.onClose,
                 // A full screen of the chat's own (GraineChat.open) leads with its chevron.
                 leadingChevron: ChatFrameScope.leads(context),

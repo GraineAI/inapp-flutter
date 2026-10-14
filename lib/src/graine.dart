@@ -552,6 +552,7 @@ class GraineInApp with WidgetsBindingObserver {
   }
 
   void _announceIdentity() {
+    _bookingChanged();
     for (final w in List<void Function()>.of(_identityWatchers)) {
       w();
     }
@@ -677,6 +678,40 @@ class GraineInApp with WidgetsBindingObserver {
   /// which allows no booking). `earliest(now)` and `latest(now)` bound a
   /// booking.
   GraineSchedulingRules get schedulingRules => GraineSchedulingRules.of(session?.calls);
+
+  /// WHETHER THIS USER CAN BOOK A CALL FROM HERE — for showing or hiding a
+  /// "Call me" button of the app's own: the agent lets users book, Graine
+  /// rings this phone (the workspace set up in-app calling for this
+  /// platform), and the user is identified ([identify] with the agent's
+  /// identity trait). False until the session has arrived.
+  /// [bookingListenable] redraws a widget when it changes;
+  /// `GraineBooking.show` opens the SDK's own booking sheet.
+  bool get bookingAvailable => bookingBlocker == null;
+
+  /// Why [bookingAvailable] is false, as the booking sheet says it:
+  /// [GraineErrorCode.schedulingOff] (the agent takes no bookings, or Graine
+  /// cannot ring this phone) or [GraineErrorCode.identityRequired] (nobody
+  /// identified); null when it is true.
+  GraineErrorCode? get bookingBlocker =>
+      Booking.blocker(session?.calls, platform: _bookingPlatform, identified: _identityValueFor(_traits) != null);
+
+  /// The device's time zone (IANA, "Asia/Kolkata"), once the SDK has read it —
+  /// the booking sheet names it beside the time chosen. Null before then.
+  String? get deviceTimezone => _device.timezoneNow;
+
+  /// [bookingAvailable], for a widget that redraws when it changes.
+  ValueListenable<bool> get bookingListenable => _bookable;
+  final ValueNotifier<bool> _bookable = ValueNotifier<bool>(false);
+
+  /// The session arrived, or the user changed: whether they can book, again.
+  void _bookingChanged() => _bookable.value = bookingAvailable;
+
+  /// Where Graine can ring this app: the plugin's platforms, iOS and Android.
+  static String? get _bookingPlatform => switch (defaultTargetPlatform) {
+        TargetPlatform.iOS => 'ios',
+        TargetPlatform.android => 'android',
+        _ => null,
+      };
 
   /// BOOK A CALL FROM THE AGENT at [at] — "call me tomorrow at 6". The agent
   /// rings this user's devices (or, with nobody identified, this install)
@@ -1122,6 +1157,7 @@ class GraineInApp with WidgetsBindingObserver {
     if (s != null) return Future<SessionConfig?>.value(s);
     return _sessionLoad ??= _fetchSession().then<SessionConfig?>((SessionConfig s) {
       _session.value = s;
+      _bookingChanged();
       _pickTokens();
       // The brand's typeface, fetched now — both schemes — so it is drawn
       // from the first frame it can be, and a switch to dark never waits.

@@ -6,6 +6,7 @@ library;
 
 export 'appearance.dart';
 export 'bar.dart';
+export 'booking.dart';
 export 'chat.dart';
 export 'chat_rows.dart';
 export 'chat_size.dart';

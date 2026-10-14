@@ -392,6 +392,8 @@ class ChatWindow extends StatefulWidget {
     this.now,
     this.turns,
     this.onNewConversation,
+    this.bookingAvailable = false,
+    this.onBook,
   });
 
   final ChatLook look;
@@ -454,7 +456,8 @@ class ChatWindow extends StatefulWidget {
   /// A booked call's Cancel was tapped.
   final ValueChanged<String>? onCancelUpcoming;
 
-  /// What a booked call is called — the agent's call name; default the heading.
+  /// What a booked call is called — the agent's call name; default the
+  /// chat's title, else the heading ([Booking.callName]).
   final String? callName;
 
   /// The time now, for "Today" and "Tomorrow" (tests).
@@ -463,6 +466,17 @@ class ChatWindow extends StatefulWidget {
   /// "New conversation" — the compose icon in the header, offered only while
   /// [turns] holds an earlier conversation (restored turns). Null: never.
   final VoidCallback? onNewConversation;
+
+  /// Booking is available here (`GraineInApp.bookingAvailable`): "Book a
+  /// call" in the Upcoming calls card — or, while nothing is booked, a
+  /// compact row in its place — opening [onBook].
+  final bool bookingAvailable;
+
+  /// Opens the booking sheet. Null: no "Book a call".
+  final VoidCallback? onBook;
+
+  /// "Book a call": in the card, or the row in its place.
+  static const Key bookKey = ValueKey<String>('graine-chat-book');
 
   /// The header's "New conversation".
   static const Key newConversationKey = ValueKey<String>('graine-chat-new-conversation');
@@ -551,8 +565,14 @@ class _ChatWindowState extends State<ChatWindow> {
       showUpcomingCalls: l.showUpcomingCalls,
       upcomingTitle: l.upcomingTitle,
       upcomingCount: math.min(widget.upcoming.length, 3),
+      bookingAvailable: widget.bookingAvailable && widget.onBook != null,
     );
   }
+
+  /// "Book a call" is offered: the design keeps the booked-calls piece and
+  /// booking is available — the same rule with or without the SDK's turns.
+  bool get _book =>
+      _pieces?.book ?? (widget.look.showUpcomingCalls && widget.bookingAvailable && widget.onBook != null);
 
   bool get _h24 => MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? false;
 
@@ -906,7 +926,9 @@ class _ChatWindowState extends State<ChatWindow> {
   /// Cancel. No booked calls, no card.
   Widget? _upcomingCard(ChatLook l) {
     final calls = widget.upcoming;
-    if (calls.isEmpty || !l.showUpcomingCalls) return null;
+    if (!l.showUpcomingCalls) return null;
+    // Nothing booked: where booking is available, "Book a call" stands in the card's place.
+    if (calls.isEmpty) return _book ? _bookRow(l) : null;
     final shown = calls.take(3).length;
     final title = l.upcomingTitle.isNotEmpty ? l.upcomingTitle : (shown == 1 ? 'Upcoming call' : 'Upcoming calls');
     final now = (widget.now ?? DateTime.now)();
@@ -922,6 +944,7 @@ class _ChatWindowState extends State<ChatWindow> {
         // In window chrome the title moves into the bar.
         if (chrome == null) ...<Widget>[Text(title, style: l.cardTitleStyle), SizedBox(height: l.gap)],
         for (var i = 0; i < rows.length; i++) ...<Widget>[if (i > 0) SizedBox(height: l.gap), rows[i]],
+        if (_book) ...<Widget>[SizedBox(height: l.gap), _bookButton(l)],
       ],
     );
     final decoration = BoxDecoration(
@@ -957,6 +980,73 @@ class _ChatWindowState extends State<ChatWindow> {
     );
   }
 
+  /// "Book a call" closing the card: as wide as it, 32 high, outlined in the
+  /// accent, the call icon before the words.
+  Widget _bookButton(ChatLook l) => Tap(
+        key: ChatWindow.bookKey,
+        label: 'Book a call',
+        onTap: widget.onBook,
+        child: Container(
+          height: 32,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            border: Border.all(color: l.accent, width: math.max(1, l.borderWidth)),
+            borderRadius: BorderRadius.circular(math.min(l.md, 16)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              SdkIconView('call', color: l.accent, size: 14, style: l.iconStyle, stroke: l.iconStroke),
+              const SizedBox(width: 6),
+              Text('Book a call', style: l.cancelStyle),
+            ],
+          ),
+        ),
+      );
+
+  /// "Book a call" in the card's place while nothing is booked: one compact
+  /// row drawn like the card's — the accent disc with the call icon, the
+  /// words, and "{call name} will call you" under them.
+  Widget _bookRow(ChatLook l) {
+    final name = Booking.callName(<String?>[widget.callName, l.title, widget.heading]);
+    return Tap(
+      key: ChatWindow.bookKey,
+      label: 'Book a call',
+      onTap: widget.onBook,
+      child: Container(
+        padding: EdgeInsets.symmetric(horizontal: l.pad, vertical: (l.pad * 0.75).roundToDouble()),
+        decoration: BoxDecoration(
+          color: l.cardFill,
+          border: l.borderWidth > 0 ? Border.all(color: l.border, width: l.borderWidth) : null,
+          borderRadius: BorderRadius.circular(l.lg),
+          boxShadow: l.cardShadows,
+        ),
+        child: Row(
+          children: <Widget>[
+            Container(
+              width: 32,
+              height: 32,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(color: l.accent, shape: BoxShape.circle),
+              child: SdkIconView('call', color: l.onAccent, size: 16, style: l.iconStyle, stroke: l.iconStroke),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text('Book a call', maxLines: 1, overflow: TextOverflow.ellipsis, style: l.rowTimeStyle),
+                  Text(Booking.subtitle(name), maxLines: 1, overflow: TextOverflow.ellipsis, style: l.rowNameStyle),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _upcomingRow(ChatLook l, GraineScheduledCall c, DateTime now) {
     final state = widget.cancelStateOf?.call(c.id) ?? GraineUpcomingCancel.none;
     final at = c.at;
@@ -983,7 +1073,8 @@ class _ChatWindowState extends State<ChatWindow> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
               Text(when, maxLines: 1, overflow: TextOverflow.ellipsis, style: l.rowTimeStyle),
-              Text(widget.callName ?? widget.heading, maxLines: 1, overflow: TextOverflow.ellipsis, style: l.rowNameStyle),
+              Text(Booking.callName(<String?>[widget.callName, l.title, widget.heading]),
+                  maxLines: 1, overflow: TextOverflow.ellipsis, style: l.rowNameStyle),
             ],
           ),
         ),

@@ -108,9 +108,9 @@ String initialOf(String name) {
 }
 
 /// What a surface redraws on: its own state, the session of [app] (the agent
-/// it draws; the default agent unless handed one) arriving, and the design's
+/// it draws; the default agent unless handed one) arriving, the design's
 /// typefaces landing — a face that loads after the first frame redraws
-/// everything set in it.
+/// everything set in it — and whether the user can book a call.
 Listenable surfaceListenable(List<Listenable?> own, {GraineInApp? app}) {
   final a = app ?? GraineInApp.maybeInstance;
   final all = <Listenable>[
@@ -118,6 +118,8 @@ Listenable surfaceListenable(List<Listenable?> own, {GraineInApp? app}) {
       if (l != null) l,
     if (a != null) a.sessionListenable,
     if (a != null) a.fontFaces,
+    // Whether the user can book: the chat's "Book a call" comes and goes with it.
+    if (a != null) a.bookingListenable,
   ];
   return all.length == 1 ? all.single : Listenable.merge(all);
 }

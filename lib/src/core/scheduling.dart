@@ -322,7 +322,7 @@ abstract final class ChatTime {
   }
 
   /// A booked call's time: "Today, 5:30 PM", "Tomorrow, 9:00 AM", else the
-  /// weekday and the date — "Tue 14 Oct, 10:00 AM".
+  /// weekday and the date — "Wed 14 Oct, 10:00 AM".
   static String booked(DateTime at, DateTime now, {required bool h24}) {
     final a = at.toLocal();
     final n = now.toLocal();
@@ -330,6 +330,12 @@ abstract final class ChatTime {
     final time = clock(a, h24: h24);
     if (sameDay(a, n)) return 'Today, $time';
     if (sameDay(a, DateTime(n.year, n.month, n.day + 1))) return 'Tomorrow, $time';
-    return '${_weekdays[a.weekday - 1]} ${a.day} ${_months[a.month - 1]}, $time';
+    return '${day(a)}, $time';
+  }
+
+  /// A day in short words: the weekday and the date — "Wed 14 Oct".
+  static String day(DateTime at) {
+    final a = at.toLocal();
+    return '${_weekdays[a.weekday - 1]} ${a.day} ${_months[a.month - 1]}';
   }
 }

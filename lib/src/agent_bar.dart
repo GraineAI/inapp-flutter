@@ -6,6 +6,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/widgets.dart';
 
+import 'booking_sheet.dart';
 import 'chat_frames.dart';
 import 'chat_window.dart';
 import 'core/core.dart';
@@ -826,8 +827,12 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
             upcoming: chat is GraineChatSession ? chat.upcomingCalls : const <GraineScheduledCall>[],
             cancelStateOf: chat is GraineChatSession ? chat.cancelStateOf : null,
             onCancelUpcoming: chat is GraineChatSession ? (String id) => chat.cancelUpcoming(id) : null,
+            // Booking from the chat: "Book a call" in the card, the SDK's sheet over the app.
+            bookingAvailable: app?.bookingAvailable ?? false,
+            onBook: app == null ? null : () => unawaited(GraineBooking.show(context, app: app)),
             onNewConversation: chat is GraineChatSession ? () => chat.newConversation().catchError((Object _) {}) : null,
-            callName: app?.session?.calls?.callName ?? name,
+            // The call's name, else the chat's title, else the heading (Booking.callName).
+            callName: app?.session?.calls?.callName,
             // Back to the call — or, for an agent that is only a chat, closed.
             onCollapse: closeChat,
             logoUrl: dash.logoUrl,
@@ -932,9 +937,12 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
           upcoming: chat is GraineChatSession ? chat.upcomingCalls : const <GraineScheduledCall>[],
           cancelStateOf: chat is GraineChatSession ? chat.cancelStateOf : null,
           onCancelUpcoming: chat is GraineChatSession ? (String id) => chat.cancelUpcoming(id) : null,
+          // Booking from the chat: "Book a call" in the card, the SDK's sheet over the app.
+          bookingAvailable: app?.bookingAvailable ?? false,
+          onBook: app == null ? null : () => unawaited(GraineBooking.show(context, app: app)),
           // A sheet, a panel and a screen offer New conversation like the compact window.
           onNewConversation: chat is GraineChatSession ? () => chat.newConversation().catchError((Object _) {}) : null,
-          callName: app?.session?.calls?.callName ?? name,
+          callName: app?.session?.calls?.callName,
           onCollapse: closeChat,
           collapseLabel: canSwitch ? 'Collapse' : 'Close',
           logoUrl: dash.logoUrl,

@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.7.0
+  graine_inapp: ^0.8.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -378,6 +378,40 @@ whose `code` (a `GraineErrorCode`) says why: `schedulingOff`, `tooSoon`,
 `status`, `source`, `reason`, `isUpcoming` and `canCancel`. The reason (at most
 120 characters) is kept with the call for the agent and never put in the push
 that rings it.
+
+### Booking a call from your app
+
+When your workspace has Graine ring its users and the agent lets them book,
+the SDK draws the booking screen itself — "Call me at…" with no screen of your
+own:
+
+```dart
+if (graine.bookingAvailable) {                 // rung here, booking on, the user identified
+  final call = await GraineBooking.show(context, reason: 'Card replacement');
+  if (call != null) print('Booked ${call.id} for ${call.at}');   // null: closed without booking
+}
+```
+
+The sheet is drawn in the agent's design, light or dark: the day (chips from
+today to the furthest day the agent allows), the time (Flutter's own time
+picker; a time the agent's rules do not allow moves to the nearest one that
+they do), the phone's time zone, "What's it about? (optional)" — 120
+characters; `reason` fills it — and **Book call**. A refusal stays in the sheet
+as one line: "Pick a time at least 5 minutes from now", "Pick a time within 14
+days", "That time is outside the hours we can call — pick another", "You
+already have 3 calls booked — cancel one first", "Sign in to book a call",
+"Couldn't book just now — try again". Once it is booked, the sheet says when
+the agent will call, and Done closes it. A sheet on a phone, a centred panel on
+a tablet; `GraineBookingSheet` is the same sheet for a route or a sheet of your
+own. The time picker is Material's: an app with no `MaterialApp` still gets it.
+
+`bookingAvailable` is each agent's own (`graine.bookingListenable` redraws a
+widget when it changes): true only when Graine rings this phone (the
+workspace's In-app calling, for this platform), the agent lets users book, and
+the user is identified with the trait the agent's Identity setting names. The
+SDK's chat window follows the same rule: **Book a call** under the booked calls
+in its Upcoming calls card, or on its own in the card's place when none are
+booked — and none when the design hides the booked-calls card.
 
 ## 10. Listen
 
