@@ -394,6 +394,103 @@ void main() {
     await pumpEventQueue();
     expect(GraineCalls.instance.value.status, GraineNativeCallStatus.idle);
   });
+
+  group('permissions and setup', () {
+    test('the permissions are read from the engine, and a word it does not know is never granted', () async {
+      reply = (MethodCall c) => c.method == 'callPermissions'
+          ? <String, Object?>{'microphone': 'granted', 'notifications': 'denied', 'fullScreen': 'blocked'}
+          : null;
+      final p = await GraineCalls.instance.callPermissions();
+      expect(p.microphone, GraineCallPermissionStatus.granted);
+      expect(p.notifications, GraineCallPermissionStatus.denied);
+      expect(p[GraineCallPermission.fullScreen], GraineCallPermissionStatus.blocked);
+      expect(p.allGranted, isFalse);
+      reply = (MethodCall c) => c.method == 'callPermissions' ? <String, Object?>{'microphone': 'maybe'} : null;
+      final unknown = await GraineCalls.instance.callPermissions();
+      expect(unknown.microphone, GraineCallPermissionStatus.denied);
+      expect(unknown.fullScreen, GraineCallPermissionStatus.denied, reason: 'absent is not granted');
+    });
+
+    test('notNeeded counts as granted', () {
+      const p = GraineCallPermissions(
+        microphone: GraineCallPermissionStatus.granted,
+        notifications: GraineCallPermissionStatus.notNeeded,
+        fullScreen: GraineCallPermissionStatus.notNeeded,
+      );
+      expect(p.allGranted, isTrue);
+      expect(GraineCallPermissionStatus.blocked.isSatisfied, isFalse);
+      expect(GraineCallPermissions.fromMap(const <String, Object?>{
+        'microphone': 'granted', 'notifications': 'notNeeded', 'fullScreen': 'notNeeded'}), p);
+    });
+
+    test('asking answers the permissions as they stand after, and configure never asks', () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      expect(argsOf('requestCallPermissions'), isEmpty, reason: 'the app chooses when to ask');
+      reply = (MethodCall c) => switch (c.method) {
+            'requestCallPermissions' => <String, Object?>{'microphone': 'granted', 'notifications': 'granted', 'fullScreen': 'granted'},
+            'snapshot' => <String, Object?>{'state': 'idle'},
+            _ => null,
+          };
+      final after = await GraineCalls.instance.requestCallPermissions();
+      expect(argsOf('requestCallPermissions'), hasLength(1));
+      expect(after.allGranted, isTrue);
+    });
+
+    test('Settings open by the permission\'s word', () async {
+      reply = (MethodCall c) => c.method == 'openCallSettings' ? true : null;
+      expect(await GraineCalls.instance.openCallSettings(GraineCallPermission.fullScreen), isTrue);
+      expect(argsOf('openCallSettings'), <Object?>['fullScreen']);
+      reply = null;
+      expect(await GraineCalls.instance.openCallSettings(GraineCallPermission.microphone), isFalse);
+    });
+
+    test('setup problems arrive as codes and sentences, and anything else is dropped', () async {
+      reply = (MethodCall c) => c.method == 'callSetupProblems'
+          ? <Object?>[
+              <String, Object?>{'code': 'background_voip_missing', 'message': 'Add voip to UIBackgroundModes.'},
+              <String, Object?>{'code': '', 'message': 'no code'},
+              'junk',
+              <String, Object?>{'code': 'no_push_token'},
+            ]
+          : null;
+      expect(await GraineCalls.instance.callSetupProblems(), const <GraineCallSetupProblem>[
+        GraineCallSetupProblem('background_voip_missing', 'Add voip to UIBackgroundModes.'),
+        GraineCallSetupProblem('no_push_token', ''),
+      ]);
+    });
+
+    test('a debug build prints each setup problem once', () async {
+      final printed = <String>[];
+      final before = debugPrint;
+      debugPrint = (String? m, {int? wrapWidth}) => printed.add(m ?? '');
+      try {
+        reply = (MethodCall c) => switch (c.method) {
+              'callSetupProblems' => <Object?>[
+                  <String, Object?>{'code': 'no_push_token', 'message': 'Call registerPushToken.'}
+                ],
+              'snapshot' => <String, Object?>{'state': 'idle'},
+              _ => null,
+            };
+        await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+        await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+        await pumpEventQueue();
+        expect(printed.where((String m) => m.contains('Calls setup')), <String>['[Graine] Calls setup (no_push_token): Call registerPushToken.']);
+      } finally {
+        debugPrint = before;
+        GraineCalls.instance.resetForTesting();
+      }
+    });
+
+    test('where there are no native calls, nothing is needed and nothing is asked', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      final p = await GraineCalls.instance.callPermissions();
+      expect(p.allGranted, isTrue);
+      expect(await GraineCalls.instance.requestCallPermissions(), p);
+      expect(await GraineCalls.instance.openCallSettings(GraineCallPermission.microphone), isFalse);
+      expect(await GraineCalls.instance.callSetupProblems(), isEmpty);
+      expect(calls, isEmpty);
+    });
+  });
 }
 
 class _Errors extends GraineListener {

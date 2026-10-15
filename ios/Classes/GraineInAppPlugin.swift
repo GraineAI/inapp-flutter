@@ -94,6 +94,16 @@ public class GraineInAppPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         case "registerPushToken":
             // Android's FCM token; iOS registers its VoIP token natively.
             result(nil)
+        case "callPermissions":
+            result(host.callPermissions())
+        case "requestCallPermissions":
+            // The system's dialog when it can still ask; the permissions as they stand after.
+            host.requestCallPermissions { result($0) }
+        case "openCallSettings":
+            result(host.openCallSettings(call.arguments as? String))
+        case "callSetupProblems":
+            // Info.plist is the app's to edit: the check names what to add.
+            result(host.callSetupProblems())
         case "setVariables":
             host.setVariables(call.arguments as? [String: Any])
             result(nil)

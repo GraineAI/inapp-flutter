@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.9.0
+  graine_inapp: ^0.10.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -527,6 +527,55 @@ await GraineCalls.instance.startCall(reason: 'support');
   `onTokenRefresh`) and keep forwarding pushes to `handlePush`; on iOS
   `enableVoIPPushes` is all it takes. The SDK tells Graine what became of each
   ring, and who is signed in reaches the call as it does the chat.
+
+### What the SDK does, what your app adds
+
+**The SDK does by itself:** CallKit and VoIP pushes on iOS, the ringing call
+notification and call screen on Android (its manifest merges every entry),
+the call going on with the screen off, the microphone asked for when a call
+starts without it, the device registered with Graine and every outcome
+reported — and a check of your setup at `configure`, each problem logged once
+with its fix (in Xcode's console and logcat, and printed once by `flutter run`
+in a debug build).
+
+**Your app adds:** on iOS the capabilities above and, in `ios/Runner/Info.plist`,
+`NSMicrophoneUsageDescription` and `UIBackgroundModes` `audio` and `voip` — a
+plugin cannot edit Info.plist, so the setup check names whichever is missing;
+on Android, Firebase messaging and `registerPushToken`; and one call to ask for
+the permissions at a moment you choose (onboarding, a "Call me" screen). The
+SDK never asks on its own at launch.
+
+```dart
+final p = await GraineCalls.instance.requestCallPermissions();
+// p.microphone · p.notifications (Android 13+) · p.fullScreen (Android 14+), each
+// granted · denied (not yet) · blocked (only Settings can change it) · notNeeded (iOS: CallKit rings)
+if (p.fullScreen == GraineCallPermissionStatus.blocked) {
+  // After a sentence of your own: "Allow full-screen calls so Acme can ring your locked phone."
+  await GraineCalls.instance.openCallSettings(GraineCallPermission.fullScreen);
+}
+```
+
+`callPermissions()` reads them at any time — again when the app returns to the
+foreground, as the customer may have changed Settings; `allGranted` is true
+when each is granted or not needed. On Android the SDK asks from a transparent
+screen of its own, so nothing forwards a permission result.
+
+**What is still missing**, in plain words — the same list the log shows:
+
+```dart
+for (final p in await GraineCalls.instance.callSetupProblems()) {
+  debugPrint('${p.code}: ${p.message}');
+}
+```
+
+iOS: `microphone_usage_missing`, `background_audio_missing`,
+`background_voip_missing`, `push_entitlement_missing`, `voip_pushes_not_enabled`
+(no `enableVoIPPushes` 15 seconds after `configure`), `no_voip_token`. Android:
+`manifest_entry_missing`, `no_push_token` (no `registerPushToken` 15 seconds
+after `configure`), `notifications_not_allowed`, `full_screen_not_allowed`.
+Both: `microphone_blocked`, `hosted_ringing_off` (Graine can't ring this phone:
+no push credentials uploaded). A problem is never an exception: calls still
+work where they can.
 
 The push your server sends and the rest of the build:
 https://www.graine.ai/docs/in-app/calling#flutter

@@ -288,6 +288,124 @@ class GraineIncomingCall {
   final String? agent;
 }
 
+/// A permission a native call needs.
+enum GraineCallPermission {
+  /// The customer's voice. Asked by the SDK when a call starts without it, or
+  /// by [GraineCalls.requestCallPermissions].
+  microphone('microphone'),
+
+  /// A call that rings while the app is closed or in the background — Android
+  /// (13+ asks). iOS rings through CallKit, which needs none.
+  notifications('notifications'),
+
+  /// A ring that fills a locked screen — Android 14+, allowed in Settings.
+  /// iOS: CallKit's own screen, nothing to allow.
+  fullScreen('fullScreen');
+
+  const GraineCallPermission(this.wire);
+
+  /// The word every Graine SDK uses.
+  final String wire;
+}
+
+/// Where a call permission stands.
+enum GraineCallPermissionStatus {
+  /// Allowed.
+  granted('granted'),
+
+  /// Not allowed yet: [GraineCalls.requestCallPermissions] can ask for it.
+  denied('denied'),
+
+  /// Refused for good, or only allowed in Settings: only the Settings app can
+  /// change it ([GraineCalls.openCallSettings]).
+  blocked('blocked'),
+
+  /// This phone needs no such permission.
+  notNeeded('notNeeded');
+
+  const GraineCallPermissionStatus(this.wire);
+
+  /// The word every Graine SDK uses.
+  final String wire;
+
+  /// Granted, or nothing to grant.
+  bool get isSatisfied => this == granted || this == notNeeded;
+
+  /// From the engine's word; anything it does not know is [denied], never granted.
+  static GraineCallPermissionStatus fromWire(Object? s) {
+    for (final v in values) {
+      if (v.wire == s) return v;
+    }
+    return denied;
+  }
+}
+
+/// Every call permission's status, as the phone holds it when read.
+class GraineCallPermissions {
+  const GraineCallPermissions({required this.microphone, required this.notifications, required this.fullScreen});
+
+  /// From the engine's map, `{microphone, notifications, fullScreen}`.
+  factory GraineCallPermissions.fromMap(Map<Object?, Object?>? m) => GraineCallPermissions(
+        microphone: GraineCallPermissionStatus.fromWire(m?['microphone']),
+        notifications: GraineCallPermissionStatus.fromWire(m?['notifications']),
+        fullScreen: GraineCallPermissionStatus.fromWire(m?['fullScreen']),
+      );
+
+  final GraineCallPermissionStatus microphone;
+  final GraineCallPermissionStatus notifications;
+  final GraineCallPermissionStatus fullScreen;
+
+  /// One permission's status.
+  GraineCallPermissionStatus operator [](GraineCallPermission item) => switch (item) {
+        GraineCallPermission.microphone => microphone,
+        GraineCallPermission.notifications => notifications,
+        GraineCallPermission.fullScreen => fullScreen,
+      };
+
+  /// Every permission is granted or not needed: calls can ring and connect.
+  bool get allGranted => GraineCallPermission.values.every((GraineCallPermission p) => this[p].isSatisfied);
+
+  @override
+  bool operator ==(Object other) =>
+      other is GraineCallPermissions &&
+      other.microphone == microphone &&
+      other.notifications == notifications &&
+      other.fullScreen == fullScreen;
+
+  @override
+  int get hashCode => Object.hash(microphone, notifications, fullScreen);
+
+  @override
+  String toString() =>
+      'GraineCallPermissions(microphone: ${microphone.wire}, notifications: ${notifications.wire}, fullScreen: ${fullScreen.wire})';
+}
+
+/// Something the app's setup still lacks for calls: a stable [code] and a
+/// [message] with the exact fix. Calls still work where they can.
+class GraineCallSetupProblem {
+  const GraineCallSetupProblem(this.code, this.message);
+
+  /// Stable, the same on every SDK: `microphone_usage_missing`,
+  /// `background_audio_missing`, `background_voip_missing`,
+  /// `push_entitlement_missing`, `voip_pushes_not_enabled`, `no_voip_token`
+  /// (iOS); `manifest_entry_missing`, `no_push_token`,
+  /// `notifications_not_allowed`, `full_screen_not_allowed` (Android);
+  /// `microphone_blocked`, `hosted_ringing_off` (both).
+  final String code;
+
+  /// What is missing and how to fix it, for the developer.
+  final String message;
+
+  @override
+  bool operator ==(Object other) => other is GraineCallSetupProblem && other.code == code && other.message == message;
+
+  @override
+  int get hashCode => Object.hash(code, message);
+
+  @override
+  String toString() => 'GraineCallSetupProblem($code: $message)';
+}
+
 /// How native calls ring and what they show. Passed to [GraineCalls.configure].
 class GraineCallsOptions {
   const GraineCallsOptions({
@@ -394,6 +512,11 @@ class GraineCallsOptions {
 /// One call at a time. A native call ends any call the WebView engine holds,
 /// and [GraineVoice.start] waits until it is over. Listen to it as a
 /// [ValueListenable] of [GraineCallSnapshot] to draw your own call screen.
+///
+/// PERMISSIONS AND SETUP: [requestCallPermissions] asks when the app chooses
+/// (never on its own at launch), [callPermissions] reads them,
+/// [openCallSettings] opens Settings, and [callSetupProblems] says what the
+/// app's setup still lacks, with the fix.
 ///
 /// SEVERAL AGENTS: the engine is the app's, one for every agent. The agents
 /// the app configured under a name of their own ([GraineInApp.init]) reach
@@ -505,6 +628,110 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     // device Graine rings for them.
     final g = _attached ?? GraineInApp.maybeInstance;
     if (g != null) unawaited(_sendIdentity(g));
+    if (kDebugMode) _scheduleSetupWarnings();
+  }
+
+  // ── permissions and setup ───────────────────────────────────────────────
+
+  /// The call permissions as the phone holds them now: the microphone, and on
+  /// Android the ring's notifications (13+ asks) and the full-screen ring
+  /// (14+, Settings only); on iOS those two are `notNeeded` — CallKit rings.
+  /// Read again when the app returns to the foreground: the customer may have
+  /// changed Settings. Readable before [configure].
+  Future<GraineCallPermissions> callPermissions() async {
+    if (!isSupported) return _nothingNeeded;
+    return GraineCallPermissions.fromMap(await _invokeMap('callPermissions'));
+  }
+
+  /// Ask for the call permissions the system's dialog can still ask for — the
+  /// microphone, and notifications on Android 13+ — at a moment the app
+  /// chooses (onboarding, a "Call me" screen). The SDK never asks on its own
+  /// at launch; a call that starts without the microphone still asks then.
+  /// Returns the permissions as they stand after. The full-screen ring has
+  /// no dialog: [openCallSettings] opens its page.
+  Future<GraineCallPermissions> requestCallPermissions() async {
+    if (!isSupported) return _nothingNeeded;
+    return GraineCallPermissions.fromMap(await _invokeMap('requestCallPermissions'));
+  }
+
+  /// Open the Settings page that changes [item] — on Android the full-screen
+  /// ring's own page (14+) or the app's notification settings; otherwise the
+  /// app's page, where the microphone is. True when a page opened.
+  Future<bool> openCallSettings(GraineCallPermission item) async {
+    if (!isSupported) return false;
+    try {
+      return await _channel.invokeMethod<bool>('openCallSettings', item.wire) ?? false;
+    } on MissingPluginException {
+      debugPrint('[Graine] call permissions are not available in this build (rebuild the app).');
+      return false;
+    }
+  }
+
+  /// What the app's setup still lacks for calls, read now — each a stable
+  /// code and a sentence with the exact fix. iOS: an Info.plist entry
+  /// (`NSMicrophoneUsageDescription`, the `audio` and `voip` background modes
+  /// — a plugin cannot add them, so the check names them), the push
+  /// entitlement, `enableVoIPPushes` never called or no VoIP token. Android: a
+  /// manifest entry, no push token ([registerPushToken]), notifications or
+  /// the full-screen ring not allowed. Both: the microphone blocked, Graine
+  /// not ringing this phone. Empty when nothing is missing, and before
+  /// [configure]. In a debug build each one is also printed once.
+  Future<List<GraineCallSetupProblem>> callSetupProblems() async {
+    if (!isSupported) return const <GraineCallSetupProblem>[];
+    final List<Object?>? raw;
+    try {
+      raw = await _channel.invokeListMethod<Object?>('callSetupProblems');
+    } on MissingPluginException {
+      return const <GraineCallSetupProblem>[];
+    }
+    final out = <GraineCallSetupProblem>[];
+    for (final p in raw ?? const <Object?>[]) {
+      if (p is! Map) continue;
+      final code = _string(p['code']);
+      if (code == null || code.isEmpty) continue;
+      out.add(GraineCallSetupProblem(code, _string(p['message']) ?? ''));
+    }
+    return out;
+  }
+
+  static const GraineCallPermissions _nothingNeeded = GraineCallPermissions(
+    microphone: GraineCallPermissionStatus.notNeeded,
+    notifications: GraineCallPermissionStatus.notNeeded,
+    fullScreen: GraineCallPermissionStatus.notNeeded,
+  );
+
+  /// A map from the engine; null — every permission then reads `denied` — from a build without the method.
+  Future<Map<Object?, Object?>?> _invokeMap(String method) async {
+    try {
+      return await _channel.invokeMapMethod<Object?, Object?>(method);
+    } on MissingPluginException {
+      debugPrint('[Graine] call permissions are not available in this build (rebuild the app).');
+      return null;
+    }
+  }
+
+  // In a debug build, the setup problems in the console `flutter run` shows:
+  // the native SDK logs them to Xcode's console and logcat, which a Flutter
+  // developer rarely watches. Once each, now and once the push registration
+  // has had its time.
+  final Set<String> _warned = <String>{};
+  Timer? _setupTimer;
+  static const Duration _setupSettle = Duration(seconds: 16);
+
+  void _scheduleSetupWarnings() {
+    if (_setupTimer != null) return;
+    unawaited(_warnSetupProblems());
+    _setupTimer = Timer(_setupSettle, () => unawaited(_warnSetupProblems()));
+  }
+
+  Future<void> _warnSetupProblems() async {
+    try {
+      for (final p in await callSetupProblems()) {
+        if (_warned.add(p.code)) debugPrint('[Graine] Calls setup (${p.code}): ${p.message}');
+      }
+    } catch (_) {
+      // The check never stands in the way of a call.
+    }
   }
 
   /// HOSTED RINGING ON ANDROID: the token your Firebase messaging hands the
@@ -926,6 +1153,9 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     _unhold = null;
     _held = null;
     _calling = null;
+    _setupTimer?.cancel();
+    _setupTimer = null;
+    _warned.clear();
   }
 }
 

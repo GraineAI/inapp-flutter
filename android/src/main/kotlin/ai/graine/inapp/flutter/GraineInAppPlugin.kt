@@ -117,6 +117,11 @@ class GraineInAppPlugin :
                     GraineCallsHost.onNewToken(ctx, token)
                     result.success(null)
                 }
+                "callPermissions" -> result.success(GraineCallsHost.callPermissions(ctx))
+                // Asked from the SDK's own transparent screen over this activity: no result to forward.
+                "requestCallPermissions" -> GraineCallsHost.requestCallPermissions(ctx, activity?.activity) { result.success(it) }
+                "openCallSettings" -> result.success(GraineCallsHost.openCallSettings(ctx, activity?.activity, call.arguments))
+                "callSetupProblems" -> result.success(GraineCallsHost.callSetupProblems())
                 "setVariables" -> done(result) { GraineCallsHost.setVariables(call.arguments as? Map<*, *>) }
                 "setScreen" -> done(result) { GraineCallsHost.setScreen(call.arguments as? Map<*, *>) }
                 // The agent's actions come to the engine that lists them — this one's sink.
