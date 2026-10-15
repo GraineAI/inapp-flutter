@@ -1,10 +1,10 @@
 // The Android side of the graine_inapp plugin: its calls channels
 // (src/main/kotlin/ai/graine/inapp/flutter) compiled together with Graine's
 // Android SDK, which the package carries in src/main/kotlin/ai/graine/inapp
-// with its manifest (the call screen, the microphone service, the receiver and
-// their permissions merge into the app from there).
+// with its manifest (the call screen, the microphone service, the receiver, the
+// Firebase messaging service and their permissions merge into the app from there).
 group = "ai.graine.inapp.flutter"
-version = "0.10.0"
+version = "0.10.1"
 
 buildscript {
     repositories {
@@ -83,6 +83,12 @@ android {
 }
 
 dependencies {
+    // Calls Graine rings: the SDK's own messaging service (GraineMessagingService, carried with the
+    // engine and declared in its manifest) is compiled against Firebase Cloud Messaging — the version
+    // the Android SDK compiles it against, exactly — and needs it only at run time, from the app:
+    // com.google.firebase:firebase-messaging in android/app/build.gradle(.kts), or firebase_messaging.
+    // An app without Firebase never starts the service and loads nothing of it.
+    compileOnly("com.google.firebase:firebase-messaging:24.1.0")
     if (graineWebRtc) {
         // A prebuilt build of Google's libwebrtc whose classes live in their own package, so it never
         // collides with another copy of WebRTC in the app. Pinned exactly as the Android SDK pins it.

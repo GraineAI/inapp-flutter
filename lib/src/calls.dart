@@ -672,8 +672,10 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   /// (`NSMicrophoneUsageDescription`, the `audio` and `voip` background modes
   /// — a plugin cannot add them, so the check names them), the push
   /// entitlement, `enableVoIPPushes` never called or no VoIP token. Android: a
-  /// manifest entry, no push token ([registerPushToken]), notifications or
-  /// the full-screen ring not allowed. Both: the microphone blocked, Graine
+  /// manifest entry, no push token (Firebase missing or not set up in the app,
+  /// or [registerPushToken] never called by an app whose own messaging service
+  /// receives the pushes), notifications or the full-screen ring not allowed.
+  /// Both: the microphone blocked, Graine
   /// not ringing this phone. Empty when nothing is missing, and before
   /// [configure]. In a debug build each one is also printed once.
   Future<List<GraineCallSetupProblem>> callSetupProblems() async {
@@ -734,12 +736,15 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     }
   }
 
-  /// HOSTED RINGING ON ANDROID: the token your Firebase messaging hands the
-  /// app — call it from `FirebaseMessaging.instance.getToken()` and
-  /// `onTokenRefresh`. The SDK registers this device with Graine (when the
-  /// workspace has Graine ring its users) together with who is signed in, and
-  /// again whenever they change; Graine's calls then ring through
-  /// [handlePush]. iOS needs nothing: its VoIP token is registered natively.
+  /// HOSTED RINGING ON ANDROID, for an app whose own Firebase messaging
+  /// service receives the pushes (`firebase_messaging` brings one): the token
+  /// it hands the app — from `onTokenRefresh`. With Firebase Cloud Messaging
+  /// in the app the SDK reads the token itself at start, and without a
+  /// messaging service of the app's own the SDK's receives every new one, so
+  /// most apps never call this. The SDK registers this device with Graine
+  /// (when the workspace has Graine ring its users) together with who is
+  /// signed in, and again whenever they change. iOS needs nothing: its VoIP
+  /// token is registered natively.
   Future<void> registerPushToken(String token) async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
     final t = token.trim();
@@ -760,9 +765,12 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     return () => _tokenWatchers.remove(onToken);
   }
 
-  /// Android: a push's data, from your Firebase message handlers — foreground
-  /// and background. A Graine call rings with a call notification, even when
-  /// the app was not running. True when the push was a call (ringing, busy or
+  /// Android, for an app whose own Firebase messaging service receives the
+  /// pushes (`firebase_messaging` brings one): a push's data, from its
+  /// message handlers — foreground and background. Without one, the SDK's
+  /// own messaging service receives Graine's calls natively and this is not
+  /// needed. A Graine call rings with a call notification, even when the app
+  /// was not running. True when the push was a call (ringing, busy or
   /// malformed) and the app should do nothing more with it. iOS: false — VoIP
   /// pushes arrive natively.
   Future<bool> handlePush(Map<String, Object?> data) async {

@@ -4,7 +4,7 @@ description: >-
   An AI agent inside your Flutter app: it sees the screen, acts in the app,
   shows components, talks, and takes calls with CallKit on iOS and a call
   screen on Android.
-version: 0.10.0
+version: 0.10.1
 homepage: https://www.graine.ai
 documentation: https://www.graine.ai/docs/in-app/flutter
 repository: https://github.com/GraineAI/inapp-flutter

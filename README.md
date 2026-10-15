@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.10.0
+  graine_inapp: ^0.10.1
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -487,17 +487,8 @@ screen on Android — and the call goes on with the screen off. The audio runs
 natively, with the platform's echo canceller.
 
 ```dart
-@pragma('vm:entry-point')
-Future<void> onBackgroundPush(RemoteMessage message) async {
-  await GraineCalls.instance.handlePush(message.data);   // rings, even when the app was closed
-}
-
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
-  FirebaseMessaging.onBackgroundMessage(onBackgroundPush);
-  FirebaseMessaging.onMessage.listen((m) => GraineCalls.instance.handlePush(m.data));
-
   GraineInApp.init(const GraineConfig(baseUrl: 'https://www.graine.ai', publishableKey: 'pk_live_…'));
   final calls = GraineCalls.instance;
   await calls.configure(const GraineCallsOptions(publishableKey: 'pk_live_…', displayName: 'Acme Assistant'));
@@ -514,18 +505,25 @@ await GraineCalls.instance.startCall(reason: 'support');
 - **iOS** — Signing & Capabilities: Push Notifications, and Background Modes →
   *Audio, AirPlay, and Picture in Picture* and *Voice over IP*. A real iPhone:
   CallKit and VoIP pushes do not run in the simulator.
-- **Android** — nothing to add: the plugin's manifest declares the call screen,
-  the microphone service and their permissions.
+- **Android** — nothing to add to the manifest: the plugin's declares the call
+  screen, the microphone service, a Firebase messaging service and their
+  permissions. For calls that ring, add Firebase to the Android app —
+  `google-services.json` in `android/app`, the Google services Gradle plugin and
+  `com.google.firebase:firebase-messaging` in `android/app/build.gradle.kts` —
+  and the SDK registers for pushes itself, natively, with no Dart.
+- **Already use `firebase_messaging`?** Its messaging service outranks the SDK's
+  and receives every message: hand Graine's pushes to
+  `GraineCalls.instance.handlePush(message.data)` from `onBackgroundMessage` and
+  `onMessage`, and refreshed tokens to `registerPushToken` (`onTokenRefresh`).
 - **Your call screen** — `callScreen: GraineCallScreen.sdk` (the default) shows
   the SDK's; with `GraineCallScreen.app`, draw your own from
   `GraineCalls.instance` (a `ValueListenable<GraineCallSnapshot>`), in the
   design's call colours (`GraineInApp.instance.tokens?.call`).
 - **Graine rings your users** — when your workspace has uploaded its push
   credentials (Workspace settings → In-app calling), Graine itself rings the
-  calls the agent or the user booked: on Android hand the SDK your FCM token
-  (`GraineCalls.instance.registerPushToken(token)`, from `getToken()` and
-  `onTokenRefresh`) and keep forwarding pushes to `handlePush`; on iOS
-  `enableVoIPPushes` is all it takes. The SDK tells Graine what became of each
+  calls the agent or the user booked: on Android, Firebase in the app is all it
+  takes (the SDK registers the device itself); on iOS `enableVoIPPushes` is all
+  it takes. The SDK tells Graine what became of each
   ring, and who is signed in reaches the call as it does the chat.
 
 ### What the SDK does, what your app adds
@@ -541,7 +539,8 @@ in a debug build).
 **Your app adds:** on iOS the capabilities above and, in `ios/Runner/Info.plist`,
 `NSMicrophoneUsageDescription` and `UIBackgroundModes` `audio` and `voip` — a
 plugin cannot edit Info.plist, so the setup check names whichever is missing;
-on Android, Firebase messaging and `registerPushToken`; and one call to ask for
+on Android, Firebase Cloud Messaging in the app (no messaging service of your
+own); and one call to ask for
 the permissions at a moment you choose (onboarding, a "Call me" screen). The
 SDK never asks on its own at launch.
 
@@ -571,8 +570,10 @@ for (final p in await GraineCalls.instance.callSetupProblems()) {
 iOS: `microphone_usage_missing`, `background_audio_missing`,
 `background_voip_missing`, `push_entitlement_missing`, `voip_pushes_not_enabled`
 (no `enableVoIPPushes` 15 seconds after `configure`), `no_voip_token`. Android:
-`manifest_entry_missing`, `no_push_token` (no `registerPushToken` 15 seconds
-after `configure`), `notifications_not_allowed`, `full_screen_not_allowed`.
+`manifest_entry_missing`, `no_push_token` (no push token 15 seconds after
+`configure`: Firebase missing or not set up in the Android app, or — with
+`firebase_messaging` — no `registerPushToken`), `notifications_not_allowed`,
+`full_screen_not_allowed`.
 Both: `microphone_blocked`, `hosted_ringing_off` (Graine can't ring this phone:
 no push credentials uploaded). A problem is never an exception: calls still
 work where they can.
