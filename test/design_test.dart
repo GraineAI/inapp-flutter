@@ -67,6 +67,24 @@ class FakeCall extends ChangeNotifier implements GraineCallState {
   void retry() {}
 }
 
+/// A call with a captions switch (CC), as [GraineVoice] has one.
+class SwitchedCall extends FakeCall implements GraineCaptionsSwitch {
+  @override
+  bool captionsOn = true;
+
+  @override
+  void setCaptionsOn(bool on) {
+    captionsOn = on;
+    notifyListeners();
+  }
+
+  @override
+  void clearCaptions() {
+    captions = const <Caption>[];
+    notifyListeners();
+  }
+}
+
 /// A screen: 800x600, the device light or dark, reduced motion on or off.
 Widget host(Widget child, {Brightness brightness = Brightness.light, bool still = false}) => MediaQuery(
       data: MediaQueryData(size: const Size(800, 600), platformBrightness: brightness, disableAnimations: still),
@@ -183,6 +201,25 @@ void main() {
         all.firstWhere((Map<String, Object?> c) => (c['config']! as Map<String, Object?>).length == 1 &&
             (c['config']! as Map<String, Object?>)['preset'] == preset);
     ResolvedDesign preset(String id) => ResolvedDesign.fromJson(caseOf(id)['design'])!;
+
+    testWidgets("the call's captions switch hides the caption, and turning it back on shows the line being said",
+        (WidgetTester tester) async {
+      final call = SwitchedCall()
+        ..connected = true
+        ..captions = const <Caption>[Caption(Role.agent, 'Hi, how can I help?')];
+      await tester.pumpWidget(host(GraineAgentBar(call: call, showComponents: false)));
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byKey(GraineAgentBar.captionKey), findsOneWidget, reason: 'on by default');
+      call.setCaptionsOn(false);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byKey(GraineAgentBar.captionKey), findsNothing, reason: 'CC off');
+      call.setCaptionsOn(true);
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byKey(GraineAgentBar.captionKey), findsOneWidget);
+      call.clearCaptions();
+      await tester.pump(const Duration(seconds: 1));
+      expect(find.byKey(GraineAgentBar.captionKey), findsNothing, reason: 'nothing said since the clear');
+    });
 
     testWidgets("no design: the colours, corners and depth it always had, on the contract's elements",
         (WidgetTester tester) async {

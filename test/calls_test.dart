@@ -81,6 +81,42 @@ void main() {
     expect((argsOf('configure').single! as Map<Object?, Object?>)['debug'], isTrue);
   });
 
+  test('callTransport reaches the engine by its word, and only when the app chose one', () async {
+    await GraineCalls.instance.configure(const GraineCallsOptions(
+        publishableKey: 'pk_test', displayName: 'Acme', callTransport: GraineCallTransport.webrtc));
+    expect((argsOf('configure').last! as Map<Object?, Object?>)['callTransport'], 'webrtc');
+    await GraineCalls.instance.configure(const GraineCallsOptions(
+        publishableKey: 'pk_test', displayName: 'Acme', callTransport: GraineCallTransport.websocket));
+    expect((argsOf('configure').last! as Map<Object?, Object?>)['callTransport'], 'websocket');
+    await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+    expect((argsOf('configure').last! as Map<Object?, Object?>).containsKey('callTransport'), isFalse,
+        reason: "auto is the engine's own default: an app that never chose sends what it always sent");
+  });
+
+  test("the snapshot says what the call's audio runs on, and why it fell back", () async {
+    await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+    expect(GraineCalls.instance.value.transport, isNull, reason: 'no call, no transport');
+    emit('state', <String, Object?>{'state': 'connecting', 'callId': 'c1', 'transport': 'webrtc'});
+    await pumpEventQueue();
+    expect(GraineCalls.instance.value.transport, GraineCallTransport.webrtc);
+    expect(GraineCalls.instance.value.transportFallbackReason, isNull);
+    emit('state', <String, Object?>{
+      'state': 'active',
+      'callId': 'c1',
+      'transport': 'websocket',
+      'transportFallbackReason': 'no_answer',
+    });
+    await pumpEventQueue();
+    expect(GraineCalls.instance.value.transport, GraineCallTransport.websocket);
+    expect(GraineCalls.instance.value.transportFallbackReason, 'no_answer');
+    emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'transport': 'auto'});
+    await pumpEventQueue();
+    expect(GraineCalls.instance.value.transport, isNull, reason: 'a call runs on webrtc or websocket, never on auto');
+    expect(GraineCallSnapshot.fromMap(const <String, Object?>{'state': 'active', 'transport': 'webrtc'}),
+        isNot(GraineCallSnapshot.fromMap(const <String, Object?>{'state': 'active', 'transport': 'websocket'})),
+        reason: 'a change of road is a change of snapshot');
+  });
+
   test("the engine's state reaches the call screen, filled in", () async {
     await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
     final seen = <GraineNativeCallStatus>[];

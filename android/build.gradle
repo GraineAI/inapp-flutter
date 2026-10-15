@@ -4,7 +4,7 @@
 // with its manifest (the call screen, the microphone service, the receiver and
 // their permissions merge into the app from there).
 group = "ai.graine.inapp.flutter"
-version = "0.8.0"
+version = "0.9.0"
 
 buildscript {
     repositories {
@@ -27,6 +27,22 @@ rootProject.allprojects {
 }
 
 apply plugin: "com.android.library"
+
+/*
+ * WEBRTC FOR THE CALLS, OPT-IN (README → Calls like WhatsApp → WebRTC calls):
+ * `graineWebRtc=true` in the app's android/gradle.properties, or GRAINE_WEBRTC=1
+ * in the build's environment. On, the SDK's WebRTC module — carried in src/rtc
+ * with the engine — is compiled into this plugin with its manifest and R8 rules,
+ * and the WebRTC library is a dependency. Off, none of it is compiled or downloaded.
+ */
+def graineWebRtc = {
+    def flag = project.findProperty("graineWebRtc") ?: providers.environmentVariable("GRAINE_WEBRTC").getOrNull()
+    return flag != null && ["1", "true", "yes", "on"].contains(flag.toString().trim().toLowerCase())
+}()
+if (graineWebRtc && !file("src/rtc").isDirectory()) {
+    throw new GradleException("graineWebRtc is on, but this copy of graine_inapp has no android/src/rtc")
+}
+
 // Kotlin is built into the Android Gradle plugin from 9.0 — unless the app
 // turns it off (android.builtInKotlin=false, which Flutter's own app template
 // sets while plugins migrate). Wherever it is not built in, this plugin's
@@ -45,6 +61,8 @@ android {
     defaultConfig {
         minSdk = 24
         consumerProguardFiles("consumer-rules.pro")
+        // The WebRTC module's own: its entry class and the library's classes, which its native code calls by name.
+        if (graineWebRtc) consumerProguardFiles("src/rtc/consumer-rules.pro")
     }
 
     compileOptions {
@@ -54,6 +72,21 @@ android {
 
     sourceSets {
         main.java.srcDirs += "src/main/kotlin"
+        if (graineWebRtc) main.java.srcDirs += "src/rtc/kotlin"
+    }
+
+    if (graineWebRtc) {
+        // What the WebRTC module adds to the app's manifest (it watches the phone's networks), merged
+        // into every build of this plugin: a library has one main manifest, and each build type may add one.
+        buildTypes.configureEach { type -> android.sourceSets.maybeCreate(type.name).manifest.srcFile("src/rtc/AndroidManifest.xml") }
+    }
+}
+
+dependencies {
+    if (graineWebRtc) {
+        // A prebuilt build of Google's libwebrtc whose classes live in their own package, so it never
+        // collides with another copy of WebRTC in the app. Pinned exactly as the Android SDK pins it.
+        implementation("io.github.webrtc-sdk:android-prefixed-stripped:150.7871.01")
     }
 }
 

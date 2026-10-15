@@ -732,19 +732,12 @@ class GraineInApp with WidgetsBindingObserver {
     }
     await _sessionOrThrow();
     final rules = schedulingRules;
-    if (!rules.usersCanBook) {
-      throw const GraineException(
-          'This agent does not take bookings from the app. Turn on "Users may book" under Calls & scheduling.',
-          code: GraineErrorCode.schedulingOff);
-    }
+    // Refused in the booking sheet's words (Booking.errorLine), the same on every SDK.
+    GraineException refused(GraineErrorCode code) => GraineException(Booking.errorLine(code, rules), code: code);
+    if (!rules.usersCanBook) throw refused(GraineErrorCode.schedulingOff);
     final now = DateTime.fromMillisecondsSinceEpoch(_clock());
-    if (at.isBefore(rules.earliest(now))) {
-      throw GraineException('Book a call at least ${rules.minLeadMinutes} minutes from now.',
-          code: GraineErrorCode.tooSoon);
-    }
-    if (at.isAfter(rules.latest(now))) {
-      throw GraineException('Book a call at most ${rules.maxDaysAhead} days ahead.', code: GraineErrorCode.tooFar);
-    }
+    if (at.isBefore(rules.earliest(now))) throw refused(GraineErrorCode.tooSoon);
+    if (at.isAfter(rules.latest(now))) throw refused(GraineErrorCode.tooFar);
     final data = await _embed(_Routes.schedule, <String, Object?>{
       'at': ScheduledCalls.atWire(at),
       if (why != null && why.isNotEmpty) 'reason': why,

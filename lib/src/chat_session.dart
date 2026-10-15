@@ -108,6 +108,10 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   bool _wanted = false;
   bool _connected = false;
   bool _failed = false;
+
+  /// A drop's retries are under way: set when one is scheduled, cleared when
+  /// the chat connects, gives up or is hung up.
+  bool _remaking = false;
   String? _error;
   Timer? _ping;
   Timer? _retry;
@@ -151,6 +155,12 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
 
   @override
   bool get agentTyping => _connected && _transcript.agentTyping;
+
+  /// The chat dropped — or a try to open it failed — while the user is in
+  /// it, and it is being made again: from then until it connects, gives up
+  /// ([failed]) or is closed. [connecting] is true too. Say "Reconnecting…",
+  /// not "Offline", while it is.
+  bool get reconnecting => _remaking && connecting;
 
   /// Every reconnect was spent: the chat stays offline until the customer
   /// sends something, or [open] is called again.
@@ -265,6 +275,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _hangUp();
     _ladder.reset();
     _failed = false;
+    _remaking = false;
     notifyListeners();
   }
 
@@ -330,6 +341,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       _generation++;
       _cancelRetry();
       _hangUp();
+      _remaking = false;
       notifyListeners();
     }
     try {
@@ -403,6 +415,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       _connected = true;
       _error = null;
       _failed = false;
+      _remaking = false;
       _ladder.reset();
       // A new conversation: the last one's unanswered component must not come back over it.
       if (_graine._componentsFromChat) _graine.components.reset();
@@ -485,11 +498,13 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     final delay = _ladder.next();
     if (delay == null) {
       _failed = true;
+      _remaking = false;
       _error ??= 'The chat could not connect.';
       // What the user typed is kept, marked not sent; the next try sends it.
       _transcript.failPending();
       return;
     }
+    _remaking = true;
     _retry = Timer(Duration(milliseconds: delay), () {
       _retry = null;
       _ensureConnected();
@@ -583,6 +598,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _upcomingAt = null;
     _ladder.reset();
     _failed = false;
+    _remaking = false;
     _wanted = wanted;
     _ensureConnected();
     notifyListeners();
@@ -607,6 +623,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       _cancelRetry();
       _hangUp();
       _ladder.reset();
+      _remaking = false;
       if (!_disposed) notifyListeners();
     });
   }

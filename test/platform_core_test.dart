@@ -488,8 +488,14 @@ void main() {
       final limits = t['limits']! as Map<String, Object?>;
       expect(<Object?>[Protocol.ticketMaxKeys, Protocol.ticketMaxKeyLength, Protocol.ticketMaxValueLength, Protocol.ticketMaxBytes],
           <Object?>[limits['keys'], limits['keyLength'], limits['valueLength'], limits['totalBytes']]);
-      for (final c in (t['cases']! as List<Object?>).cast<Map<String, Object?>>()) {
-        expect(Protocol.ticketMetadata(c['vars']! as Map<String, Object?>), c['expect'], reason: '${c['name']}');
+      final cases = (t['cases']! as List<Object?>).cast<Map<String, Object?>>();
+      expect(cases, hasLength(8));
+      for (final c in cases) {
+        final got = Protocol.ticketMetadata(c['vars']! as Map<String, Object?>);
+        expect(got, c['expect'], reason: '${c['name']}');
+        // And in the same order: who_called and call_reason ride first.
+        final want = c['expect'] as Map<String, Object?>?;
+        if (want != null) expect(got!.keys.toList(), want.keys.toList(), reason: '${c['name']}: keys, in order');
       }
     });
 

@@ -441,8 +441,14 @@ void main() {
       final g = makeApp(tester, server);
       Matcher refused(GraineErrorCode code) =>
           throwsA(isA<GraineException>().having((GraineException e) => e.code, 'code', code));
-      await expectLater(g.scheduleCall(at: fromNow(tester, minutes: 4)), refused(GraineErrorCode.tooSoon));
-      await expectLater(g.scheduleCall(at: fromNow(tester, days: 14, minutes: 1)), refused(GraineErrorCode.tooFar));
+      // In the booking sheet's words, as every SDK says them.
+      Matcher says(GraineErrorCode code, String line) => throwsA(isA<GraineException>()
+          .having((GraineException e) => e.code, 'code', code)
+          .having((GraineException e) => e.message, 'message', line));
+      await expectLater(
+          g.scheduleCall(at: fromNow(tester, minutes: 4)), says(GraineErrorCode.tooSoon, 'Pick a time at least 5 minutes from now'));
+      await expectLater(g.scheduleCall(at: fromNow(tester, days: 14, minutes: 1)),
+          says(GraineErrorCode.tooFar, 'Pick a time within 14 days'));
       await expectLater(g.scheduleCall(at: fromNow(tester, hours: 1), reason: 'x' * 121), refused(GraineErrorCode.invalidRequest));
       expect(g.schedulingRules.earliest(DateTime.utc(2026, 10, 13, 9)), DateTime.utc(2026, 10, 13, 9, 5));
       expect(server.bodies('/api/embed/calls/schedule'), isEmpty, reason: 'nothing asked that would be refused');
@@ -450,7 +456,8 @@ void main() {
 
       final off = Server(session: sessionBody(usersCanBook: false));
       final h = makeApp(tester, off);
-      await expectLater(h.scheduleCall(at: fromNow(tester, hours: 3)), refused(GraineErrorCode.schedulingOff));
+      await expectLater(h.scheduleCall(at: fromNow(tester, hours: 3)),
+          says(GraineErrorCode.schedulingOff, "Booking a call isn't available right now"));
       expect(off.bodies('/api/embed/calls/schedule'), isEmpty);
       await finish(tester, h);
 
@@ -645,15 +652,19 @@ void main() {
       final g = makeApp(tester, Server(), connector: c);
       final first = await connected(tester, g, c);
       first.say(<String, Object?>{'type': 'text', 'data': 'Hello'});
+      expect(g.chat.reconnecting, isFalse);
       first.drop();
       await tester.pump();
       expect(g.chat.connected, isFalse);
       expect(g.chat.connecting, isTrue, reason: 'a reconnect is on its way');
+      expect(g.chat.reconnecting, isTrue, reason: '"Reconnecting…", not "Offline"');
+      expect(g.chat.failed, isFalse);
       expect(g.chat.messages.single.live, isFalse, reason: 'nothing more of that turn is coming');
       await tester.pump(const Duration(milliseconds: 1300));
       await tester.pump();
       expect(c.sockets, hasLength(2));
       expect(g.chat.connected, isTrue);
+      expect(g.chat.reconnecting, isFalse, reason: 'back');
 
       g.chat.close();
       expect(c.last.types.last, 'stop');
@@ -663,6 +674,48 @@ void main() {
       expect(g.chat.connected, isFalse);
       await tester.pump(const Duration(seconds: 30));
       expect(c.sockets, hasLength(2), reason: 'a chat the customer left never reconnects');
+      await finish(tester, g);
+    });
+
+    testWidgets('every retry spent: failed, no longer reconnecting; a message asks again as a fresh connect',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c);
+      final first = await connected(tester, g, c);
+      c.fail = true;
+      first.drop();
+      await tester.pump();
+      expect(g.chat.reconnecting, isTrue);
+      // The whole ladder (1, 2, 4, 8, 15, 15 s, jittered), every try refused.
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(seconds: 20));
+        await tester.pump();
+      }
+      expect(g.chat.failed, isTrue);
+      expect(g.chat.reconnecting, isFalse, reason: 'given up is not reconnecting');
+      expect(g.chat.connecting, isFalse);
+
+      c.fail = false;
+      g.chat.send('Still there?');
+      expect(g.chat.connecting, isTrue);
+      expect(g.chat.reconnecting, isFalse, reason: 'asked again after giving up: a fresh connect');
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.connected, isTrue);
+      await finish(tester, g);
+    });
+
+    testWidgets('a first connect that fails is retried as a reconnect; leaving ends it', (WidgetTester tester) async {
+      final c = Connector()..fail = true;
+      final g = makeApp(tester, Server(), connector: c);
+      g.chat.open();
+      expect(g.chat.reconnecting, isFalse, reason: 'the first try is connecting');
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.reconnecting, isTrue);
+      g.chat.close();
+      expect(g.chat.reconnecting, isFalse);
+      expect(g.chat.connecting, isFalse);
       await finish(tester, g);
     });
 

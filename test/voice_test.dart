@@ -227,6 +227,36 @@ void main() {
     await finish(tester, g);
   });
 
+  testWidgets('the captions switch: on by default, off keeps what is said, a clear forgets it and the call goes on',
+      (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
+    expect(g.voice.captionsOn, isTrue, reason: 'an accessibility default');
+    var heard = 0;
+    void count() => heard++;
+    g.voice.addListener(count);
+    g.voice.setCaptionsOn(false);
+    expect(g.voice.captionsOn, isFalse);
+    expect(heard, 1);
+    page.say(<String, Object?>{'type': 'graine:caption', 'role': 'agent', 'text': 'It costs ₹19 lakh.', 'live': false});
+    expect(g.voice.captions.single.text, 'It costs ₹19 lakh.', reason: 'off hides the caption; what is said is kept');
+    g.voice.clearCaptions();
+    expect(g.voice.captions, isEmpty);
+    expect(g.voice.caption, isNull);
+    expect(g.voice.connected, isTrue, reason: 'the call goes on');
+    expect(page.types.where((String t) => t == 'graine:end-call'), isEmpty);
+    g.voice.setCaptionsOn(true);
+    expect(g.voice.captionsOn, isTrue);
+    g.voice.removeListener(count);
+    page.say(<String, Object?>{'type': 'graine:ended'});
+    await finish(tester, g);
+  });
+
   testWidgets('attaching loads the engine, idle, at the URL the session names', (WidgetTester tester) async {
     final g = app(tester);
     final page = FakePage();

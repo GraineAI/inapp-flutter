@@ -29,6 +29,33 @@ enum GraineCallDirection { incoming, outgoing }
 /// Who draws the call while the app is open: the SDK's call screen, or yours.
 enum GraineCallScreen { sdk, app }
 
+/// How native calls carry their audio (README → Calls like WhatsApp → WebRTC
+/// calls). Whatever is chosen, a call WebRTC cannot carry continues on the
+/// WebSocket inside the same call, and the dashboard can turn WebRTC off for
+/// an agent without an app release.
+enum GraineCallTransport {
+  /// WebRTC when the app was built with it, else the WebSocket. The default.
+  auto('auto'),
+
+  /// Always the WebSocket.
+  websocket('websocket'),
+
+  /// WebRTC whenever it can carry the call; the WebSocket when it cannot.
+  webrtc('webrtc');
+
+  const GraineCallTransport(this.wire);
+
+  /// The word the native engine reads and reports.
+  final String wire;
+
+  /// `webrtc` or `websocket` from the engine; null for anything else.
+  static GraineCallTransport? fromWire(Object? s) => switch (s) {
+        'webrtc' => webrtc,
+        'websocket' => websocket,
+        _ => null,
+      };
+}
+
 /// The line being said on a native call.
 class GraineCallCaption {
   const GraineCallCaption(this.role, this.text, {this.live = false});
@@ -63,6 +90,8 @@ class GraineCallSnapshot {
     this.connectedAt,
     this.error,
     this.agent,
+    this.transport,
+    this.transportFallbackReason,
   });
 
   /// No call.
@@ -98,6 +127,8 @@ class GraineCallSnapshot {
           connectedAt is num ? DateTime.fromMillisecondsSinceEpoch(connectedAt.toInt()) : null,
       error: _string(m['error']),
       agent: _string(m['agent']),
+      transport: GraineCallTransport.fromWire(m['transport']),
+      transportFallbackReason: _string(m['transportFallbackReason']),
     );
   }
 
@@ -137,6 +168,17 @@ class GraineCallSnapshot {
   /// push. Null with no call, and from an engine that does not say.
   final String? agent;
 
+  /// What the call's audio runs on: [GraineCallTransport.webrtc] or
+  /// [GraineCallTransport.websocket]. Null with no call, and from an engine
+  /// that predates WebRTC.
+  final GraineCallTransport? transport;
+
+  /// Why a call that tried WebRTC runs on the WebSocket instead —
+  /// `mint_failed`, `register_failed`, `no_response`, `no_answer`,
+  /// `ice_timeout`, `error`, or the dashboard's choice. Null when it did not
+  /// fall back.
+  final String? transportFallbackReason;
+
   @override
   bool operator ==(Object other) =>
       other is GraineCallSnapshot &&
@@ -151,11 +193,13 @@ class GraineCallSnapshot {
       other.caption == caption &&
       other.connectedAt == connectedAt &&
       other.error == error &&
-      other.agent == agent;
+      other.agent == agent &&
+      other.transport == transport &&
+      other.transportFallbackReason == transportFallbackReason;
 
   @override
   int get hashCode => Object.hash(status, callId, direction, reason, callerName, muted, speakerOn,
-      agentSpeaking, caption, connectedAt, error, agent);
+      agentSpeaking, caption, connectedAt, error, agent, transport, transportFallbackReason);
 }
 
 /// What became of a call (WIRE.md: ringing · answered · declined · missed ·
@@ -254,6 +298,7 @@ class GraineCallsOptions {
     this.ringTimeout = const Duration(seconds: 30),
     this.appVersion,
     this.callScreen = GraineCallScreen.sdk,
+    this.callTransport = GraineCallTransport.auto,
     this.debug = false,
     this.androidSmallIcon,
     this.iosIconTemplate,
@@ -294,6 +339,12 @@ class GraineCallsOptions {
   /// A locked iPhone always shows the system's call screen.
   final GraineCallScreen callScreen;
 
+  /// How calls carry their audio. [GraineCallTransport.auto] (the default):
+  /// WebRTC when the app was built with it (README → Calls like WhatsApp →
+  /// WebRTC calls), else the WebSocket. A call WebRTC cannot carry continues
+  /// on the WebSocket inside the same call.
+  final GraineCallTransport callTransport;
+
   /// The native SDK's debug log, in Xcode's console or logcat: how a call
   /// connected and what its audio did, for finding out why one did not. Off
   /// by default; turn it on in debug builds. Read once, when the app
@@ -317,6 +368,7 @@ class GraineCallsOptions {
         'ringTimeoutMs': ringTimeout.inMilliseconds,
         if (appVersion != null) 'appVersion': appVersion,
         'callScreen': callScreen.name,
+        if (callTransport != GraineCallTransport.auto) 'callTransport': callTransport.wire,
         'debug': debug,
         'android': <String, Object?>{if (androidSmallIcon != null) 'smallIcon': androidSmallIcon},
         'ios': <String, Object?>{

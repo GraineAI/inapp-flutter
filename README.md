@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.8.0
+  graine_inapp: ^0.9.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -151,6 +151,7 @@ implementing `GraineCallState` (`connected`, `connecting`, `ready`, `muted`,
 `quality`, `online`, `reconnecting`, `connectivity`, `captions`, `caption`,
 `agentSpeaking`, `micDenied`; `start()`, `end()`, `setMuted()`, `retry()`),
 plus `phase` (idle, connecting, reconnecting, thinking, speaking, listening),
+the CC switch (`GraineCaptionsSwitch`: `captionsOn`, `setCaptionsOn()`, `clearCaptions()`),
 `error`, and — as `GraineConnectProgress` — `connectStage` (registering,
 dialling, retrying, switching, or null outside a connect), `slowConnect`
 (after `GraineTiming.slowConnectMs`, 4 s by default, of a connect the customer
@@ -167,22 +168,22 @@ and `BrandLogo.plateLook` give the square to fit it into and its plate.
 final graine = GraineInApp.instance;
 
 graine.identify({'user_id': user.id, 'name': user.name, 'plan': user.plan});   // null on sign-out
-graine.setVariables({'cart_total': cart.total});           // merged; null under a key removes it
+graine.setVariables({'app_version': info.version});        // merged; null under a key removes it
 
 graine.setScreen(GraineScreen(
-  'kyc_pan',
-  title: 'PAN verification',
-  journey: const GraineJourney('KYC', step: 2, of: 4, next: 'Selfie check'),
+  'signup_email',
+  title: 'Your email address',
+  journey: const GraineJourney('Sign-up', step: 2, of: 4, next: 'Choose a password'),
   fields: [
-    GraineField('pan', label: 'PAN', value: pan,
-        status: error != null ? FieldStatus.invalid : (pan.isEmpty ? FieldStatus.empty : FieldStatus.filled),
+    GraineField('email', label: 'Email', value: email,
+        status: error != null ? FieldStatus.invalid : (email.isEmpty ? FieldStatus.empty : FieldStatus.filled),
         error: error),
   ],
 ));
-graine.updateField(GraineField('pan', value: pan, status: FieldStatus.filled));   // one field changed
-graine.clearScreen('kyc_pan');                // in a screen's dispose: only if it is still the one described
+graine.updateField(GraineField('email', value: email, status: FieldStatus.filled));   // one field changed
+graine.clearScreen('signup_email');           // in a screen's dispose: only if it is still the one described
 graine.track('otp_failed', {'attempt': 2});   // context, not an interruption; last ten kept
-graine.tap('apply_coupon');                   // a control you name, as "tap:apply_coupon"
+graine.tap('help_button');                    // a control you name, as "tap:help_button"
 ```
 
 Report real values: PAN, card, phone, Aadhaar and email are masked on the
@@ -199,7 +200,7 @@ a second (`GraineConfig(captureTaps: false)` to turn it off).
 
 The agent's **Memory** settings (Agent → Memory, or Embed & Widgets → Users &
 memory) name the trait that identifies a user — `user_id` unless they say
-`email`, `phone` or a custom trait such as `patient_id`. Pass it in `identify`: that one value is also sent, unmasked,
+`email`, `phone` or a custom trait such as `customer_id`. Pass it in `identify`: that one value is also sent, unmasked,
 only where Graine needs it to recognise the user, and never as a prompt
 variable. A placeholder ("guest", "null", a masked value), a boolean or a
 fraction identifies nobody, and such a conversation has no memory.
@@ -222,11 +223,11 @@ in without `identify(null)` first signs the last user out.
 ## 5. Let the agent act
 
 ```dart
-final unregister = graine.registerAction('set_tenure', (args) async {
-  final months = args['months'];
-  if (months is! int) return const ActionResult.refused('No tenure was given.');
-  await loan.setTenure(months);
-  return ActionResult.ok('Tenure set to $months months.');
+final unregister = graine.registerAction('set_reminder', (args) async {
+  final minutes = args['minutes'];
+  if (minutes is! int) return const ActionResult.refused('No time was given.');
+  await reminders.schedule(Duration(minutes: minutes));
+  return ActionResult.ok('Reminder set for $minutes minutes from now.');
 });
 ```
 
@@ -309,7 +310,7 @@ from the dashboard. While the user has calls booked, an **Upcoming calls**
 card heads the conversation: the time in their own time zone, and Cancel. Drawing your own? `chat` is a `ChangeNotifier`:
 `turns` (`GraineChatTurn`: `id`, `role`, `text`, `at`, `delivery` — sending,
 sent, failed — `proactive`, `component`), `connected`, `connecting`,
-`agentTyping`, `upcomingCalls`, `send()`, `open()`, `close()`,
+`reconnecting` (a dropped chat being made again), `failed` (it gave up), `agentTyping`, `upcomingCalls`, `send()`, `open()`, `close()`,
 `cancelUpcoming(id)`.
 
 ### Conversations continue
@@ -364,7 +365,7 @@ ask the agent to call them back — Graine rings their devices at that time:
 
 ```dart
 final rules = graine.schedulingRules;                       // GraineSchedulingRules, from the dashboard
-final call = await graine.scheduleCall(at: DateTime(2026, 10, 14, 18), reason: 'KYC follow-up');
+final call = await graine.scheduleCall(at: DateTime(2026, 10, 14, 18), reason: 'Follow-up');
 final upcoming = await graine.scheduledCalls();             // List<GraineScheduledCall>, upcoming first
 final status = await graine.cancelScheduledCall(call.id);   // GraineCallStatus.cancelled
 ```
@@ -387,7 +388,7 @@ own:
 
 ```dart
 if (graine.bookingAvailable) {                 // rung here, booking on, the user identified
-  final call = await GraineBooking.show(context, reason: 'Card replacement');
+  final call = await GraineBooking.show(context, reason: 'Help with my settings');
   if (call != null) print('Booked ${call.id} for ${call.at}');   // null: closed without booking
 }
 ```
@@ -467,7 +468,7 @@ MaterialApp(
 - **Engines:** each agent the customer can call needs its own `GraineEngine`,
   which keeps that agent's page loaded and idle, so a call starts at once
   whichever agent the screen offers. An agent you only chat with needs none.
-- **Native calls:** `GraineCalls.instance.startCall(reason: 'refund', agent: 'support')`;
+- **Native calls:** `GraineCalls.instance.startCall(reason: 'question', agent: 'support')`;
   every agent configured under a name goes to the native engine with
   `configure`. A call Graine rings for one of them rings as that agent, in its
   call screen design, and its actions run in that agent's handlers —
@@ -507,7 +508,7 @@ Future<void> main() async {
 }
 
 // A "Call support" button:
-await GraineCalls.instance.startCall(reason: 'card_blocked');
+await GraineCalls.instance.startCall(reason: 'support');
 ```
 
 - **iOS** — Signing & Capabilities: Push Notifications, and Background Modes →
@@ -529,6 +530,51 @@ await GraineCalls.instance.startCall(reason: 'card_blocked');
 
 The push your server sends and the rest of the build:
 https://www.graine.ai/docs/in-app/calling#flutter
+
+### WebRTC calls
+
+Calls carry their audio over a WebSocket unless you build with WebRTC. With
+it, they carry it over WebRTC: a jitter buffer, loss concealment and a
+connection that holds up better on mobile data. Nothing else changes — your
+code, the ring, the call screen and the outcomes stay the same.
+
+**iOS** — at the top of `ios/Podfile`:
+
+```ruby
+ENV['GRAINE_WEBRTC'] = '1'
+```
+
+**Android** — in `android/gradle.properties`:
+
+```properties
+graineWebRtc=true
+```
+
+On a build server, `GRAINE_WEBRTC=1` in the build's environment turns it on
+for both. Then rebuild: `flutter build` runs `pod install` when the Podfile
+changes — with only the environment variable, run `pod install` in `ios/` too.
+
+- **Choose** with `GraineCallsOptions(callTransport: …)`:
+  `GraineCallTransport.auto` (the default — WebRTC in a build that has it),
+  `.websocket` or `.webrtc`. The agent's **In-app call audio** setting in the
+  dashboard can switch WebRTC off for every install at once, without a release.
+- **If WebRTC cannot set up a call**, the call goes on over the WebSocket inside
+  the same ring and call screen: no second ring, no error. The snapshot says
+  which one carried it — `transport` (`GraineCallTransport.webrtc` or
+  `.websocket`) and `transportFallbackReason` (why a call that tried WebRTC is
+  on the WebSocket: `no_answer`, `ice_timeout`, …).
+- **Sound:** the agent's voice arrives at telephone bandwidth over WebRTC
+  today — steadier on a weak network, narrower than the WebSocket's on a
+  perfect one.
+- **Size:** a prebuilt WebRTC library, per phone: about 12 MB installed on an
+  iPhone, about 7.4 MB on a 64-bit Android phone. Its symbols are renamed, so it
+  never clashes with another copy of WebRTC in your app (flutter_webrtc, a
+  video-calling SDK); CocoaPods installs one version of this build, so a library
+  that pins it at another version cannot be installed beside it.
+- **Android** adds `ACCESS_NETWORK_STATE` to your manifest (a normal
+  permission: nothing is asked). The R8 rules ship with the plugin.
+- **Licences:** WebRTC is BSD 3-Clause with Google's patent grant — list it in
+  your app's open-source licences.
 
 ## Tests
 

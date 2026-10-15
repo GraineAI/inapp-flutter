@@ -72,6 +72,22 @@ abstract interface class GraineConnectProgress {
   bool get callFailed;
 }
 
+/// A CALL WITH A CAPTIONS SWITCH — beside [GraineCallState], as
+/// [GraineCallFault] is, so a host's own call state keeps compiling.
+/// [GraineVoice] implements it; the bar hides its caption while it is off.
+abstract interface class GraineCaptionsSwitch {
+  /// The CC switch: the bar draws the line being said only while it is on.
+  /// On by default — a caption nobody asked to hide is an accessibility
+  /// default. What is said is kept ([GraineCallState.captions]) either way.
+  bool get captionsOn;
+
+  /// Turn the captions on or off, for your own CC button. The call goes on.
+  void setCaptionsOn(bool on);
+
+  /// Forget what has been said ([GraineCallState.captions]) without ending the call.
+  void clearCaptions();
+}
+
 /// A CHAT WITH THE AGENT, as the bar sees it.
 ///
 /// The dashboard can offer an agent as a call, a chat, or both (Embed &
@@ -159,7 +175,8 @@ class GraineEngineSink {
 /// tap costs one registration and an INVITE.
 ///
 /// A [ChangeNotifier]: a widget that listens redraws on every change.
-class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallFault, GraineConnectProgress {
+class GraineVoice extends ChangeNotifier
+    implements GraineCallState, GraineCallFault, GraineConnectProgress, GraineCaptionsSwitch {
   GraineVoice._(this._graine)
       : _watchdog = LoadWatchdog(
           stallMs: _graine.config.timing.stallMs,
@@ -197,6 +214,7 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   ConnectStage? _connectStage;
   bool _slowConnect = false;
   bool _callFailed = false;
+  bool _captionsOn = true;
 
   @override
   bool get connected => _connected;
@@ -231,6 +249,8 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
   @override
   bool get callFailed => _callFailed;
   @override
+  bool get captionsOn => _captionsOn;
+  @override
   Map<String, Object?> get appearance => _graine.session?.appearance ?? const <String, Object?>{};
 
   /// Where the call stands in one word — idle, connecting, reconnecting,
@@ -250,6 +270,24 @@ class GraineVoice extends ChangeNotifier implements GraineCallState, GraineCallF
 
   /// Whether an engine page is attached ([GraineEngine] is mounted).
   bool get attached => _page != null;
+
+  /// Turn the captions on or off ([captionsOn]): the bar shows or hides the
+  /// line being said. The call goes on; what is said is kept either way.
+  @override
+  void setCaptionsOn(bool on) {
+    if (on == _captionsOn) return;
+    _captionsOn = on;
+    notifyListeners();
+  }
+
+  /// Forget what has been said ([captions]) without ending the call — a
+  /// new call forgets it too.
+  @override
+  void clearCaptions() {
+    if (_captions.isEmpty) return;
+    _captions = const <Caption>[];
+    notifyListeners();
+  }
 
   // ── internals ────────────────────────────────────────────────────────────
 

@@ -214,26 +214,47 @@ abstract final class Protocol {
   static const int ticketMaxValueLength = 200;
   static const int ticketMaxBytes = 1024;
 
+  /// Kept first, and dropped last: why a call is happening.
+  static const List<String> ticketFirstKeys = <String>['who_called', 'call_reason'];
+
   /// THE VARIABLES THAT RIDE A TICKET as its `metadata` (the React Native
-  /// SDK's variablesForTicket): the first 12 usable values, keys cut to 40
-  /// characters and values to 200 — and nothing at all when the whole would
-  /// pass a kilobyte, exactly as the server would drop it. Null when empty.
+  /// SDK's variablesForTicket): the first 12 usable values — `who_called` and
+  /// `call_reason` first, then the rest in order — keys cut to 40 characters
+  /// and values to 200, trimmed to fit a kilobyte: the biggest go first, one
+  /// at a time (the later on a tie), the call's own only when nothing else is
+  /// left. Null when empty.
   static Map<String, String>? ticketMetadata(Map<String, Object?>? variables) {
     if (variables == null) return null;
-    final out = <String, String>{};
-    for (final e in variables.entries) {
-      if (out.length >= ticketMaxKeys) break;
-      final v = e.value;
-      if (v == null || v is Map || v is Iterable) continue;
-      final key = _cut(e.key, ticketMaxKeyLength);
+    final entries = <MapEntry<String, String>>[];
+    void add(String k, Object? v) {
+      if (v == null || v is Map || v is Iterable) return;
+      final key = _cut(k, ticketMaxKeyLength);
       final value = _cut(v is String ? v : Js.str(v), ticketMaxValueLength);
-      if (key.isEmpty || value.isEmpty) continue;
-      out[key] = value;
+      if (key.isEmpty || value.isEmpty || entries.any((e) => e.key == key)) return;
+      entries.add(MapEntry<String, String>(key, value));
     }
-    if (out.isEmpty) return null;
-    var bytes = 2;
-    out.forEach((String k, String v) => bytes += utf8.encode(k).length + utf8.encode(v).length + 6);
-    return bytes > ticketMaxBytes ? null : out;
+
+    for (final k in ticketFirstKeys) {
+      if (variables.containsKey(k)) add(k, variables[k]);
+    }
+    for (final e in variables.entries) {
+      if (!ticketFirstKeys.contains(e.key)) add(e.key, e.value);
+    }
+    final kept = entries.take(ticketMaxKeys).toList();
+    // Bytes, not characters: a Devanagari name is three bytes a letter.
+    int size(MapEntry<String, String> e) => utf8.encode(e.key).length + utf8.encode(e.value).length + 6;
+    var bytes = kept.fold<int>(2, (n, e) => n + size(e));
+    while (kept.isNotEmpty && bytes > ticketMaxBytes) {
+      final rest = kept.any((e) => !ticketFirstKeys.contains(e.key));
+      var drop = -1;
+      for (var i = 0; i < kept.length; i++) {
+        if (rest && ticketFirstKeys.contains(kept[i].key)) continue;
+        if (drop < 0 || size(kept[i]) >= size(kept[drop])) drop = i;
+      }
+      bytes -= size(kept[drop]);
+      kept.removeAt(drop);
+    }
+    return kept.isEmpty ? null : Map<String, String>.fromEntries(kept);
   }
 
   /// `String.prototype.slice(0, n)`: UTF-16 units, as JavaScript counts them.

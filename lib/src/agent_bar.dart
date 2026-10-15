@@ -650,8 +650,14 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
     // refused, or while the agent is misconfigured.
     final micBlocked = fault != null || call.micDenied || call.connecting || (!call.ready && !failed);
     final caption = call.caption;
-    final showCaption =
-        !isChat && widget.showCaptions && call.connected && caption != null && caption.text.trim().isNotEmpty;
+    // The call's own captions switch (CC), where it has one, beside this bar's showCaptions.
+    final captionsOn = switch (call) { GraineCaptionsSwitch(:final captionsOn) => captionsOn, _ => true };
+    final showCaption = !isChat &&
+        widget.showCaptions &&
+        captionsOn &&
+        call.connected &&
+        caption != null &&
+        caption.text.trim().isNotEmpty;
     final components = widget.showComponents ? _components : null;
 
     // Where it sits: the anchor, the customer's offset, the keyboard — and
