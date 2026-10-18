@@ -1,3 +1,7 @@
+## 0.10.2
+
+- **A WebRTC call the server acknowledges but never answers is dialled again after 3 seconds.** The engine used to wait out the whole 12-second WebRTC attempt for such a call — a long *Connecting…*, then the call continued without WebRTC — because its 15-second answer ceiling could never fire inside that budget. Now, 3 s after the server's first reply with no answer, the stuck dial is cancelled and made once more on a fresh connection (what a second tap did by hand); a second stuck dial continues on the standard connection, with `transportFallbackReason` `no_answer`. Nothing to change in your app. The plugin's iOS and Android call engines both carry the fix (calls on WebRTC: the `GRAINE_WEBRTC` switch).
+
 ## 0.10.1
 
 - **On Android the SDK registers for pushes itself: no messaging service and no Dart for Graine's calls.** With Firebase Cloud Messaging in the Android app (`google-services.json`, the Google services Gradle plugin and `com.google.firebase:firebase-messaging` in `android/app/build.gradle(.kts)`), the SDK's own messaging service — carried in the plugin and merged from its manifest — rings each call push natively, even when the app was closed, and the SDK reads the push token when it starts. The plugin compiles against Firebase and never adds it: an app without Firebase builds and runs as before.
