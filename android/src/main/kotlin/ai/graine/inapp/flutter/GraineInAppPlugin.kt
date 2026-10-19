@@ -99,6 +99,8 @@ class GraineInAppPlugin :
                 "enableVoIPPushes" -> result.success(null)   // iOS only: Android rings from Firebase's messages
                 "handlePush" -> result.success(GraineCallsHost.handlePush(ctx, call.arguments as? Map<*, *>))
                 "startCall" -> result.success(GraineCallsHost.startCall(activity?.activity, call.arguments as? Map<*, *>))
+                // startCall's arguments; no activity — nothing is dialled and the microphone is not touched.
+                "prepareCall" -> done(result) { GraineCallsHost.prepareCall(call.arguments as? Map<*, *>) }
                 "answer" -> done(result) { GraineCallsHost.answer() }
                 "decline" -> done(result) { GraineCallsHost.decline() }
                 "end" -> done(result) { GraineCallsHost.end() }

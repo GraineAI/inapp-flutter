@@ -822,6 +822,38 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     }
   }
 
+  /// Get the customer's next call ready before they tap — to [agent], by the
+  /// name the app configured it under ([GraineInApp.init]), the default agent
+  /// without one — so that when they do, [startCall] connects almost at once.
+  /// Call it when the screen with your call button appears; calling it again
+  /// is cheap: while a call prepared for the same agent, customer, [reason] and
+  /// [variables] is ready, nothing more happens. A [startCall] with the same
+  /// reason and variables within four minutes uses it; any other call is
+  /// prepared at the tap, as without this.
+  ///
+  /// Nothing is dialled and no conversation starts — nothing is billed — until
+  /// [startCall], and the microphone is not touched. What was prepared is let
+  /// go when the app goes to the background, the signed-in customer changes
+  /// (or their memory choice, or the phone's time zone), after four minutes,
+  /// or when a call rings in. For calls over WebRTC; otherwise, while a call
+  /// rings or is live, or with a native build from before it, it does nothing.
+  Future<void> prepareCall(
+      {String? reason, Map<String, Object?> variables = const <String, Object?>{}, String? agent}) async {
+    if (!isSupported) return;
+    final name = agent == null ? null : GraineInApp._normaliseName(agent);
+    // An agent with the options' own key is the engine's default agent, as startCall names it.
+    final engineName = name != null && _sameAsDefault.contains(name) ? null : name;
+    try {
+      await _channel.invokeMethod<void>('prepareCall', <String, Object?>{
+        if (reason != null) 'reason': reason,
+        'variables': Protocol.toJson(variables),
+        if (engineName != null) 'agent': engineName,
+      });
+    } on MissingPluginException {
+      // A native build from before prepareCall: the tap prepares the call, as it always did.
+    }
+  }
+
   /// [startCall] placed nothing: the engine holds the attached agent's again.
   void _notCalling() {
     if (_snapshot.status.isLive) return;

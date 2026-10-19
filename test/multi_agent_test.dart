@@ -471,6 +471,11 @@ void main() {
           reason: "the engine's default agent");
       await GraineCalls.instance.startCall(reason: 'upgrade', agent: 'sales');
       expect((argsOf('startCall').last! as Map<Object?, Object?>)['agent'], 'sales');
+      // prepareCall names the agent as startCall does: the engine's default goes unnamed.
+      await GraineCalls.instance.prepareCall(reason: 'help', agent: 'support');
+      expect((argsOf('prepareCall').last! as Map<Object?, Object?>).containsKey('agent'), isFalse);
+      await GraineCalls.instance.prepareCall(reason: 'upgrade', agent: ' sales ');
+      expect((argsOf('prepareCall').last! as Map<Object?, Object?>)['agent'], 'sales');
       emit('state', <String, Object?>{'state': 'ringing', 'callId': 'h1', 'direction': 'incoming', 'agent': 'default'});
       emit('incoming', <String, Object?>{'callId': 'h1', 'agent': 'default'});
       await pumpEventQueue();

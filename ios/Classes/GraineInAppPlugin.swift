@@ -61,6 +61,10 @@ public class GraineInAppPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
             result(host.handlePush(call.arguments as? [String: Any]))
         case "startCall":
             result(host.startCall(call.arguments as? [String: Any]))
+        case "prepareCall":
+            // startCall's arguments, for the call the app expects next: made ready before the tap, nothing dialled.
+            host.prepareCall(call.arguments as? [String: Any])
+            result(nil)
         case "answer":
             host.answer()
             result(nil)

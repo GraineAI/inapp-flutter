@@ -200,6 +200,28 @@ void main() {
     expect(argsOf('end'), hasLength(1));
   });
 
+  test("prepareCall hands the engine startCall's arguments, and places nothing", () async {
+    await GraineCalls.instance.prepareCall(reason: 'support', variables: <String, Object?>{'order': 'A-1043'});
+    await GraineCalls.instance.prepareCall();
+    expect(argsOf('prepareCall'), <Object?>[
+      <String, Object?>{'reason': 'support', 'variables': <String, Object?>{'order': 'A-1043'}},
+      <String, Object?>{'variables': <String, Object?>{}},
+    ]);
+    expect(argsOf('startCall'), isEmpty);
+  });
+
+  test('a native build from before prepareCall is not an error; off Android and iOS nothing is sent', () async {
+    reply = (MethodCall c) {
+      if (c.method == 'prepareCall') throw MissingPluginException();
+      return c.method == 'snapshot' ? <String, Object?>{'state': 'idle'} : null;
+    };
+    await GraineCalls.instance.prepareCall(reason: 'support');
+    expect(argsOf('prepareCall'), hasLength(1));
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    await GraineCalls.instance.prepareCall(reason: 'support');
+    expect(argsOf('prepareCall'), hasLength(1));
+  });
+
   test('a push reaches the engine as strings, and is not a call off Android and iOS', () async {
     reply = (MethodCall c) => c.method == 'handlePush';
     expect(
