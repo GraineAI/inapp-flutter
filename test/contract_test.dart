@@ -319,6 +319,8 @@ void main() {
     test('every section is covered — a new one fails here until this suite checks it', () {
       const covered = <String>{
         'generatedBy', 'cases', 'legacy', 'glyphs', 'icons', 'ringtones', 'fontWeights', 'fontAssetVersion', 'fontOrigin',
+        // The call screen's look (DESIGN.md "Call screen" → "The look"): its numbers and its vectors.
+        'callScreen', 'callVectors',
       };
       expect(fx.keys.toSet().difference(covered), isEmpty, reason: 'a section this suite does not check');
       for (final c in cases(fx, 'cases')) {
@@ -478,6 +480,213 @@ void main() {
       expect(canon(session.design!.toJson()), canon(c['design']));
       expect(SessionConfig.fromJson(const <String, Object?>{'agentId': 'a'}).design, isNull,
           reason: 'an older server sends no design; the SDK draws from appearance');
+    });
+  });
+
+  // THE CALL SCREEN'S LOOK (DESIGN.md "Call screen" → "The look"): the
+  // numbers and the rules an app drawing its own call screen uses, every
+  // vector reproduced exactly. The SDK's own call screens are native.
+  group('sdk/contract/design.json → the call screen', () {
+    late Map<String, Object?> fx;
+    late Map<String, Object?> vectors;
+
+    setUpAll(() async {
+      fx = await contractJson('contract/design.json');
+      vectors = fx['callVectors']! as Map<String, Object?>;
+    });
+
+    List<Map<String, Object?>> vector(String name) =>
+        <Map<String, Object?>>[for (final v in vectors[name]! as List<Object?>) v! as Map<String, Object?>];
+
+    const lookKeys = <String>[
+      'preset', 'layout', 'backdrop', 'ink', 'avatarSize', 'rings', 'avatarRingColor', 'buttonStyle', 'buttonShape', 'buttonSize',
+      'buttonLabels', 'actions', 'visualizer', 'visualizerColor', 'visualizerSensitivity', 'captionStyle', 'captionPosition',
+      'captionFill', 'captionFillAlpha', 'nameSize', 'nameWeight', 'statusSize', 'statusWeight', 'states',
+    ];
+
+    test("every case's call look is read exactly, its moments' looks included", () {
+      var withStates = 0;
+      for (final c in cases(fx, 'cases')) {
+        final raw = c['design']! as Map<String, Object?>;
+        final d = ResolvedDesign.fromJson(raw)!;
+        for (final scheme in <String>['light', 'dark']) {
+          final want = (raw[scheme]! as Map<String, Object?>)['call']! as Map<String, Object?>;
+          final call = (scheme == 'light' ? d.light : d.dark).call;
+          expect(canon(call.toJson()), canon(want), reason: '${c['config']} $scheme');
+          expect(canon(call.backdrop.toJson()), canon(want['backdrop']), reason: '${c['config']} $scheme backdrop');
+          expect(call.states.keys.toSet(), (want['states']! as Map<String, Object?>).keys.toSet());
+          for (final m in ThemeCall.moments) {
+            final look = CallLook.lookFor(call, m);
+            final own = (want['states']! as Map<String, Object?>)[m];
+            expect(canon(look.toJson()), canon(own ?? call.look.toJson()), reason: '${c['config']} $scheme $m');
+          }
+          if (call.states.isNotEmpty) withStates++;
+        }
+      }
+      expect(withStates, greaterThan(0), reason: 'the contract must hold moments with looks of their own');
+    });
+
+    test('a call screen from an older server — no look — derives it exactly as the server writes a design with none', () {
+      var old = 0;
+      for (final c in cases(fx, 'cases')) {
+        final config = c['config']! as Map<String, Object?>;
+        final knobs = Js.asMap(config['call']) ?? const <String, Object?>{};
+        if (lookKeys.any(knobs.containsKey)) continue; // a design with a look of its own
+        final raw = c['design']! as Map<String, Object?>;
+        for (final scheme in <String>['light', 'dark']) {
+          final tokens = Js.asMap(raw[scheme])!;
+          final served = Js.asMap(tokens['call'])!;
+          final flatOnly = <String, Object?>{...served}..removeWhere((String k, Object? _) => lookKeys.contains(k));
+          final statusText = <String, Object?>{...Js.asMap(served['statusText'])!}
+            ..remove('outgoing')
+            ..remove('reconnecting');
+          flatOnly['statusText'] = statusText;
+          final older = ThemeTokens.fromJson(<String, Object?>{...tokens, 'call': flatOnly}, scheme: scheme)!.call;
+          expect(older.servedBackdrop, isNull);
+          final derived = <String, Object?>{
+            'preset': older.preset, 'layout': older.layout, 'backdrop': older.backdrop.toJson(), 'ink': older.ink,
+            'avatarSize': older.avatarSize, 'rings': older.rings, 'avatarRingColor': older.avatarRingColor,
+            'buttonStyle': older.buttonStyle, 'buttonShape': older.buttonShape, 'buttonSize': older.buttonSize,
+            'buttonLabels': older.buttonLabels,
+            'actions': <String, Object?>{for (final e in older.actions.entries) e.key: e.value.toJson()},
+            'visualizer': older.visualizer, 'visualizerColor': older.visualizerColor,
+            'visualizerSensitivity': older.visualizerSensitivity, 'captionStyle': older.captionStyle,
+            'captionPosition': older.captionPosition, 'captionFill': older.captionFill,
+            'captionFillAlpha': older.captionFillAlpha, 'nameSize': older.nameSize, 'nameWeight': older.nameWeight,
+            'statusSize': older.statusSize, 'statusWeight': older.statusWeight, 'states': <String, Object?>{},
+          };
+          expect(canon(derived), canon(<String, Object?>{for (final k in lookKeys) k: served[k]}), reason: '${c['config']} $scheme');
+          final st = Js.asMap(served['statusText'])!;
+          expect(older.statusText.outgoing, st['outgoing'], reason: 'a placed call says the connecting words');
+          expect(older.statusText.reconnecting, st['reconnecting']);
+          expect(older.toJson().containsKey('backdrop'), isFalse, reason: 'an older session read back is what it said');
+          old++;
+        }
+      }
+      expect(old, greaterThan(20), reason: 'the contract holds the designs saved before the look');
+    });
+
+    test('a look that is damaged falls back one token at a time; a moment or a word nobody knows is ignored or the first', () {
+      final turned = cases(fx, 'cases').firstWhere((Map<String, Object?> c) =>
+          (Js.asMap((c['config']! as Map<String, Object?>)['call'])?['layout']) == 'full-bleed');
+      final raw = Js.asMap(Js.asMap(turned['design'])!['light'])!;
+      final served = Js.asMap(raw['call'])!;
+      final call = ThemeTokens.fromJson(<String, Object?>{
+        ...raw,
+        'call': <String, Object?>{
+          ...served,
+          'layout': 'sideways',
+          'backdrop': <String, Object?>{...Js.asMap(served['backdrop'])!, 'stops': <Object?>[<String, Object?>{'color': 'nope', 'at': 0}]},
+          'buttonSize': 'big',
+          'states': <String, Object?>{...Js.asMap(served['states'])!, 'lunch': <String, Object?>{'ink': 'light'}},
+        },
+      })!.call;
+      expect(call.layout, 'classic', reason: 'a layout this build does not know is the first listed');
+      expect(canon(call.backdrop.stops.map((ThemeCallStop s) => s.toJson()).toList()),
+          canon(<Object?>[<String, Object?>{'color': served['background'], 'at': 0}, <String, Object?>{'color': served['backgroundTo'], 'at': 1}]),
+          reason: 'stops that are not colours: the flat fill');
+      expect(call.buttonSize, 64, reason: 'a size that is not a number: the flat screen');
+      expect(call.states.containsKey('lunch'), isFalse);
+      expect(call.states.keys.toSet(), Js.asMap(served['states'])!.keys.toSet());
+    });
+
+    test("the screen's numbers are the contract's", () {
+      final cs = fx['callScreen']! as Map<String, Object?>;
+      expect(canon(<String, Object?>{for (final e in CallLook.layouts.entries) e.key: e.value.toJson()}), canon(cs['layouts']));
+      expect(canon(CallLook.screen), canon(cs['screen']));
+      expect(canon(CallLook.rings), canon(cs['rings']));
+      expect(canon(CallLook.visualizer), canon(cs['visualizer']));
+      expect(canon(CallLook.motion), canon(cs['motion']));
+      expect(canon(CallLook.limits), canon(cs['limits']));
+      expect(cs['moments'], ThemeCall.moments);
+      expect(<Object?>[for (final p in cs['presets']! as List<Object?>) (p! as Map<String, Object?>)['id']], ThemeCall.presets);
+      expect(cs['recommended'], CallLook.recommended);
+    });
+
+    test('gradient lines, backdrop frames and mesh colours, exactly', () {
+      for (final v in vector('lines')) {
+        final line = CallLook.gradientLine(n(v['angle'])!, n(v['w'])!, n(v['h'])!);
+        expect(canon(line.toJson()), canon(v['line']), reason: '$v');
+      }
+      for (final v in vector('frames')) {
+        final b = ThemeCallBackdrop.fromJson(v['backdrop'], const ThemeCallBackdrop(type: 'solid', stops: <ThemeCallStop>[]));
+        final f = CallLook.backdropFrame(b, n(v['w'])!, n(v['h'])!, n(v['t'])!);
+        expect(canon(f.toJson()), canon(v['frame']), reason: '${v['backdrop']} at ${v['t']}');
+      }
+      for (final v in vector('mesh')) {
+        final glows = <CallMeshGlow>[
+          for (final g in (v['glows']! as List<Object?>).cast<Map<String, Object?>>())
+            CallMeshGlow(n(g['u'])!, n(g['v'])!, g['color']! as String),
+        ];
+        expect(CallLook.meshColor(glows, n(v['u'])!, n(v['v'])!), v['color'], reason: '$v');
+      }
+    });
+
+    test('button boxes and sizes, voice levels and the speaking level, exactly', () {
+      for (final v in vector('buttons')) {
+        final a = v['args']! as Map<String, Object?>;
+        final f = CallLook.buttonFrame(
+          shape: a['shape']! as String,
+          size: n(a['size'])!,
+          share: n(a['share'])!,
+          end: a['end'] == true,
+          endShape: a['endShape'] as String?,
+          on: a['on'] == true,
+        );
+        expect(canon(f.toJson()), canon(v['frame']), reason: '$a');
+      }
+      for (final v in vector('buttonSizes')) {
+        expect(canon(CallLook.buttonSizes(n(v['buttonSize'])!).toJson()), canon(v['sizes']), reason: '$v');
+      }
+      for (final v in vector('levels')) {
+        expect(CallLook.voiceLevel(n(v['raw'])!, n(v['sensitivity'])!), n(v['level']), reason: '$v');
+      }
+      for (final v in vector('speaking')) {
+        expect(CallLook.speakingLevel(n(v['t'])!), n(v['level']), reason: '$v');
+      }
+    });
+
+    test('moments, status words and each moment\'s look, exactly', () {
+      for (final v in vector('moments')) {
+        final i = v['input']! as Map<String, Object?>;
+        expect(
+          CallLook.moment(
+            state: i['state']! as String,
+            direction: i['direction'] as String?,
+            hosted: i['hosted'] == true,
+            missed: i['missed'] == true,
+            reconnecting: i['reconnecting'] == true,
+          ),
+          v['moment'],
+          reason: '$i',
+        );
+      }
+      final turned = ResolvedDesign.fromJson(cases(fx, 'cases').firstWhere((Map<String, Object?> c) =>
+          (Js.asMap((c['config']! as Map<String, Object?>)['call'])?['layout']) == 'full-bleed')['design'])!.light.call;
+      final classic = ResolvedDesign.fromJson(cases(fx, 'cases').first['design'])!.light.call;
+      final noTimer = ThemeCall.fromJson(<String, Object?>{...classic.toJson(), 'timer': false}, classic);
+      for (final v in vector('status')) {
+        final call = v['call'] == 'turned' ? turned : noTimer;
+        final o = v['options']! as Map<String, Object?>;
+        expect(
+          CallLook.statusWords(
+            call,
+            v['moment']! as String,
+            elapsedMs: n(o['elapsedMs']),
+            muted: o['muted'] == true,
+            speaking: o['speaking'] == true,
+            ending: (o['ending'] as String?) ?? 'normal',
+          ),
+          v['words'],
+          reason: '${v['call']} ${v['moment']} $o',
+        );
+      }
+      for (final v in vector('looks')) {
+        final m = v['moment']! as String;
+        expect(turned.states.containsKey(m), v['own'], reason: m);
+        expect(canon(CallLook.lookFor(turned, m).backdrop.toJson()), canon(v['backdrop']), reason: m);
+        expect(turned.rings[m], v['ring'], reason: m);
+      }
     });
   });
 

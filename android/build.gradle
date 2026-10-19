@@ -4,7 +4,7 @@
 // with its manifest (the call screen, the microphone service, the receiver, the
 // Firebase messaging service and their permissions merge into the app from there).
 group = "ai.graine.inapp.flutter"
-version = "0.11.0"
+version = "0.12.0"
 
 buildscript {
     repositories {

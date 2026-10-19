@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.11.0
+  graine_inapp: ^0.12.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -613,6 +613,9 @@ changes — with only the environment variable, run `pod install` in `ios/` too.
   which one carried it — `transport` (`GraineCallTransport.webrtc` or
   `.websocket`) and `transportFallbackReason` (why a call that tried WebRTC is
   on the WebSocket: `no_answer`, `ice_timeout`, …).
+- **If the connection drops during a call**, the SDK's call screen says
+  *Reconnecting…* while it is restored, and the snapshot's `reconnecting` is
+  `true` until the agent's audio is back.
 - **Sound:** the agent's voice arrives at telephone bandwidth over WebRTC
   today — steadier on a weak network, narrower than the WebSocket's on a
   perfect one.

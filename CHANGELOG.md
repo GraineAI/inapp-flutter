@@ -1,3 +1,10 @@
+## 0.12.0
+
+- **The call screen draws its look from the dashboard.** With `callScreen: GraineCallScreen.sdk` (the default) the native call screens draw the Garage's call screen design with no app release: ten ready looks, or your own — a backdrop that is a colour, a gradient, a mesh of glows or your logo blurred under a tint, drifting or breathing slowly; five layouts; the avatar's size and ring; the agent's voice as bars, a wave or an orb; four caption styles; solid, frosted or outlined buttons in three shapes and any size, in a colour each; the name's and status's type; and a look of its own for each moment of a call. Words and icons always read at 4.5:1 on the backdrop. A design saved before this draws exactly as before.
+- **`ThemeCall` carries the whole look** (`ThemeCallBackdrop`, `ThemeCallStop`, `ThemeCallAction`, `ThemeCallLook`; `statusText.outgoing` and `.reconnecting`), and `CallLook` holds the rules the SDK's own screens draw it with — the moments, each moment's look, the backdrop's geometry and motion, the buttons' boxes, the voice level — for an app that draws its own screen (`GraineCallScreen.app`).
+- **A call that loses its connection says so.** While a connected call recovers a dropped connection, the native call screens show the *Reconnecting* moment, and `GraineCallSnapshot.reconnecting` is `true` until the agent's audio is back — for an app that draws its own screen too.
+- **The voice on the call screen is the agent's real voice level** on every transport, WebRTC and the standard connection alike.
+
 ## 0.11.0
 
 - **Calls connect faster.** The SDK now sets each WebRTC call up with Graine's call servers directly, with a short-lived permission it fetches ahead in the background, instead of an extra hop through Graine's web service. A call that can't use it connects exactly as before. Nothing to change in your app. Through the iOS and Android SDKs 0.11.0.

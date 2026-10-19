@@ -14,6 +14,8 @@
 /// every surface keeps drawing from `appearance` as it always has.
 library;
 
+import 'appearance.dart';
+import 'call_look.dart';
 import 'chat_size.dart';
 import 'js.dart';
 
@@ -633,6 +635,8 @@ class ThemeCallStatusText {
     this.connecting = 'Connecting…',
     this.ended = 'Call ended',
     this.missed = 'Missed call',
+    this.servedOutgoing,
+    this.servedReconnecting,
   });
 
   /// Another ring.
@@ -644,15 +648,30 @@ class ThemeCallStatusText {
   final String ended;
   final String missed;
 
+  /// The words for a call the customer placed, and for a connected call
+  /// recovering its connection, as the session carried them; null from a
+  /// server that predates them. Draw [outgoing] and [reconnecting].
+  final String? servedOutgoing;
+  final String? servedReconnecting;
+
+  /// A call the customer placed, before it is through: the connecting words unless the brand wrote its own.
+  String get outgoing => servedOutgoing ?? connecting;
+
+  /// A connected call recovering its connection.
+  String get reconnecting => servedReconnecting ?? 'Reconnecting…';
+
   static ThemeCallStatusText fromJson(Object? raw, ThemeCallStatusText d) {
     final r = Js.asMap(raw) ?? const <String, Object?>{};
     String w(Object? v, String fallback) => v is String && v.trim().isNotEmpty ? v : fallback;
+    String? said(Object? v) => v is String && v.trim().isNotEmpty ? v : null;
     return ThemeCallStatusText(
       ringing: w(r['ringing'], d.ringing),
       scheduled: w(r['scheduled'], d.scheduled),
       connecting: w(r['connecting'], d.connecting),
       ended: w(r['ended'], d.ended),
       missed: w(r['missed'], d.missed),
+      servedOutgoing: said(r['outgoing']),
+      servedReconnecting: said(r['reconnecting']),
     );
   }
 
@@ -662,13 +681,239 @@ class ThemeCallStatusText {
         'connecting': connecting,
         'ended': ended,
         'missed': missed,
+        if (servedOutgoing != null) 'outgoing': servedOutgoing,
+        if (servedReconnecting != null) 'reconnecting': servedReconnecting,
       };
 }
 
-/// THE CALL SCREEN'S TOKENS (contract §7, `ThemeTokens.call`) — the same for
-/// ringing, connecting, on a call and ended. The SDK's own call screens are
-/// the native ones; these are for a screen an app draws itself
-/// (`GraineCallScreen.app`).
+/// One colour of a call screen's backdrop, at a position 0–1 along it.
+class ThemeCallStop {
+  const ThemeCallStop(this.color, this.at);
+
+  final String color;
+  final double at;
+
+  Map<String, Object?> toJson() => <String, Object?>{'color': color, 'at': at};
+}
+
+/// THE CALL SCREEN'S FILL (contract/DESIGN.md "Call screen" → Backdrop):
+/// one colour, a linear or radial gradient, a mesh of glows, or the avatar
+/// blurred under a scrim of the stops.
+class ThemeCallBackdrop {
+  const ThemeCallBackdrop({
+    required this.type,
+    required this.stops,
+    this.angle = 180,
+    this.motion = 'none',
+    this.intensity = 0.5,
+    this.scrim = 1,
+  });
+
+  static const List<String> types = <String>['solid', 'linear', 'radial', 'mesh', 'blurred-avatar'];
+  static const List<String> motions = <String>['none', 'drift', 'breathe'];
+
+  /// One of [types].
+  final String type;
+
+  /// One for `solid`, 2–5 otherwise, in order of `at`.
+  final List<ThemeCallStop> stops;
+
+  /// A linear gradient's direction (and a blurred avatar's scrim's), degrees as CSS reads them: 180 runs top to bottom.
+  final double angle;
+
+  /// One of [motions].
+  final String motion;
+  final double intensity;
+
+  /// `blurred-avatar`: the stops' opacity over the blurred avatar. 1 for every other type.
+  final double scrim;
+
+  /// The flat fill an older server describes: one colour, or a gradient from top to bottom.
+  factory ThemeCallBackdrop.flat(String background, String? backgroundTo) => ThemeCallBackdrop(
+        type: backgroundTo == null ? 'solid' : 'linear',
+        stops: backgroundTo == null
+            ? <ThemeCallStop>[ThemeCallStop(background, 0)]
+            : <ThemeCallStop>[ThemeCallStop(background, 0), ThemeCallStop(backgroundTo, 1)],
+      );
+
+  static ThemeCallBackdrop fromJson(Object? raw, ThemeCallBackdrop d) {
+    final r = Js.asMap(raw);
+    if (r == null) return d;
+    final stops = <ThemeCallStop>[];
+    final list = r['stops'];
+    if (list is List) {
+      for (final s in list) {
+        final m = Js.asMap(s);
+        final color = Design.normaliseHex(m?['color']);
+        final at = Js.finite(m?['at']);
+        if (color != null && at != null) stops.add(ThemeCallStop(color, at));
+      }
+    }
+    return ThemeCallBackdrop(
+      type: _word(r, 'type', types, d.type),
+      stops: stops.isEmpty ? d.stops : stops,
+      angle: Js.finite(r['angle']) ?? d.angle,
+      motion: _word(r, 'motion', motions, d.motion),
+      intensity: Js.finite(r['intensity']) ?? d.intensity,
+      scrim: Js.finite(r['scrim']) ?? d.scrim,
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'type': type,
+        'stops': <Object?>[for (final s in stops) s.toJson()],
+        'angle': angle,
+        'motion': motion,
+        'intensity': intensity,
+        'scrim': scrim,
+      };
+}
+
+/// One call button's colours.
+class ThemeCallAction {
+  const ThemeCallAction({
+    required this.fill,
+    this.fillAlpha = 1,
+    required this.icon,
+    this.stroke,
+    required this.activeFill,
+    required this.activeIcon,
+  });
+
+  /// The buttons, by name: `close` is the missed call's Close.
+  static const List<String> names = <String>['answer', 'decline', 'end', 'callback', 'mute', 'speaker', 'chat', 'close'];
+
+  final String fill;
+
+  /// Below 1: glass — [fill] at this opacity over the backdrop, blurred where the platform can. 0: an outline's empty middle.
+  final double fillAlpha;
+  final String icon;
+
+  /// An outline in this colour, 1.5 wide; null: none.
+  final String? stroke;
+
+  /// Mute and speaker while on (the rest: the same as [fill] / [icon]). Always opaque.
+  final String activeFill;
+  final String activeIcon;
+
+  /// A filled button in one colour, as an older server's flat tokens describe it.
+  factory ThemeCallAction.flat(String fill, String icon, [String? activeFill, String? activeIcon]) =>
+      ThemeCallAction(fill: fill, icon: icon, activeFill: activeFill ?? fill, activeIcon: activeIcon ?? icon);
+
+  static ThemeCallAction fromJson(Object? raw, ThemeCallAction d) {
+    final r = Js.asMap(raw);
+    if (r == null) return d;
+    String c(String key, String fallback) => Design.normaliseHex(r[key]) ?? fallback;
+    return ThemeCallAction(
+      fill: c('fill', d.fill),
+      fillAlpha: Js.finite(r['fillAlpha']) ?? d.fillAlpha,
+      icon: c('icon', d.icon),
+      // Null is an answer (no outline); a colour that is not one is this build's.
+      stroke: r.containsKey('stroke') ? (r['stroke'] == null ? null : Design.normaliseHex(r['stroke']) ?? d.stroke) : d.stroke,
+      activeFill: c('activeFill', d.activeFill),
+      activeIcon: c('activeIcon', d.activeIcon),
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'fill': fill,
+        'fillAlpha': fillAlpha,
+        'icon': icon,
+        'stroke': stroke,
+        'activeFill': activeFill,
+        'activeIcon': activeIcon,
+      };
+}
+
+/// WHAT CHANGES FROM ONE MOMENT OF A CALL TO ANOTHER: everything drawn in a
+/// colour. The screen's own look is [ThemeCall.look]; a moment with its own is
+/// in [ThemeCall.states].
+class ThemeCallLook {
+  const ThemeCallLook({
+    required this.backdrop,
+    required this.ink,
+    required this.text,
+    required this.textMuted,
+    required this.avatarRingColor,
+    required this.actions,
+    required this.visualizerColor,
+    required this.captionFill,
+    required this.captionFillAlpha,
+  });
+
+  final ThemeCallBackdrop backdrop;
+
+  /// "light" or "dark": whether [text] is light. The status bar's icons follow it.
+  final String ink;
+  final String text;
+  final String textMuted;
+  final String avatarRingColor;
+
+  /// Every button's colours, by [ThemeCallAction.names].
+  final Map<String, ThemeCallAction> actions;
+  final String visualizerColor;
+
+  /// Behind a card, subtitle or bubble caption: [captionFill] at [captionFillAlpha] (0 for plain).
+  final String captionFill;
+  final double captionFillAlpha;
+
+  /// [raw] read against [d], key for key.
+  static ThemeCallLook fromJson(Object? raw, ThemeCallLook d) {
+    final r = Js.asMap(raw);
+    if (r == null) return d;
+    String c(String key, String fallback) => Design.normaliseHex(r[key]) ?? fallback;
+    return ThemeCallLook(
+      backdrop: ThemeCallBackdrop.fromJson(r['backdrop'], d.backdrop),
+      ink: _word(r, 'ink', ThemeCall.inks, d.ink),
+      text: c('text', d.text),
+      textMuted: c('textMuted', d.textMuted),
+      avatarRingColor: c('avatarRingColor', d.avatarRingColor),
+      actions: _actions(r['actions'], d.actions),
+      visualizerColor: c('visualizerColor', d.visualizerColor),
+      captionFill: c('captionFill', d.captionFill),
+      captionFillAlpha: Js.finite(r['captionFillAlpha']) ?? d.captionFillAlpha,
+    );
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'backdrop': backdrop.toJson(),
+        'ink': ink,
+        'text': text,
+        'textMuted': textMuted,
+        'avatarRingColor': avatarRingColor,
+        'actions': <String, Object?>{for (final e in actions.entries) e.key: e.value.toJson()},
+        'visualizerColor': visualizerColor,
+        'captionFill': captionFill,
+        'captionFillAlpha': captionFillAlpha,
+      };
+}
+
+/// Every button of [raw] read against [d]'s; a button the server left out is this build's.
+Map<String, ThemeCallAction> _actions(Object? raw, Map<String, ThemeCallAction> d) {
+  final r = Js.asMap(raw);
+  if (r == null) return d;
+  return <String, ThemeCallAction>{
+    for (final name in ThemeCallAction.names)
+      if (d[name] != null) name: ThemeCallAction.fromJson(r[name], d[name]!),
+  };
+}
+
+/// A word of [allowed] at [key]: absent, [fallback]; one this build does not
+/// know (a newer server's), the first listed — the contract's rule.
+String _word(Map<String, Object?> r, String key, List<String> allowed, String fallback) {
+  if (!r.containsKey(key) || r[key] == null) return fallback;
+  return _pick(r[key], allowed) ?? allowed.first;
+}
+
+/// THE CALL SCREEN'S TOKENS (contract §7, `ThemeTokens.call`) — the flat
+/// colours, words and buttons every SDK has drawn, and the look (version 2,
+/// contract/DESIGN.md "Call screen" → "The look"): the backdrop, layout,
+/// avatar ring, the buttons' style, the voice, the caption's style, the type
+/// and a look per moment. The SDK's own call screens — on Android its call
+/// activity, on iOS its call view, both drawn natively from these tokens —
+/// draw every moment themselves, so `GraineCallScreen.sdk` needs nothing from
+/// the app. These, with [CallLook]'s rules, are for a screen an app draws
+/// itself (`GraineCallScreen.app`).
 class ThemeCall {
   const ThemeCall({
     required this.background,
@@ -697,6 +942,32 @@ class ThemeCall {
     this.controls = defaultControls,
     this.ringtone = 'system',
     this.statusText = const ThemeCallStatusText(),
+    this.titleWeight = 600,
+    this.bodyWeight = 400,
+    this.servedPreset,
+    this.servedLayout,
+    this.servedBackdrop,
+    this.servedInk,
+    this.servedAvatarSize,
+    this.servedRings,
+    this.servedAvatarRingColor,
+    this.servedButtonStyle,
+    this.servedButtonShape,
+    this.servedButtonSize,
+    this.servedButtonLabels,
+    this.servedActions,
+    this.servedVisualizer,
+    this.servedVisualizerColor,
+    this.servedVisualizerSensitivity,
+    this.servedCaptionStyle,
+    this.servedCaptionPosition,
+    this.servedCaptionFill,
+    this.servedCaptionFillAlpha,
+    this.servedNameSize,
+    this.servedNameWeight,
+    this.servedStatusSize,
+    this.servedStatusWeight,
+    this.servedStates,
   });
 
   static const List<String> avatars = <String>['logo', 'glyph', 'initials'];
@@ -705,6 +976,21 @@ class ThemeCall {
   static const List<String> ringtones = <String>['system', 'graine', 'soft'];
   static const List<String> allControls = <String>['mute', 'speaker', 'chat', 'end'];
   static const List<String> defaultControls = <String>['mute', 'speaker', 'chat', 'end'];
+
+  // The look's words (version 2). A word this build does not know is drawn as the first listed.
+  static const List<String> presets = <String>['classic', 'aurora', 'midnight', 'glass', 'orbit', 'daylight', 'bloom', 'studio', 'minimal', 'mono'];
+  static const List<String> layouts = <String>['classic', 'full-bleed', 'card', 'orb', 'minimal'];
+  static const List<String> inks = <String>['light', 'dark'];
+  static const List<String> ringKinds = <String>['none', 'pulse', 'ripple', 'glow'];
+  static const List<String> buttonStyles = <String>['solid', 'glass', 'outline'];
+  static const List<String> buttonShapes = <String>['circle', 'squircle', 'pill'];
+  static const List<String> buttonLabelModes = <String>['below', 'none'];
+  static const List<String> visualizers = <String>['none', 'bars', 'wave', 'orb'];
+  static const List<String> captionStyles = <String>['plain', 'card', 'subtitle', 'bubble'];
+  static const List<String> captionPositions = <String>['middle', 'bottom'];
+
+  /// The eight moments a call screen shows ([CallLook.moment]).
+  static const List<String> moments = <String>['incoming', 'scheduled', 'outgoing', 'connecting', 'connected', 'reconnecting', 'ended', 'missed'];
 
   /// The fill, or a gradient's top.
   final String background;
@@ -744,9 +1030,111 @@ class ThemeCall {
   final String ringtone;
   final ThemeCallStatusText statusText;
 
+  /// The design's title and body weights: the name and the status line's, when the session does not say.
+  final double titleWeight;
+  final double bodyWeight;
+
+  // ── The look (version 2) as the session carried it; null where it said
+  // nothing (an older server). Draw from the getters below, which fill each
+  // one in exactly as contract/DESIGN.md "An older server" says.
+
+  final String? servedPreset;
+  final String? servedLayout;
+  final ThemeCallBackdrop? servedBackdrop;
+  final String? servedInk;
+  final double? servedAvatarSize;
+  final Map<String, String>? servedRings;
+  final String? servedAvatarRingColor;
+  final String? servedButtonStyle;
+  final String? servedButtonShape;
+  final double? servedButtonSize;
+  final String? servedButtonLabels;
+  final Map<String, ThemeCallAction>? servedActions;
+  final String? servedVisualizer;
+  final String? servedVisualizerColor;
+  final double? servedVisualizerSensitivity;
+  final String? servedCaptionStyle;
+  final String? servedCaptionPosition;
+  final String? servedCaptionFill;
+  final double? servedCaptionFillAlpha;
+  final double? servedNameSize;
+  final double? servedNameWeight;
+  final double? servedStatusSize;
+  final double? servedStatusWeight;
+  final Map<String, ThemeCallLook>? servedStates;
+
+  /// The preset the look was resolved from; "classic" is the screen as it has always been.
+  String get preset => servedPreset ?? 'classic';
+
+  /// How the screen is laid out: one of [layouts] ([CallLook.layouts] has the numbers).
+  String get layout => servedLayout ?? 'classic';
+
+  /// The fill: the session's, else the flat one.
+  ThemeCallBackdrop get backdrop => servedBackdrop ?? ThemeCallBackdrop.flat(background, backgroundTo);
+
+  /// "light" when [text] is light.
+  String get ink => servedInk ?? (Appearance.luminance(text) > 0.5 ? 'light' : 'dark');
+  double get avatarSize => servedAvatarSize ?? 112;
+
+  /// The ring the avatar wears in each moment: a ring only while it rings, unless the session says otherwise.
+  Map<String, String> get rings =>
+      servedRings ?? <String, String>{for (final m in moments) m: m == 'incoming' || m == 'scheduled' ? 'pulse' : 'none'};
+  String get avatarRingColor => servedAvatarRingColor ?? textMuted;
+  String get buttonStyle => servedButtonStyle ?? 'solid';
+  String get buttonShape => servedButtonShape ?? 'circle';
+
+  /// The in-call buttons' size; the ring's and the missed call's are [CallLook.buttonSizes]' big one.
+  double get buttonSize => servedButtonSize ?? 64;
+  String get buttonLabels => servedButtonLabels ?? 'below';
+
+  /// Every button's colours: the session's, else the flat ones.
+  Map<String, ThemeCallAction> get actions => servedActions ?? flatActions;
+  String get visualizer => servedVisualizer ?? 'none';
+  String get visualizerColor => servedVisualizerColor ?? text;
+  double get visualizerSensitivity => servedVisualizerSensitivity ?? 0.5;
+  String get captionStyle => servedCaptionStyle ?? 'plain';
+  String get captionPosition => servedCaptionPosition ?? 'middle';
+  String get captionFill => servedCaptionFill ?? (ink == 'light' ? '#000000' : '#FFFFFF');
+  double get captionFillAlpha => servedCaptionFillAlpha ?? 0;
+  double get nameSize => servedNameSize ?? (CallLook.layouts[layout]?.nameSize ?? 28);
+  double get nameWeight => servedNameWeight ?? titleWeight;
+  double get statusSize => servedStatusSize ?? 16;
+  double get statusWeight => servedStatusWeight ?? bodyWeight;
+
+  /// A moment's own look where it differs from the screen's; a moment not listed is drawn in [look].
+  Map<String, ThemeCallLook> get states => servedStates ?? const <String, ThemeCallLook>{};
+
+  /// The screen's own look.
+  ThemeCallLook get look => ThemeCallLook(
+        backdrop: backdrop,
+        ink: ink,
+        text: text,
+        textMuted: textMuted,
+        avatarRingColor: avatarRingColor,
+        actions: actions,
+        visualizerColor: visualizerColor,
+        captionFill: captionFill,
+        captionFillAlpha: captionFillAlpha,
+      );
+
+  /// The buttons as the flat colours describe them.
+  Map<String, ThemeCallAction> get flatActions {
+    final neutral = ThemeCallAction.flat(buttonFill, buttonIcon, buttonActiveFill, buttonActiveIcon);
+    return <String, ThemeCallAction>{
+      'answer': ThemeCallAction.flat(acceptFill, acceptIcon),
+      'decline': ThemeCallAction.flat(declineFill, declineIcon),
+      'end': ThemeCallAction.flat(endFill, endIcon),
+      'callback': ThemeCallAction.flat(callbackFill, callbackIcon),
+      'mute': neutral,
+      'speaker': neutral,
+      'chat': neutral,
+      'close': neutral,
+    };
+  }
+
   /// WHAT AN OLDER SERVER'S CALL SCREEN LOOKS LIKE — the fixed dark screen
   /// the native SDKs drew before these tokens.
-  factory ThemeCall.fallback(ThemeColors c) => ThemeCall(
+  factory ThemeCall.fallback(ThemeColors c, {ThemeFontWeights? weights}) => ThemeCall(
         background: '#0F1115',
         text: '#FFFFFF',
         textMuted: '#A3A8B3',
@@ -764,9 +1152,11 @@ class ThemeCall {
         declineIcon: '#FFFFFF',
         callbackFill: c.accent,
         callbackIcon: c.onAccent,
+        titleWeight: (weights?.title ?? 600).toDouble(),
+        bodyWeight: (weights?.body ?? 400).toDouble(),
       );
 
-  static ThemeCall fromJson(Map<String, Object?> r, ThemeCall d) {
+  static ThemeCall fromJson(Map<String, Object?> r, ThemeCall d, {ThemeFontWeights? weights}) {
     String c(String key, String fallback) => Design.normaliseHex(r[key]) ?? fallback;
     final rawControls = r['controls'];
     var controls = d.controls;
@@ -781,7 +1171,7 @@ class ThemeCall {
         controls = list;
       }
     }
-    return ThemeCall(
+    final flat = ThemeCall(
       background: c('background', d.background),
       backgroundTo: r.containsKey('backgroundTo') ? Design.normaliseHex(r['backgroundTo']) : d.backgroundTo,
       text: c('text', d.text),
@@ -808,9 +1198,101 @@ class ThemeCall {
       controls: controls,
       ringtone: _pick(r['ringtone'], ringtones) ?? d.ringtone,
       statusText: ThemeCallStatusText.fromJson(r['statusText'], d.statusText),
+      titleWeight: weights?.title.toDouble() ?? d.titleWeight,
+      bodyWeight: weights?.body.toDouble() ?? d.bodyWeight,
     );
+    return flat._withLook(r);
   }
 
+  /// These flat tokens with the look [r] carries, each key read against what this build derives for it.
+  ThemeCall _withLook(Map<String, Object?> r) {
+    String? word(String key, List<String> allowed, String own) => r.containsKey(key) ? _word(r, key, allowed, own) : null;
+    String? color(String key) => r.containsKey(key) ? Design.normaliseHex(r[key]) : null;
+    double? number(String key) => Js.finite(r[key]);
+    final backdrop = r.containsKey('backdrop') ? ThemeCallBackdrop.fromJson(r['backdrop'], this.backdrop) : null;
+    Map<String, String>? rings;
+    final rawRings = Js.asMap(r['rings']);
+    if (rawRings != null) {
+      final own = this.rings;
+      rings = <String, String>{for (final m in moments) m: _word(rawRings, m, ringKinds, own[m]!)};
+    }
+    final actions = r.containsKey('actions') ? _actions(r['actions'], flatActions) : null;
+    final read = _copy(
+      preset: word('preset', presets, preset),
+      layout: word('layout', layouts, layout),
+      backdrop: backdrop,
+      ink: word('ink', inks, ink),
+      avatarSize: number('avatarSize'),
+      rings: rings,
+      avatarRingColor: color('avatarRingColor'),
+      buttonStyle: word('buttonStyle', buttonStyles, buttonStyle),
+      buttonShape: word('buttonShape', buttonShapes, buttonShape),
+      buttonSize: number('buttonSize'),
+      buttonLabels: word('buttonLabels', buttonLabelModes, buttonLabels),
+      actions: actions,
+      visualizer: word('visualizer', visualizers, visualizer),
+      visualizerColor: color('visualizerColor'),
+      visualizerSensitivity: number('visualizerSensitivity'),
+      captionStyle: word('captionStyle', captionStyles, captionStyle),
+      captionPosition: word('captionPosition', captionPositions, captionPosition),
+      captionFill: color('captionFill'),
+      captionFillAlpha: number('captionFillAlpha'),
+      nameSize: number('nameSize'),
+      nameWeight: number('nameWeight'),
+      statusSize: number('statusSize'),
+      statusWeight: number('statusWeight'),
+    );
+    // The moments' own looks: exactly the moments the session sent, each read against the screen's.
+    final rawStates = Js.asMap(r['states']);
+    if (rawStates == null) return read;
+    final screen = read.look;
+    return read._copy(states: <String, ThemeCallLook>{
+      for (final m in moments)
+        if (Js.asMap(rawStates[m]) != null) m: ThemeCallLook.fromJson(rawStates[m], screen),
+    });
+  }
+
+  ThemeCall _copy({
+    String? preset, String? layout, ThemeCallBackdrop? backdrop, String? ink, double? avatarSize, Map<String, String>? rings,
+    String? avatarRingColor, String? buttonStyle, String? buttonShape, double? buttonSize, String? buttonLabels,
+    Map<String, ThemeCallAction>? actions, String? visualizer, String? visualizerColor, double? visualizerSensitivity,
+    String? captionStyle, String? captionPosition, String? captionFill, double? captionFillAlpha, double? nameSize,
+    double? nameWeight, double? statusSize, double? statusWeight, Map<String, ThemeCallLook>? states,
+  }) =>
+      ThemeCall(
+        background: background, backgroundTo: backgroundTo, text: text, textMuted: textMuted, avatar: avatar,
+        avatarShape: avatarShape, avatarFill: avatarFill, avatarText: avatarText, buttonFill: buttonFill,
+        buttonIcon: buttonIcon, buttonActiveFill: buttonActiveFill, buttonActiveIcon: buttonActiveIcon, endFill: endFill,
+        endIcon: endIcon, endShape: endShape, acceptFill: acceptFill, acceptIcon: acceptIcon, declineFill: declineFill,
+        declineIcon: declineIcon, callbackFill: callbackFill, callbackIcon: callbackIcon, captions: captions, timer: timer,
+        controls: controls, ringtone: ringtone, statusText: statusText, titleWeight: titleWeight, bodyWeight: bodyWeight,
+        servedPreset: preset ?? servedPreset,
+        servedLayout: layout ?? servedLayout,
+        servedBackdrop: backdrop ?? servedBackdrop,
+        servedInk: ink ?? servedInk,
+        servedAvatarSize: avatarSize ?? servedAvatarSize,
+        servedRings: rings ?? servedRings,
+        servedAvatarRingColor: avatarRingColor ?? servedAvatarRingColor,
+        servedButtonStyle: buttonStyle ?? servedButtonStyle,
+        servedButtonShape: buttonShape ?? servedButtonShape,
+        servedButtonSize: buttonSize ?? servedButtonSize,
+        servedButtonLabels: buttonLabels ?? servedButtonLabels,
+        servedActions: actions ?? servedActions,
+        servedVisualizer: visualizer ?? servedVisualizer,
+        servedVisualizerColor: visualizerColor ?? servedVisualizerColor,
+        servedVisualizerSensitivity: visualizerSensitivity ?? servedVisualizerSensitivity,
+        servedCaptionStyle: captionStyle ?? servedCaptionStyle,
+        servedCaptionPosition: captionPosition ?? servedCaptionPosition,
+        servedCaptionFill: captionFill ?? servedCaptionFill,
+        servedCaptionFillAlpha: captionFillAlpha ?? servedCaptionFillAlpha,
+        servedNameSize: nameSize ?? servedNameSize,
+        servedNameWeight: nameWeight ?? servedNameWeight,
+        servedStatusSize: statusSize ?? servedStatusSize,
+        servedStatusWeight: statusWeight ?? servedStatusWeight,
+        servedStates: states ?? servedStates,
+      );
+
+  /// The tokens as the session carried them: the flat ones, and the look's keys the session sent.
   Map<String, Object?> toJson() => <String, Object?>{
         'background': background,
         'backgroundTo': backgroundTo,
@@ -838,6 +1320,30 @@ class ThemeCall {
         'controls': List<String>.of(controls),
         'ringtone': ringtone,
         'statusText': statusText.toJson(),
+        if (servedPreset != null) 'preset': servedPreset,
+        if (servedLayout != null) 'layout': servedLayout,
+        if (servedBackdrop != null) 'backdrop': servedBackdrop!.toJson(),
+        if (servedInk != null) 'ink': servedInk,
+        if (servedAvatarSize != null) 'avatarSize': servedAvatarSize,
+        if (servedRings != null) 'rings': Map<String, Object?>.of(servedRings!),
+        if (servedAvatarRingColor != null) 'avatarRingColor': servedAvatarRingColor,
+        if (servedButtonStyle != null) 'buttonStyle': servedButtonStyle,
+        if (servedButtonShape != null) 'buttonShape': servedButtonShape,
+        if (servedButtonSize != null) 'buttonSize': servedButtonSize,
+        if (servedButtonLabels != null) 'buttonLabels': servedButtonLabels,
+        if (servedActions != null) 'actions': <String, Object?>{for (final e in servedActions!.entries) e.key: e.value.toJson()},
+        if (servedVisualizer != null) 'visualizer': servedVisualizer,
+        if (servedVisualizerColor != null) 'visualizerColor': servedVisualizerColor,
+        if (servedVisualizerSensitivity != null) 'visualizerSensitivity': servedVisualizerSensitivity,
+        if (servedCaptionStyle != null) 'captionStyle': servedCaptionStyle,
+        if (servedCaptionPosition != null) 'captionPosition': servedCaptionPosition,
+        if (servedCaptionFill != null) 'captionFill': servedCaptionFill,
+        if (servedCaptionFillAlpha != null) 'captionFillAlpha': servedCaptionFillAlpha,
+        if (servedNameSize != null) 'nameSize': servedNameSize,
+        if (servedNameWeight != null) 'nameWeight': servedNameWeight,
+        if (servedStatusSize != null) 'statusSize': servedStatusSize,
+        if (servedStatusWeight != null) 'statusWeight': servedStatusWeight,
+        if (servedStates != null) 'states': <String, Object?>{for (final e in servedStates!.entries) e.key: e.value.toJson()},
       };
 }
 
@@ -961,8 +1467,8 @@ class ThemeTokens {
   ThemeChat get chat =>
       servedChat ?? ThemeChat.fallback(colors, dark: dark, hasGlyph: icons.launcher != null);
 
-  /// The call screen's tokens — the session's, else the fixed dark screen.
-  ThemeCall get call => servedCall ?? ThemeCall.fallback(colors);
+  /// The call screen's tokens — the session's, else the fixed dark screen (and its look, derived).
+  ThemeCall get call => servedCall ?? ThemeCall.fallback(colors, weights: font.weights);
 
   /// One scheme's tokens. [scheme] is the slot they arrived in, used when the
   /// tokens do not say. Null when [raw] is not an object with a `colors` object
@@ -979,12 +1485,13 @@ class ThemeTokens {
     final icons = ThemeIcons.fromJson(r['icons'], d.icons);
     final chat = Js.asMap(r['chat']);
     final call = Js.asMap(r['call']);
+    final font = ThemeFont.fromJson(r['font'], d.font);
     return ThemeTokens(
       v: v == null ? 1 : v.round(),
       preset: preset.isEmpty ? d.preset : preset,
       scheme: said,
       colors: colors,
-      font: ThemeFont.fromJson(r['font'], d.font),
+      font: font,
       shape: ThemeShape.fromJson(r['shape'], d.shape),
       spacing: ThemeSpacing.fromJson(r['spacing'], d.spacing),
       elevation: ThemeElevation.fromJson(r['elevation'], d.elevation),
@@ -996,7 +1503,9 @@ class ThemeTokens {
       servedChat: chat == null
           ? null
           : ThemeChat.fromJson(chat, ThemeChat.fallback(colors, dark: said == 'dark', hasGlyph: icons.launcher != null)),
-      servedCall: call == null ? null : ThemeCall.fromJson(call, ThemeCall.fallback(colors)),
+      servedCall: call == null
+          ? null
+          : ThemeCall.fromJson(call, ThemeCall.fallback(colors, weights: font.weights), weights: font.weights),
     );
   }
 

@@ -75,6 +75,18 @@ void main() {
     expect(argsOf('snapshot'), hasLength(1), reason: 'the state a screen opens on must be read, not waited for');
   });
 
+  test("by default the SDK's own call screens draw the call — natively, in the brand's call screen look", () async {
+    // `sdk` hands every moment of the call to the native screens (Android's call
+    // activity, iOS's call view), which draw the design's call tokens and their
+    // look; nothing about how it looks passes through Dart.
+    expect(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme').callScreen, GraineCallScreen.sdk);
+    await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+    final sent = argsOf('configure').single! as Map<Object?, Object?>;
+    expect(sent['callScreen'], 'sdk');
+    expect(sent.keys.where((Object? k) => '$k'.toLowerCase().contains('design') || '$k'.toLowerCase().contains('look')), isEmpty,
+        reason: 'the look reaches the native screens with the session, never through the app');
+  });
+
   test("debug reaches the engine as `debug`, for the native SDK's log", () async {
     await GraineCalls.instance
         .configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme', debug: true));
@@ -115,6 +127,25 @@ void main() {
     expect(GraineCallSnapshot.fromMap(const <String, Object?>{'state': 'active', 'transport': 'webrtc'}),
         isNot(GraineCallSnapshot.fromMap(const <String, Object?>{'state': 'active', 'transport': 'websocket'})),
         reason: 'a change of road is a change of snapshot');
+  });
+
+  test('the snapshot says when a connected call is recovering its connection, and when it is back', () async {
+    await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+    emit('state', <String, Object?>{'state': 'active', 'callId': 'c1'});
+    await pumpEventQueue();
+    expect(GraineCalls.instance.value.reconnecting, isFalse, reason: 'an engine that says nothing: not recovering');
+    emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'reconnecting': true});
+    await pumpEventQueue();
+    expect(GraineCalls.instance.value.reconnecting, isTrue);
+    emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'reconnecting': false});
+    await pumpEventQueue();
+    expect(GraineCalls.instance.value.reconnecting, isFalse, reason: 'the audio is back');
+    expect(GraineCallSnapshot.fromMap(const <String, Object?>{'state': 'active', 'reconnecting': 'true'}).reconnecting, isFalse,
+        reason: 'only a true is recovering');
+    expect(GraineCallSnapshot.fromMap(const <String, Object?>{'state': 'active', 'reconnecting': true}),
+        isNot(GraineCallSnapshot.fromMap(const <String, Object?>{'state': 'active'})),
+        reason: 'recovering is a change of snapshot');
+    expect(GraineCallSnapshot.idle.reconnecting, isFalse);
   });
 
   test("the engine's state reaches the call screen, filled in", () async {

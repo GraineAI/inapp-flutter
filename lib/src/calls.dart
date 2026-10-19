@@ -92,6 +92,7 @@ class GraineCallSnapshot {
     this.agent,
     this.transport,
     this.transportFallbackReason,
+    this.reconnecting = false,
   });
 
   /// No call.
@@ -129,6 +130,8 @@ class GraineCallSnapshot {
       agent: _string(m['agent']),
       transport: GraineCallTransport.fromWire(m['transport']),
       transportFallbackReason: _string(m['transportFallbackReason']),
+      // Only a true is a recovering call: an engine that predates it says nothing.
+      reconnecting: m['reconnecting'] == true,
     );
   }
 
@@ -179,6 +182,11 @@ class GraineCallSnapshot {
   /// fall back.
   final String? transportFallbackReason;
 
+  /// A connected call recovering its connection — its audio dropped and is
+  /// being restored; the SDK's call screen says "Reconnecting…". False again
+  /// once the audio is back, and from an engine that predates it.
+  final bool reconnecting;
+
   @override
   bool operator ==(Object other) =>
       other is GraineCallSnapshot &&
@@ -195,11 +203,12 @@ class GraineCallSnapshot {
       other.error == error &&
       other.agent == agent &&
       other.transport == transport &&
-      other.transportFallbackReason == transportFallbackReason;
+      other.transportFallbackReason == transportFallbackReason &&
+      other.reconnecting == reconnecting;
 
   @override
   int get hashCode => Object.hash(status, callId, direction, reason, callerName, muted, speakerOn,
-      agentSpeaking, caption, connectedAt, error, agent, transport, transportFallbackReason);
+      agentSpeaking, caption, connectedAt, error, agent, transport, transportFallbackReason, reconnecting);
 }
 
 /// What became of a call (WIRE.md: ringing · answered · declined · missed ·
@@ -449,11 +458,16 @@ class GraineCallsOptions {
 
   /// Who draws the call while the app is open. [GraineCallScreen.sdk] (the
   /// default): the SDK's call screen, drawn from the brand's call screen
-  /// design — on Android its full-screen call activity, on iOS a full-screen
-  /// view over your app. [GraineCallScreen.app]: your own screen, drawn from
-  /// [GraineCalls.instance] (the design's call colours are
+  /// design and its look — the backdrop, layout, avatar ring, buttons, the
+  /// agent's voice, captions and a look per moment, all chosen in the
+  /// dashboard and changed there without an app release — on Android its
+  /// full-screen call activity, on iOS a full-screen view over your app.
+  /// [GraineCallScreen.app]: your own screen, drawn from
+  /// [GraineCalls.instance] (the design's call tokens are
   /// `GraineInApp.instance.tokens?.call` — with several agents, those of the
-  /// agent the call is with, `GraineInApp.named(snapshot.agent ?? 'default')`).
+  /// agent the call is with, `GraineInApp.named(snapshot.agent ?? 'default')`
+  /// — and [CallLook] has the rules for drawing them: the moment, its look,
+  /// the status words, the backdrop's geometry, the buttons and the voice).
   /// A locked iPhone always shows the system's call screen.
   final GraineCallScreen callScreen;
 
