@@ -9,6 +9,8 @@
 /// one bubble per agent turn, never two replies merged into one.
 library;
 
+import 'dart:math' as math;
+
 import 'bar.dart';
 import 'context.dart';
 import 'js.dart';
@@ -179,10 +181,332 @@ sealed class ChatFrame {
         // A history whose turns are not a list is not one: ignored, never an error.
         final turns = ChatHistoryReader.read(o);
         return turns == null ? null : ChatHistory(turns);
+      case 'quick_replies':
+        // Replies whose list is not a list are not replies: ignored. [] takes them away.
+        final replies = QuickReplies.read(o);
+        return replies == null ? null : ChatQuickReplies(replies);
+      case 'conversation_end':
+        return const ChatConversationEnd();
       default:
         return null; // pong, ack, and whatever a newer runtime adds
     }
   }
+}
+
+/// The replies the agent suggests for the turn it just sent (contract/DESIGN.md
+/// "Chat window v2" → Wire), cleaned. An empty list takes them away.
+final class ChatQuickReplies extends ChatFrame {
+  const ChatQuickReplies(this.replies);
+  final List<GraineQuickReply> replies;
+}
+
+/// The agent ended the conversation: the window may ask how it went.
+final class ChatConversationEnd extends ChatFrame {
+  const ChatConversationEnd();
+}
+
+/// ONE REPLY THE AGENT SUGGESTS: the words on the chip, and what a tap
+/// sends as the user's own message — a real turn, exactly as if typed.
+class GraineQuickReply {
+  const GraineQuickReply({required this.label, required this.text});
+
+  /// One line, at most 40 characters.
+  final String label;
+
+  /// At most 200 characters; the label when the agent gave none.
+  final String text;
+
+  Map<String, Object?> toJson() => <String, Object?>{'label': label, 'text': text};
+
+  @override
+  bool operator ==(Object other) => other is GraineQuickReply && other.label == label && other.text == text;
+
+  @override
+  int get hashCode => Object.hash(label, text);
+
+  @override
+  String toString() => 'GraineQuickReply("$label"${text == label ? '' : ' → "$text"'})';
+}
+
+/// HOW A `quick_replies` FRAME IS READ — the React Native SDK's
+/// readQuickReplies (protocol.ts), pinned by sdk/contract/chat-window.json →
+/// `quickReplies`: a reply is a string or `{label, text}`; a label is one line
+/// of at most 40 characters, a text at most 200; blanks and repeats (the same
+/// label, ignoring case) are left out; at most six.
+abstract final class QuickReplies {
+  static const int max = 6;
+  static const int labelMax = 40;
+  static const int textMax = 200;
+
+  static final RegExp _controls = RegExp(r'[\u0000-\u001F\u007F-\u009F\u2028\u2029\u202A-\u202E\u2066-\u2069]');
+  static final RegExp _spaces = RegExp(r'\s+');
+
+  /// The replies [frame] suggests, in order — or null when it is not a
+  /// replies frame (its `replies` is not a list), which is ignored. Never throws.
+  static List<GraineQuickReply>? read(Object? frame) {
+    final list = Js.asMap(frame)?['replies'];
+    if (list is! List) return null;
+    final out = <GraineQuickReply>[];
+    final seen = <String>{};
+    for (final raw in list) {
+      final o = Js.asMap(raw);
+      final label = line(raw is String ? raw : o?['label'], labelMax);
+      if (label.isEmpty || seen.contains(label.toLowerCase())) continue;
+      final given = o == null ? '' : line(o['text'], textMax);
+      seen.add(label.toLowerCase());
+      out.add(GraineQuickReply(label: label, text: given.isNotEmpty ? given : label));
+      if (out.length == max) break;
+    }
+    return out;
+  }
+
+  /// One line of words as it may be drawn: no control or direction-override
+  /// characters, spaces collapsed, at most [max] characters (whole characters,
+  /// never half an emoji).
+  static String line(Object? v, int max) {
+    if (v is! String) return '';
+    final s = v.replaceAll(_controls, ' ').replaceAll(_spaces, ' ').trim();
+    final chars = s.runes.toList();
+    return chars.length > max ? String.fromCharCodes(chars.take(max)).trim() : s;
+  }
+}
+
+/// How the end-of-chat rating is asked: two thumbs, five stars or five faces.
+enum GraineChatRatingStyle {
+  thumbs,
+  stars,
+  emoji;
+
+  /// The wire's word for it.
+  String get wire => name;
+
+  /// A style by its word (or itself); anything this build does not know is thumbs.
+  static GraineChatRatingStyle of(Object? style) {
+    if (style is GraineChatRatingStyle) return style;
+    final word = style is String ? style.trim().toLowerCase() : '';
+    for (final s in values) {
+      if (s.name == word) return s;
+    }
+    return thumbs;
+  }
+}
+
+/// THE USER'S ANSWER TO "HOW WAS THIS CHAT?" — thumbs: 1 up, 0 down, out of
+/// 1; stars and emoji: 1–5 out of 5. One per conversation, only after the
+/// agent ended it.
+class GraineChatRating {
+  const GraineChatRating({required this.value, required this.scale, required this.style});
+
+  final int value;
+  final int scale;
+  final GraineChatRatingStyle style;
+
+  Map<String, Object?> toJson() => <String, Object?>{'value': value, 'scale': scale, 'style': style.wire};
+
+  @override
+  bool operator ==(Object other) =>
+      other is GraineChatRating && other.value == value && other.scale == scale && other.style == style;
+
+  @override
+  int get hashCode => Object.hash(value, scale, style);
+
+  @override
+  String toString() => 'GraineChatRating(${style.wire} $value/$scale)';
+}
+
+/// How the rating card is laid out in a thread of a given width ([ChatRatings.layout]).
+class ChatRatingLayout {
+  const ChatRatingLayout({required this.width, required this.count, required this.size, required this.glyph, required this.gap});
+
+  /// The card's width.
+  final double width;
+
+  /// How many choices: 2 thumbs, or 5 stars or faces.
+  final int count;
+
+  /// Each choice's square target.
+  final double size;
+
+  /// The icon or face inside a target, scaled with it.
+  final double glyph;
+
+  /// Between two choices.
+  final double gap;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ChatRatingLayout &&
+      other.width == width &&
+      other.count == count &&
+      other.size == size &&
+      other.glyph == glyph &&
+      other.gap == gap;
+
+  @override
+  int get hashCode => Object.hash(width, count, size, glyph, gap);
+
+  @override
+  String toString() => 'ChatRatingLayout(width: $width, count: $count, size: $size, glyph: $glyph, gap: $gap)';
+}
+
+/// THE RATING ON THE WIRE — protocol.ts chatRating / chatRatingFrame, pinned
+/// by sdk/contract/chat-window.json → `rating`: sent as a quiet app event,
+/// recorded on the conversation, never a nudge. And the card it is asked on,
+/// sized to the thread it sits in ([layout]).
+abstract final class ChatRatings {
+  /// The app event a rating is recorded as.
+  static const String event = 'chat_rating';
+
+  /// The question when the brand wrote none.
+  static const String defaultPrompt = 'How was this chat?';
+
+  /// The line under a rating once it is given.
+  static const String thanks = 'Thanks for your feedback';
+
+  /// The faces of the emoji rating, 1–5 — drawn as text: every platform has them.
+  static const List<String> emoji = <String>['😞', '🙁', '😐', '🙂', '😄'];
+
+  /// What each choice says to a screen reader: thumbs down then up; stars and emoji 1–5.
+  static const Map<GraineChatRatingStyle, List<String>> labels = <GraineChatRatingStyle, List<String>>{
+    GraineChatRatingStyle.thumbs: <String>['Thumbs down', 'Thumbs up'],
+    GraineChatRatingStyle.stars: <String>['1 star', '2 stars', '3 stars', '4 stars', '5 stars'],
+    GraineChatRatingStyle.emoji: <String>['Very unhappy', 'Unhappy', 'Neutral', 'Happy', 'Very happy'],
+  };
+
+  /// A rating as it may be sent: thumbs 0 or 1 of 1, stars and emoji 1–5 of
+  /// 5 (rounded, clamped). A value that is not a number is 0; a style this
+  /// build does not know is thumbs.
+  static GraineChatRating of(Object? style, Object? value) {
+    final s = GraineChatRatingStyle.of(style);
+    final n = Js.finite(value) ?? 0;
+    if (s == GraineChatRatingStyle.thumbs) return GraineChatRating(value: n >= 1 ? 1 : 0, scale: 1, style: s);
+    return GraineChatRating(value: Js.round(n).clamp(1, 5).toInt(), scale: 5, style: s);
+  }
+
+  /// The words the conversation's record carries — plain, so a person reading it understands.
+  static String detail(GraineChatRating rating) {
+    final r = of(rating.style, rating.value);
+    if (r.style == GraineChatRatingStyle.thumbs) {
+      return r.value == 1 ? 'The customer gave this chat a thumbs up.' : 'The customer gave this chat a thumbs down.';
+    }
+    return 'The customer rated this chat ${r.value} out of ${r.scale}.';
+  }
+
+  /// The frame a rating is sent as.
+  static Map<String, Object?> frame(GraineChatRating rating) {
+    final r = of(rating.style, rating.value);
+    return <String, Object?>{
+      'type': 'app_event',
+      'event': <String, Object?>{
+        'name': event,
+        'quiet': true,
+        'detail': detail(r),
+        'data': <String, Object?>{'value': r.value, 'scale': r.scale, 'style': r.style.wire},
+      },
+    };
+  }
+
+  /// The rating card's width: `min(maxWidth, share × the thread)`, wider where its choices need it.
+  static const double maxWidth = 300;
+  static const double share = 0.84;
+
+  /// Between two of the rating's choices.
+  static const double gap = 8;
+
+  /// Each style's choices at full size: how many, the target, the icon or face inside it.
+  static const Map<GraineChatRatingStyle, ({int count, double size, double glyph})> choices =
+      <GraineChatRatingStyle, ({int count, double size, double glyph})>{
+    GraineChatRatingStyle.thumbs: (count: 2, size: 44, glyph: 22),
+    GraineChatRatingStyle.stars: (count: 5, size: 36, glyph: 28),
+    GraineChatRatingStyle.emoji: (count: 5, size: 44, glyph: 24),
+  };
+
+  /// THE RATING CARD in a thread [thread] wide (its rows' width, inside the
+  /// thread's own padding), with [padding] inside the card — protocol.ts
+  /// chatRatingLayout, pinned by sdk/contract/chat-window.json →
+  /// `ratingLayout`, the SAME numbers on every renderer:
+  /// `min(300, 84% of the thread)` wide, wider — up to the thread's own width
+  /// — where the choices would not fit inside its padding; the choices at
+  /// full size (thumbs and faces 44, stars 36), 8 apart, made smaller
+  /// together only where even the whole thread is too narrow for them. A
+  /// narrow phone or a large display setting never pushes a choice out of its
+  /// card. A width that is not a finite number is 0; a style this build does
+  /// not know is thumbs.
+  static ChatRatingLayout layout(Object? style, num thread, num padding) {
+    final c = choices[GraineChatRatingStyle.of(style)]!;
+    final room = thread.isFinite ? math.max(0.0, thread.toDouble()) : 0.0;
+    final pad = padding.isFinite ? math.max(0.0, padding.toDouble()) : 0.0;
+    final row = c.count * c.size + (c.count - 1) * gap;
+    final width = math.min(maxWidth, math.max(room * share, math.min(room, row + 2 * pad)));
+    final inner = math.max(0.0, width - 2 * pad);
+    final size = math.max(0.0, math.min(c.size, (inner - (c.count - 1) * gap) / c.count));
+    return ChatRatingLayout(width: width, count: c.count, size: size, glyph: c.glyph * size / c.size, gap: gap);
+  }
+}
+
+/// WHAT THE CONVERSATION IS ABOUT — an item, a booking, a case — pinned by
+/// the app (`chat.pin(pin)`) and drawn as a bar under the header or a card
+/// atop the thread, as the design says. Never sent to the agent: describe the
+/// screen to it with the screen context, as always.
+class GraineChatPin {
+  const GraineChatPin({required this.title, this.subtitle, this.imageUrl, this.badge});
+
+  /// One line, at most 60 characters.
+  final String title;
+
+  /// One line, at most 80 characters.
+  final String? subtitle;
+
+  /// An http(s) picture, filled and cropped into the thumbnail.
+  final String? imageUrl;
+
+  /// A short word or two at the trailing end, at most 24 characters.
+  final String? badge;
+
+  static const int titleMax = 60;
+  static const int subtitleMax = 80;
+  static const int badgeMax = 24;
+
+  /// The pin as it is drawn: each line one line, at most its characters, a
+  /// picture only from http(s); null when nothing is left of the title.
+  GraineChatPin? get cleaned {
+    final t = QuickReplies.line(title, titleMax);
+    if (t.isEmpty) return null;
+    String? words(String? v, int max) {
+      final s = QuickReplies.line(v, max);
+      return s.isEmpty ? null : s;
+    }
+
+    final image = imageUrl?.trim() ?? '';
+    final scheme = Uri.tryParse(image)?.scheme.toLowerCase();
+    return GraineChatPin(
+      title: t,
+      subtitle: words(subtitle, subtitleMax),
+      imageUrl: scheme == 'http' || scheme == 'https' ? image : null,
+      badge: words(badge, badgeMax),
+    );
+  }
+
+  /// What a screen reader says: "Pinned: {title}, {subtitle}, {badge}".
+  String get spoken => <String>[
+        'Pinned: $title',
+        if (subtitle != null && subtitle!.isNotEmpty) subtitle!,
+        if (badge != null && badge!.isNotEmpty) badge!,
+      ].join(', ');
+
+  @override
+  bool operator ==(Object other) =>
+      other is GraineChatPin &&
+      other.title == title &&
+      other.subtitle == subtitle &&
+      other.imageUrl == imageUrl &&
+      other.badge == badge;
+
+  @override
+  int get hashCode => Object.hash(title, subtitle, imageUrl, badge);
+
+  @override
+  String toString() => 'GraineChatPin("$title")';
 }
 
 /// The earlier conversation, restored (contract §2.6): the turns, oldest first — possibly none.
@@ -414,7 +738,59 @@ class ChatTranscript {
   /// history replaces. Null before any open.
   Set<String>? _settledAtOpen;
 
+  // Chat window v2 (protocol.ts foldChat; sdk/contract/chat-window.json → `fold`).
+  List<GraineQuickReply> _replies = const <GraineQuickReply>[];
+  bool _ended = false;
+  GraineChatRating? _rating;
+
   List<GraineChatTurn> get turns => List<GraineChatTurn>.unmodifiable(_turns);
+
+  /// The replies the agent suggests for its latest turn: gone once the user
+  /// sends anything, the agent starts another turn, an earlier conversation
+  /// is restored, or the conversation ends.
+  List<GraineQuickReply> get quickReplies => _replies;
+
+  /// The agent ended the conversation. A message from the user starts over.
+  bool get ended => _ended;
+
+  /// The user's answer to the rating, once given — one per conversation.
+  GraineChatRating? get rating => _rating;
+
+  /// The agent suggested [replies] for its turn; an empty list takes them
+  /// away. Offered after the conversation ended, they are nobody's to tap.
+  void offerReplies(List<GraineQuickReply> replies) {
+    if (replies.isEmpty) {
+      _replies = const <GraineQuickReply>[];
+      return;
+    }
+    if (_ended) return;
+    _replies = List<GraineQuickReply>.unmodifiable(replies);
+  }
+
+  /// The agent ended the conversation: the open turn closes, typing stops,
+  /// the replies go, and the window may ask for a rating.
+  void conversationEnded() {
+    _settleLive();
+    _turnOpen = false;
+    _awaitingReply = false;
+    _replies = const <GraineQuickReply>[];
+    _ended = true;
+  }
+
+  /// The user answered the rating. Kept — true — only for a conversation
+  /// that ended and was not rated yet.
+  bool rated(GraineChatRating rating) {
+    if (!_ended || _rating != null) return false;
+    _rating = rating;
+    return true;
+  }
+
+  /// The user moved on: past the agent's suggestions, and past a conversation that had ended.
+  void _goingOn() {
+    _replies = const <GraineQuickReply>[];
+    _ended = false;
+    _rating = null;
+  }
 
   /// The turns as captions, for a window that draws captions.
   List<Caption> get messages => <Caption>[for (final t in _turns) t.caption];
@@ -438,6 +814,7 @@ class ChatTranscript {
   GraineChatTurn customer(String text, DateTime at, {bool pending = false}) {
     _settleLive();
     _turnOpen = false;
+    _goingOn();
     final t = GraineChatTurn(
       id: 't${++_seq}',
       role: GraineChatRole.user,
@@ -482,10 +859,15 @@ class ChatTranscript {
     _settleLive();
     _turnOpen = false;
     _awaitingReply = true;
+    _goingOn();
   }
 
-  /// The agent's start marker: its turn has begun, words to follow.
-  void turnStarted() => _turnOpen = true;
+  /// The agent's start marker: its turn has begun, words to follow — and the
+  /// replies it suggested for the turn before are spent.
+  void turnStarted() {
+    _turnOpen = true;
+    _replies = const <GraineQuickReply>[];
+  }
 
   /// Words of the agent's turn. True when they open a turn nobody asked for
   /// — the agent volunteering, as opposed to answering.
@@ -499,6 +881,8 @@ class ChatTranscript {
       return false;
     }
     final proactive = last == null || last.role != GraineChatRole.user;
+    // A new turn: the replies suggested for the one before it are spent.
+    _replies = const <GraineQuickReply>[];
     _add(GraineChatTurn(id: 't${++_seq}', role: GraineChatRole.agent, text: words, at: at, live: true, proactive: proactive));
     return proactive;
   }
@@ -530,6 +914,7 @@ class ChatTranscript {
     _awaitingReply = false;
     _turnOpen = false;
     _settledAtOpen = null;
+    _goingOn();
   }
 
   /// The connection opened, before what was waiting goes out: what is settled
@@ -566,6 +951,8 @@ class ChatTranscript {
     while (_turns.length > max) {
       _turns.removeAt(0);
     }
+    // The replies belonged to the moment they were offered, not to the conversation restored.
+    _replies = const <GraineQuickReply>[];
     return true;
   }
 

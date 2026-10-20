@@ -260,16 +260,21 @@ Widget surfaceBox({
   EdgeInsetsGeometry? padding,
   EdgeInsetsGeometry? margin,
   double? height,
+  double? minHeight,
+  Gradient? gradient,
   required Widget child,
 }) {
   final outline = borderWidth > 0 ? Border.all(color: border, width: borderWidth) : null;
+  // At least [minHeight], growing with the text inside it.
+  final constraints = minHeight == null ? null : BoxConstraints(minHeight: minHeight);
   if (glass == null) {
     return Container(
       key: key,
       margin: margin,
       padding: padding,
       height: height,
-      decoration: BoxDecoration(color: color, borderRadius: radius, border: outline, boxShadow: shadows),
+      constraints: constraints,
+      decoration: BoxDecoration(color: gradient == null ? color : null, gradient: gradient, borderRadius: radius, border: outline, boxShadow: shadows),
       child: child,
     );
   }
@@ -285,7 +290,8 @@ Widget surfaceBox({
           child: Container(
             padding: padding,
             height: height,
-            decoration: BoxDecoration(color: color, borderRadius: radius, border: outline),
+            constraints: constraints,
+            decoration: BoxDecoration(color: gradient == null ? color : null, gradient: gradient, borderRadius: radius, border: outline),
             child: child,
           ),
         ),

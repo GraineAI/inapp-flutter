@@ -1,11 +1,16 @@
 // The chat window the voice bar opens above itself when the customer is in
 // the chat, and GraineChat fills a screen with. Not exported: GraineAgentBar
 // and GraineChat draw it from a GraineChatState.
+import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/material.dart' show Scaffold, ScaffoldMessenger, SnackBar;
+import 'package:flutter/rendering.dart' show RenderProxyBox;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import 'chat_bubble.dart';
+import 'chat_parts.dart';
 import 'core/core.dart';
 import 'glyph.dart';
 import 'sdk_icon.dart';
@@ -13,8 +18,9 @@ import 'style.dart';
 import 'window_chrome.dart';
 
 /// Everything the chat window draws with, resolved once: the design's tokens
-/// (contract/DESIGN.md, "Chat window"), or — with no design — the component
-/// palette and the dashboard's accent, as the transcript drew it before designs.
+/// (contract/DESIGN.md, "Chat window" and "Chat window v2"), or — with no
+/// design — the component palette and the dashboard's accent, as the
+/// transcript drew it before designs, with the chat's v2 pieces classic.
 class ChatLook {
   const ChatLook({
     required this.background,
@@ -61,6 +67,19 @@ class ChatLook {
     required this.rowTimeStyle,
     required this.rowNameStyle,
     required this.cancelStyle,
+    required this.chat,
+    required this.captionStyle,
+    required this.captionStrongStyle,
+    required this.bodyStrongStyle,
+    required this.headingStyle,
+    required this.welcomeTitleStyle,
+    required this.heroTitleStyle,
+    required this.heroSubtitleStyle,
+    this.danger = const Color(0xFFDC2626),
+    this.warning = const Color(0xFFB45309),
+    this.hardOffset,
+    this.motionMs = 0,
+    this.designGlass,
     this.glass,
     this.chrome,
     this.designed = false,
@@ -75,11 +94,17 @@ class ChatLook {
     this.upcomingTitle = '',
     this.showHistory = true,
     this.newConversation = true,
+    String? remapAccent,
+    String? remapSoft,
+    bool remapAll = false,
     Color? dot,
     Color? chevron,
     Color? composerBorder,
     Color? composerPlaceholder,
-  })  : dot = dot ?? success,
+  })  : _remapAccent = remapAccent,
+        _remapSoft = remapSoft,
+        _remapAll = remapAll,
+        dot = dot ?? success,
         chevron = chevron ?? muted,
         composerBorder = composerBorder ?? border,
         composerPlaceholder = composerPlaceholder ?? muted;
@@ -102,6 +127,8 @@ class ChatLook {
     final titleSize = math.min(f.scale.title, 16).toDouble();
     final emptySize = math.min(f.scale.title, 18).toDouble();
     final timeSize = math.max(10, f.scale.caption - 1).toDouble();
+    TextStyle heading(double size) =>
+        designText(text, size, f.heading, f.weights.title, height: f.lineHeight.title, letterSpacing: em(size, f.letterSpacing.title));
     // A pill is drawn as a circle at this size: a 30-point mark has no label to be wide for.
     final shape = t.shape.launcher == 'pill' ? 'circle' : t.shape.launcher;
     return ChatLook(
@@ -153,6 +180,20 @@ class ChatLook {
       rowTimeStyle: designText(text, f.scale.body - 1, f.body, f.weights.strong),
       rowNameStyle: designText(muted, f.scale.caption, f.body, f.weights.body),
       cancelStyle: designText(text, f.scale.caption, f.body, f.weights.strong),
+      chat: k,
+      captionStyle: designText(muted, f.scale.caption, f.body, f.weights.body),
+      captionStrongStyle: designText(muted, f.scale.caption, f.body, f.weights.strong),
+      bodyStrongStyle: designText(text, f.scale.body, f.body, f.weights.strong,
+          height: f.lineHeight.body, letterSpacing: em(f.scale.body, f.letterSpacing.body)),
+      headingStyle: heading(titleSize),
+      welcomeTitleStyle: heading(math.min(f.scale.title, 17).toDouble()),
+      heroTitleStyle: heading(math.min(f.scale.display, 26).toDouble()),
+      heroSubtitleStyle: designText(text, f.scale.body, f.body, f.weights.body, height: f.lineHeight.body),
+      danger: tokenColor(c.danger),
+      warning: tokenColor(c.warning),
+      hardOffset: t.elevation.hardOffset,
+      motionMs: t.motion.none ? 0 : t.motion.durationMs,
+      designGlass: t.glass,
       glass: glass,
       chrome: ChromeLook.of(t),
       designed: t.servedChat != null,
@@ -167,6 +208,9 @@ class ChatLook {
       upcomingTitle: k.upcomingTitle.trim(),
       showHistory: k.showHistory,
       newConversation: k.newConversation,
+      // A host's own accent recolours what the design drew in its accent.
+      remapAccent: accent == null ? null : c.accent,
+      remapSoft: accent == null ? null : c.accentSoft,
       dot: surfaceHeader ? tokenColor(c.success) : tokenColor(k.headerText),
       chevron: tokenColor(k.headerSubtext),
       composerBorder: tokenColor(k.composerBorder),
@@ -174,18 +218,61 @@ class ChatLook {
     );
   }
 
-  /// Before designs: the component palette ([Appearance.palette]) and the accent.
+  /// Before designs: the component palette ([Appearance.palette]) and the
+  /// accent ([accentHex] its #RRGGBB, when the caller has it), with every
+  /// v2 piece classic.
   factory ChatLook.appearance({
     required bool dark,
     required Color accent,
     required double radius,
     required List<BoxShadow> shadows,
+    String? accentHex,
   }) {
     final surface = dark ? const Color(0xFF17181B) : const Color(0xFFFFFFFF);
     final border = dark ? const Color(0xFF2C2E33) : const Color(0xFFE5E4E0);
     final text = dark ? const Color(0xFFF5F5F4) : const Color(0xFF101318);
     final muted = dark ? const Color(0xFFA0A5AE) : const Color(0xFF5F6672);
     final onAccentHex = readableHexOn(accent);
+    // The same palette as #RRGGBB, so the chat's classic v2 pieces derive from it exactly.
+    final surfaceHex = dark ? '#17181B' : '#FFFFFF';
+    final borderHex = dark ? '#2C2E33' : '#E5E4E0';
+    final known = Design.normaliseHex(accentHex);
+    final accentWord = known ?? Appearance.defaultAccent;
+    final colors = ThemeColors(
+      background: surfaceHex,
+      surface: surfaceHex,
+      surfaceRaised: dark ? '#1F2024' : '#F7F7F5',
+      text: dark ? '#F5F5F4' : '#101318',
+      textMuted: dark ? '#A0A5AE' : '#5F6672',
+      border: borderHex,
+      accent: accentWord,
+      onAccent: onAccentHex,
+      // The translucent fills this look always drew, laid on the page they sit on.
+      accentSoft: Design.mixHex(surfaceHex, accentWord, 0.15),
+      success: dark ? '#22C55E' : '#16A34A',
+      warning: dark ? '#F59E0B' : '#B45309',
+      danger: dark ? '#F87171' : '#DC2626',
+      userBubble: accentWord,
+      userBubbleText: onAccentHex,
+      agentBubble: Design.mixHex(surfaceHex, borderHex, 0.6),
+      agentBubbleText: dark ? '#F5F5F4' : '#101318',
+      scrim: '#000000',
+    );
+    final md = math.min(radius, 12).toDouble();
+    final lg = math.min(radius, 16).toDouble();
+    final xl = math.min(26, radius + 8).toDouble();
+    final chat = ThemeChat.fallback(
+      colors,
+      dark: dark,
+      hasGlyph: false,
+      base: ChatClassicBase(
+        colors: colors,
+        radius: ThemeRadius(sm: 5, md: md, lg: lg, xl: xl),
+        borderWidth: 1,
+        spacing: const ThemeSpacing(unit: 4, cardPadding: 12, gap: 8),
+        cardShadow: const ThemeShadow(y: 2, blur: 8, spread: 0, opacity: 0.08, color: '#000000'),
+      ),
+    );
     return ChatLook(
       background: surface,
       header: surface,
@@ -204,9 +291,9 @@ class ChatLook {
       agentBubbleText: text,
       bubbles: 'filled',
       sm: 5,
-      md: math.min(radius, 12),
-      lg: math.min(radius, 16),
-      xl: math.min(26, radius + 8),
+      md: md,
+      lg: lg,
+      xl: xl,
       pad: 12,
       gap: 8,
       markRadius: 15,
@@ -230,6 +317,21 @@ class ChatLook {
       rowTimeStyle: textStyle(text, 13.5, weight: 600),
       rowNameStyle: textStyle(muted, 12),
       cancelStyle: textStyle(text, 12, weight: 600),
+      chat: chat,
+      captionStyle: textStyle(muted, 12),
+      captionStrongStyle: textStyle(muted, 12, weight: 600),
+      bodyStrongStyle: textStyle(text, 14.5, weight: 600, height: 21 / 14.5),
+      headingStyle: textStyle(text, 15, weight: 700, height: 1.25),
+      welcomeTitleStyle: textStyle(text, 17, weight: 700, height: 1.25),
+      heroTitleStyle: textStyle(text, 22, weight: 700, height: 1.25),
+      heroSubtitleStyle: textStyle(text, 14.5),
+      danger: tokenColor(colors.danger),
+      warning: tokenColor(colors.warning),
+      // An accent the caller only had as a colour: what the pieces drew in the default accent is drawn in
+      // it — everywhere, since the words on it were chosen for it (onAccentHex).
+      remapAccent: known == null ? accentWord : null,
+      remapSoft: known == null ? colors.accentSoft : null,
+      remapAll: true,
     );
   }
 
@@ -298,6 +400,38 @@ class ChatLook {
   final TextStyle rowNameStyle;
   final TextStyle cancelStyle;
 
+  /// The chat's tokens, every v2 group complete (classic from an older server).
+  final ThemeChat chat;
+
+  /// Caption size, in the body family: status lines, a message's status, the banner.
+  final TextStyle captionStyle;
+  final TextStyle captionStrongStyle;
+
+  /// The body at `weights.strong`: bold words in the agent's messages.
+  final TextStyle bodyStrongStyle;
+
+  /// The heading family at `weights.title`, `min(scale.title, 16)`: the rating's question, a context card's title.
+  final TextStyle headingStyle;
+
+  /// The welcome card's title (`min(scale.title, 17)`), the hero's (`min(scale.display, 26)`) and its subtitle.
+  final TextStyle welcomeTitleStyle;
+  final TextStyle heroTitleStyle;
+  final TextStyle heroSubtitleStyle;
+  final Color danger;
+  final Color warning;
+
+  /// The design's solid offset shadow, for cards that draw it.
+  final ThemeOffset? hardOffset;
+
+  /// The design's pace; 0 for none.
+  final int motionMs;
+
+  /// The design's own glass (a surface header frosts with it, as in v1).
+  final ThemeGlass? designGlass;
+  final String? _remapAccent;
+  final String? _remapSoft;
+  final bool _remapAll;
+
   /// A day separator's words: caption size, strong, muted — the card title's style.
   TextStyle get dayStyle => cardTitleStyle;
 
@@ -352,18 +486,35 @@ class ChatLook {
   final Color composerPlaceholder;
 
   Color get onAccent => tokenColor(onAccentHex);
+
+  /// A v2 token's colour. A fill that carries words (a header, a bubble)
+  /// keeps the design's colour under a host's own accent, as v1 did — its
+  /// words were chosen for it; [accentInk] is for what only decorates.
+  Color ink(String hex) => _remapAll ? accentInk(hex) : tokenColor(hex);
+
+  /// A decoration's colour (an outline, an icon, a chip, the send button):
+  /// the host's own accent where the design drew its accent.
+  Color accentInk(String hex) {
+    if (_remapAccent != null && hex == _remapAccent) return accent;
+    if (_remapSoft != null && hex == _remapSoft) return soft;
+    return tokenColor(hex);
+  }
+
+  /// Ink that reads on [fill]: [onAccent] on the accent, else [hex]'s colour.
+  Color inkOn(Color fill, String hex) => fill == accent ? onAccent : ink(hex);
 }
 
-/// THE CHAT WINDOW (contract/DESIGN.md, "Chat window"): the page in
-/// `chat.background` with an outline, `radius.xl` corners and the floating
-/// shadow (or the hard offset); a 50-point header on `chat.headerBackground` —
-/// the avatar, the title in the heading face, the status after its dot, and a
-/// chevron back to the call; the Upcoming calls card, the messages as bubbles
-/// in the design's style (or the empty chat), the starters and a 58-point
-/// composer. A design with window chrome replaces the header with a 32-point
-/// title bar ("Window chrome"): the traffic lights, the title lower case in
-/// the platform's monospace after the online dot, and the chevron at its right
-/// end — no avatar. From an older server it draws exactly as before the
+/// THE CHAT WINDOW (contract/DESIGN.md, "Chat window" and "Chat window v2"):
+/// the frame on the wallpaper (a colour, a gradient or a pattern); the
+/// header — surface, accent, gradient or plain, its title start or centred,
+/// its status line, a call button, "New conversation" and the chevron — or,
+/// with window chrome, the title bar; the card the app pins; the calm
+/// reconnect banner; the thread — the pinned card, booked calls, the welcome,
+/// the messages grouped in their bubbles with their times, the agent's
+/// suggested replies, the typing indicator and the rating — over the
+/// wallpaper, lazily; the starters and replies docked as the design places
+/// them; the scroll-to-latest pill; and the composer as a bar, a pill or a
+/// floating capsule. From an older server it draws exactly as before the
 /// chat's tokens.
 class ChatWindow extends StatefulWidget {
   const ChatWindow({
@@ -394,6 +545,20 @@ class ChatWindow extends StatefulWidget {
     this.onNewConversation,
     this.bookingAvailable = false,
     this.onBook,
+    this.pin,
+    this.quickReplies = const <GraineQuickReply>[],
+    this.onQuickReply,
+    this.ended = false,
+    this.rating,
+    this.onRate,
+    this.onAttach,
+    this.onCall,
+    this.reconnecting = false,
+    this.offline = false,
+    this.onRetry,
+    this.onOpenLink,
+    this.loader,
+    this.loaderColor,
   });
 
   final ChatLook look;
@@ -420,7 +585,7 @@ class ChatWindow extends StatefulWidget {
   /// The keyboard is up: fewer messages, so the composer stays in view.
   final bool lifted;
 
-  /// The agent is composing: a typing bubble after the last message.
+  /// The agent is composing: a typing indicator after the last message.
   final bool typing;
 
   /// Fill the space given — a full-screen chat ([GraineChat]): square, no
@@ -475,6 +640,50 @@ class ChatWindow extends StatefulWidget {
   /// Opens the booking sheet. Null: no "Book a call".
   final VoidCallback? onBook;
 
+  /// What the app pinned (`chat.pin`): a bar under the header or a card atop
+  /// the thread, as `header.contextCard` says.
+  final GraineChatPin? pin;
+
+  /// The replies the agent suggests for its latest turn, as chips.
+  final List<GraineQuickReply> quickReplies;
+
+  /// A reply tapped. Default: its words sent through [onSend].
+  final ValueChanged<GraineQuickReply>? onQuickReply;
+
+  /// The agent ended the conversation: the rating, where the design asks for one.
+  final bool ended;
+
+  /// The user's answer to the rating, once given.
+  final GraineChatRating? rating;
+
+  /// A rating chosen. Null: the rating card is not drawn.
+  final void Function(GraineChatRatingStyle style, int value)? onRate;
+
+  /// The app handles attachments: the paperclip, where the design asks for one.
+  final VoidCallback? onAttach;
+
+  /// Starts a call with the agent, exactly as the voice bar's call does —
+  /// set only where the agent takes calls and this SDK can start one from the
+  /// chat. Null: no call button, and no microphone in the composer.
+  final VoidCallback? onCall;
+
+  /// A dropped chat is being made again: "Reconnecting…" in the header and the banner.
+  final bool reconnecting;
+
+  /// Not connected and not trying: with a message waiting, the offline banner.
+  final bool offline;
+
+  /// "Not sent · Tap to retry".
+  final VoidCallback? onRetry;
+
+  /// A link tapped in the agent's words.
+  final ValueChanged<Uri>? onOpenLink;
+
+  /// The dashboard's loader — the classic typing indicator, the banner's
+  /// spinner — and its colour.
+  final LoaderLook? loader;
+  final Color? loaderColor;
+
   /// "Book a call": in the card, or the row in its place.
   static const Key bookKey = ValueKey<String>('graine-chat-book');
 
@@ -492,10 +701,10 @@ class ChatWindow extends StatefulWidget {
   static const Key sendKey = ValueKey<String>('graine-chat-send');
   static const Key collapseKey = ValueKey<String>('graine-chat-collapse');
 
-  /// The typing bubble.
+  /// The typing indicator.
   static const Key typingKey = ValueKey<String>('graine-chat-typing');
 
-  /// The row of conversation starters.
+  /// The conversation starters, wherever they are placed.
   static const Key suggestionsKey = ValueKey<String>('graine-chat-suggestions');
 
   /// The empty chat: the avatar, the title and the subtitle.
@@ -517,28 +726,145 @@ class ChatWindow extends StatefulWidget {
   static Key upcomingRowKey(String id) => ValueKey<String>('graine-chat-upcoming-$id');
   static Key cancelKey(String id) => ValueKey<String>('graine-chat-cancel-$id');
 
+  // ── v2 ─────────────────────────────────────────────────────────────────────
+
+  /// The agent's suggested replies, and the [index]th of them.
+  static const Key quickRepliesKey = ValueKey<String>('graine-chat-quick-replies');
+  static Key quickReplyKey(int index) => ValueKey<String>('graine-chat-quick-reply-$index');
+
+  /// The card the app pinned: as a bar under the header, or a card in the thread.
+  static const Key contextBarKey = ValueKey<String>('graine-chat-context-bar');
+  static const Key contextCardKey = ValueKey<String>('graine-chat-context-card');
+
+  /// The reconnect banner.
+  static const Key bannerKey = ValueKey<String>('graine-chat-banner');
+
+  /// The welcome as a card, or as a hero.
+  static const Key welcomeKey = ValueKey<String>('graine-chat-welcome');
+
+  /// The end-of-chat rating card.
+  static const Key ratingKey = ValueKey<String>('graine-chat-rating');
+
+  /// The scroll-to-latest pill.
+  static const Key pillKey = ValueKey<String>('graine-chat-scroll-pill');
+
+  /// The header's call button, and the composer's.
+  static const Key headerCallKey = ValueKey<String>('graine-chat-header-call');
+  static const Key composerCallKey = ValueKey<String>('graine-chat-composer-call');
+
+  /// The paperclip.
+  static const Key attachKey = ValueKey<String>('graine-chat-attach');
+
+  /// "Copied", after a long press.
+  static const Key copiedKey = ValueKey<String>('graine-chat-copied');
+
+  /// The thread's list.
+  static const Key threadKey = ValueKey<String>('graine-chat-thread');
+
   @override
   State<ChatWindow> createState() => _ChatWindowState();
+}
+
+/// One row of the thread, built only when it scrolls into view.
+class _Item {
+  const _Item(this.key, this.build, {this.gap, this.bleed = false, this.message = false});
+
+  /// Stable while the conversation grows.
+  final String key;
+  final Widget Function(BuildContext context) build;
+
+  /// The space above it; null — the density's gap (none for the first).
+  final double? gap;
+
+  /// The window's full width (the hero), not the thread's.
+  final bool bleed;
+
+  /// A message — counted as "new" while the reader is scrolled up.
+  final bool message;
 }
 
 class _ChatWindowState extends State<ChatWindow> {
   final TextEditingController _draft = TextEditingController();
   final FocusNode _focus = FocusNode(debugLabel: 'graine-chat-composer');
+  final _ThreadScroll _scroll = _ThreadScroll();
+
+  /// Within 120 of the newest row: new rows bring it along. Scrolled further up, nothing moves it.
+  bool _following = true;
+
+  /// Messages that arrived while the reader was scrolled up.
+  int _unseen = 0;
+  int _messages = 0;
+  String _lastSignature = '';
+  String _lastBottom = '';
+
+  /// The height of what floats over the thread's bottom (a floating composer and its chips).
+  double _overlay = 0;
+
+  bool _copied = false;
+  Timer? _copiedTimer;
+
+  /// The agent's words formatted, once per change of a turn's words.
+  final Map<String, List<ChatBlock>> _parsed = <String, List<ChatBlock>>{};
+
+  static const double _followWithin = 120;
 
   @override
   void initState() {
     super.initState();
     _draft.addListener(_changed);
+    _scroll.addListener(_scrolled);
   }
 
   void _changed() => setState(() {});
+
+  // The thread is a reversed list: its scroll offset is the distance from the newest row.
+  void _scrolled() {
+    if (!_scroll.hasClients) return;
+    final p = _scroll.position;
+    final near = p.pixels - p.minScrollExtent <= _followWithin;
+    if (near != _following) {
+      setState(() {
+        _following = near;
+        if (near) _unseen = 0;
+      });
+    }
+  }
 
   @override
   void dispose() {
     _draft.removeListener(_changed);
     _draft.dispose();
     _focus.dispose();
+    _scroll.removeListener(_scrolled);
+    _scroll.dispose();
+    _copiedTimer?.cancel();
     super.dispose();
+  }
+
+  /// After the frame, back to the newest row — for a reader within 120 of it.
+  void _stickToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) {
+      // The reader scrolled away meanwhile: nothing moves them.
+      if (!mounted || !_scroll.hasClients || !_following) return;
+      final p = _scroll.position;
+      if (p.pixels - p.minScrollExtent > 0.5) _scroll.jumpTo(p.minScrollExtent);
+    });
+  }
+
+  void _scrollToLatest() {
+    setState(() {
+      _unseen = 0;
+      _following = true;
+    });
+    if (!_scroll.hasClients) return;
+    final still = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    if (still) {
+      _scroll.jumpTo(_scroll.position.minScrollExtent);
+    } else {
+      _scroll
+          .animateTo(_scroll.position.minScrollExtent, duration: const Duration(milliseconds: 300), curve: Curves.easeOut)
+          .whenComplete(_stickToBottom);
+    }
   }
 
   void _submit() {
@@ -546,6 +872,22 @@ class _ChatWindowState extends State<ChatWindow> {
     if (text.isEmpty) return;
     _draft.clear();
     widget.onSend(text);
+  }
+
+  /// A long press, or the screen reader's Copy: the plain words, and the
+  /// platform's confirmation — a snack bar where the app has a Scaffold, else
+  /// a brief "Copied" in the window.
+  void _copy(String words) {
+    unawaited(Clipboard.setData(ClipboardData(text: words)));
+    if (Scaffold.maybeOf(context) != null) {
+      ScaffoldMessenger.maybeOf(context)?.showSnackBar(const SnackBar(content: Text('Copied')));
+      return;
+    }
+    _copiedTimer?.cancel();
+    setState(() => _copied = true);
+    _copiedTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) setState(() => _copied = false);
+    });
   }
 
   /// The header's title: the brand's, else the heading.
@@ -576,42 +918,118 @@ class _ChatWindowState extends State<ChatWindow> {
 
   bool get _h24 => MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? false;
 
+  /// Reveal a reply smoothly: the design moves, and the OS did not ask for less.
+  bool get _reveal => widget.look.motionMs > 0 && !(MediaQuery.maybeDisableAnimationsOf(context) ?? false);
+
+  Duration get _motion => _reveal ? Duration(milliseconds: widget.look.motionMs) : Duration.zero;
+
+  /// The card shadow: the design's hard offset where the cards draw it, else `cards.shadow`.
+  List<BoxShadow> _cardShadows(ChatLook l) {
+    final hard = l.hardOffset;
+    if (l.chat.cards.hard && hard != null) return <BoxShadow>[hardShadowOf(hard, l.text)];
+    return shadowsOf(l.chat.cards.shadow);
+  }
+
+  /// A card's box (`chat.cards`): `surfaceRaised` (or [color]), the outline
+  /// when `cards.border`, `cards.radius`, its shadow.
+  BoxDecoration _cardBox(ChatLook l, {Color? color}) {
+    final cards = l.chat.cards;
+    return BoxDecoration(
+      color: color ?? l.cardFill,
+      border: cards.border && l.borderWidth > 0 ? Border.all(color: l.border, width: l.borderWidth) : null,
+      borderRadius: BorderRadius.circular(cards.radius),
+      boxShadow: _cardShadows(l),
+    );
+  }
+
+  List<ChatBlock> _blocksOf(String text) {
+    final cached = _parsed[text];
+    if (cached != null) return cached;
+    if (_parsed.length > 400) _parsed.clear();
+    return _parsed[text] = ChatMarkdown.parse(text);
+  }
+
   @override
   Widget build(BuildContext context) {
     final l = widget.look;
+    final k = l.chat;
     final bw = l.borderWidth;
     final framed = !widget.fill || widget.keepFrame;
     final outline = bw > 0 && framed ? Border.all(color: l.border, width: bw) : null;
     final chrome = l.chrome;
     final radius = framed ? l.xl : 0.0;
-    final starters = _starters();
+    final wall = k.wallpaper;
+    final gradient = wall.style == 'gradient' && wall.colorTo != null
+        ? LinearGradient(
+            begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: <Color>[l.ink(wall.color), l.ink(wall.colorTo!)])
+        : null;
+    final plainHeader = chrome == null && k.header.style == 'plain';
+    final floating = k.composer.style == 'floating';
+    final docked = _docked();
+    final pin = widget.pin;
+    final banner = _banner();
+
+    final column = Column(
+      mainAxisSize: widget.fill ? MainAxisSize.max : MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        if (chrome != null) _titleBar(l, chrome) else _header(l),
+        if (pin != null && k.header.contextCard == 'bar')
+          ChatPinBar(key: ChatWindow.contextBarKey, look: l, pin: pin, glass: _headerGlass(l)),
+        AnimatedSize(
+          duration: _motion,
+          alignment: Alignment.topCenter,
+          child: banner == null ? const SizedBox(width: double.infinity) : KeyedSubtree(key: ChatWindow.bannerKey, child: banner),
+        ),
+        if (widget.fill) Expanded(child: _thread(l, docked, floating)) else _thread(l, docked, floating),
+        if (widget.below != null) widget.below!,
+        if (!floating && docked != null) docked,
+        if (!floating) _composer(l),
+      ],
+    );
     return Container(
       decoration: BoxDecoration(
-        color: l.background,
+        color: gradient == null ? l.background : null,
+        gradient: gradient,
         border: outline,
         borderRadius: BorderRadius.circular(radius),
         boxShadow: framed ? l.shadows : null,
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(math.max(0, radius - (outline == null ? 0 : bw))),
-        child: Column(
-          mainAxisSize: widget.fill ? MainAxisSize.max : MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            if (chrome != null) _titleBar(l, chrome) else _header(l),
-            if (widget.fill) Expanded(child: _thread(l)) else _thread(l),
-            if (widget.below != null) widget.below!,
-            if (starters.isNotEmpty) _suggestions(l, starters),
-            _composer(l),
-          ],
-        ),
+        child: plainHeader && _patternPainter(l) != null
+            // A plain header: the wallpaper — its pattern too — runs under it, one surface top to bottom.
+            ? Stack(children: <Widget>[
+                Positioned.fill(child: CustomPaint(painter: _patternPainter(l))),
+                column,
+              ])
+            : column,
       ),
     );
   }
 
+  /// The wallpaper's pattern, standing still while the messages scroll; null for none.
+  CustomPainter? _patternPainter(ChatLook l) {
+    final w = l.chat.wallpaper;
+    if (w.style != 'pattern' || w.pattern == 'none') return null;
+    final color = l.ink(w.patternColor);
+    return w.pattern == 'dots' ? _DotPattern(color) : ChatLinePattern(w.pattern, color);
+  }
+
+  /// The frosting a header (and the context bar under it) wears: a surface
+  /// header the design's own glass (v1) or the chat's; a plain one the chat's.
+  ThemeGlass? _headerGlass(ChatLook l) {
+    final style = l.chat.header.style;
+    if (style == 'surface') return l.glass ?? l.designGlass ?? l.chat.glass?.asGlass;
+    if (style == 'plain') return l.chat.glass?.asGlass;
+    return null;
+  }
+
+  // ── the header ──────────────────────────────────────────────────────────
+
   /// "New conversation": the compose icon beside the chevron, only while the
   /// window holds an earlier conversation.
-  Widget? _compose(ChatLook l, double padding, double size) {
+  Widget? _compose(ChatLook l, double padding, double size, Color color) {
     final start = widget.onNewConversation;
     final pieces = _pieces;
     if (start == null || pieces == null || !pieces.newConversation) return null;
@@ -621,12 +1039,12 @@ class _ChatWindowState extends State<ChatWindow> {
       onTap: start,
       child: Padding(
         padding: EdgeInsets.all(padding),
-        child: SdkIconView('compose', color: l.chevron, size: size, style: l.iconStyle, stroke: l.iconStroke),
+        child: SdkIconView('compose', color: color, size: size, style: l.iconStyle, stroke: l.iconStroke),
       ),
     );
   }
 
-  Widget? _chevron(ChatLook l, double padding, double size) {
+  Widget? _chevron(ChatLook l, double padding, double size, Color color) {
     final collapse = widget.onCollapse;
     if (collapse == null) return null;
     return Tap(
@@ -635,7 +1053,22 @@ class _ChatWindowState extends State<ChatWindow> {
       onTap: collapse,
       child: Padding(
         padding: EdgeInsets.all(padding),
-        child: SdkIconView('chevron', color: l.chevron, size: size, style: l.iconStyle, stroke: l.iconStroke, turned: true),
+        child: SdkIconView('chevron', color: color, size: size, style: l.iconStyle, stroke: l.iconStroke, turned: true),
+      ),
+    );
+  }
+
+  /// The header's call button (`escalation.call: header`), where the agent takes calls.
+  Widget? _headerCall(ChatLook l, double padding, double size, Color color) {
+    final call = widget.onCall;
+    if (call == null || l.chat.escalation.call != 'header') return null;
+    return Tap(
+      key: ChatWindow.headerCallKey,
+      label: 'Call $_title',
+      onTap: call,
+      child: Padding(
+        padding: EdgeInsets.all(padding),
+        child: SdkIconView('call', color: color, size: size, style: l.iconStyle, stroke: l.iconStroke),
       ),
     );
   }
@@ -652,21 +1085,27 @@ class _ChatWindowState extends State<ChatWindow> {
         trailing: _trailing(l),
       );
 
-  /// The title bar's right end: "New conversation" (while there is history to
-  /// start over from) beside the chevron.
+  /// The title bar's right end: the call button and "New conversation"
+  /// (while there is history to start over from) beside the chevron.
   Widget? _trailing(ChatLook l) {
     final pad = (WindowChrome.chevronBox - WindowChrome.chevronIcon) / 2;
-    final chevron = _chevron(l, pad, WindowChrome.chevronIcon);
-    final compose = _compose(l, pad, WindowChrome.chevronIcon);
-    if (compose == null) return chevron;
-    return Row(mainAxisSize: MainAxisSize.min, children: <Widget>[compose, if (chevron != null) chevron]);
+    final chevron = _chevron(l, pad, WindowChrome.chevronIcon, l.chevron);
+    final compose = _compose(l, pad, WindowChrome.chevronIcon, l.chevron);
+    final call = _headerCall(l, pad, WindowChrome.chevronIcon, l.muted);
+    if (compose == null && call == null) return chevron;
+    return Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+      if (call != null) call,
+      if (compose != null) compose,
+      if (chevron != null) chevron,
+    ]);
   }
 
-  /// THE AVATAR at [size] (30 in the header, 48 in the empty chat), per
-  /// `chat.avatar`: `logo` — the brand's logo, whole, on its plate; with none
-  /// uploaded, the launcher glyph when the design has one, else the title's
-  /// first letter. `glyph` — the launcher mark. `none` — nothing. Before the
-  /// chat's tokens: the launcher's mark as it always was.
+  /// THE AVATAR at [size] (30 in the header, 24 in a centred one, 48 in the
+  /// empty chat, 40 in the welcome card, 56 in the hero), per `chat.avatar`:
+  /// `logo` — the brand's logo, whole, on its plate; with none uploaded, the
+  /// launcher glyph when the design has one, else the title's first letter.
+  /// `glyph` — the launcher mark. `none` — nothing. Before the chat's tokens:
+  /// the launcher's mark as it always was.
   Widget? _avatar(ChatLook l, double size, {Key? key}) {
     final avatar = l.avatar ?? (l.glyph != null ? 'glyph' : 'logo');
     if (avatar == 'none') return null;
@@ -676,6 +1115,11 @@ class _ChatWindowState extends State<ChatWindow> {
     final onPlate = glyph == null && logo != null ? widget.logoPlate : LogoPlate.accent;
     final fill = logoPlateOf(onPlate, accent: l.accent, border: l.border, borderWidth: l.borderWidth);
     final box = BrandLogo.box(l.markShape, size).toDouble();
+    final corner = size == 30
+        ? l.markRadius
+        : size == 48
+            ? l.markRadius48
+            : Design.launcherRadius(l.markShape, ThemeRadius(sm: l.sm, md: l.md, lg: l.lg, xl: l.xl), size);
     Widget letter() => Text(initialOf(_title),
         style: textStyle(tokenColor(inkOnPlate(onPlate, l.onAccentHex)), size * 0.4, weight: 700, height: 1));
     return Container(
@@ -684,11 +1128,7 @@ class _ChatWindowState extends State<ChatWindow> {
       height: size,
       alignment: Alignment.center,
       clipBehavior: Clip.antiAlias,
-      decoration: BoxDecoration(
-        color: fill.color,
-        borderRadius: BorderRadius.circular(size == 30 ? l.markRadius : l.markRadius48),
-        border: fill.border,
-      ),
+      decoration: BoxDecoration(color: fill.color, borderRadius: BorderRadius.circular(corner), border: fill.border),
       child: glyph != null
           ? BrandMark(
               glyph: glyph,
@@ -706,61 +1146,150 @@ class _ChatWindowState extends State<ChatWindow> {
     );
   }
 
+  /// THE STATUS LINE under the title, first match wins: reconnecting,
+  /// connecting, the agent typing (with `typingStatus`), none, then the dot
+  /// and the words (`online`) or the words alone (`text`).
+  Widget? _status(ChatLook l, Color quiet, {required bool centered}) {
+    final h = l.chat.header;
+    String words;
+    var dot = false;
+    if (widget.reconnecting) {
+      words = widget.loader?.text.reconnecting ?? 'Reconnecting…';
+    } else if (!widget.online) {
+      words = widget.connectingText ?? 'Connecting…';
+    } else if (widget.typing && h.typingStatus) {
+      words = l.chat.typing.words;
+    } else if (h.status == 'none') {
+      return null;
+    } else {
+      words = l.subtitle.isNotEmpty ? l.subtitle : 'Online';
+      dot = h.status == 'online';
+    }
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        if (dot) ...<Widget>[
+          Container(width: 6, height: 6, decoration: BoxDecoration(color: l.ink(h.dot), shape: BoxShape.circle)),
+          const SizedBox(width: 6),
+        ],
+        Flexible(
+          child: Text(words,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: centered ? TextAlign.center : TextAlign.start,
+              style: l.statusStyle.copyWith(color: quiet)),
+        ),
+      ],
+    );
+  }
+
+  /// THE HEADER, 50 high (growing with the text): its fill by
+  /// `header.style`, the hairline under it when `header.divider`, and — start
+  /// aligned — [chevron, full screen only] [avatar] [title and status] [call]
+  /// [compose] [chevron]; centred — the same controls at the same edges and
+  /// the avatar (24) with the title and status as one group centred on the
+  /// whole width, kept 8 clear of them.
   Widget _header(ChatLook l) {
-    final line = l.borderWidth > 0 ? l.borderWidth : 0.0;
-    final mark = _avatar(l, 30, key: ChatWindow.avatarKey);
-    final online = l.subtitle.isNotEmpty ? l.subtitle : 'Online';
-    final chevron = _chevron(l, 6, 18);
-    final compose = _compose(l, 6, 18);
+    final h = l.chat.header;
+    final line = h.divider && l.borderWidth > 0 ? l.borderWidth : 0.0;
+    final centered = h.align == 'center';
+    final ink = l.ink(h.fill.text);
+    final quiet = l.ink(h.fill.textMuted);
+    final mark = _avatar(l, centered ? 24 : 30, key: ChatWindow.avatarKey);
+    final chevron = _chevron(l, 6, 18, quiet);
+    final compose = _compose(l, 6, 18, quiet);
+    final call = _headerCall(l, 6, 18, ink);
+    final leading = chevron != null && widget.leadingChevron;
+    final words = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: centered ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+      children: <Widget>[
+        Semantics(
+          header: true,
+          child: Text(_title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              textAlign: centered ? TextAlign.center : TextAlign.start,
+              style: l.titleStyle.copyWith(color: ink)),
+        ),
+        if (_status(l, quiet, centered: centered) case final status?) status,
+      ],
+    );
+    final trailing = <Widget>[
+      if (call != null) ...<Widget>[const SizedBox(width: 10), call],
+      if (compose != null) ...<Widget>[const SizedBox(width: 10), compose],
+      if (chevron != null && !leading) ...<Widget>[const SizedBox(width: 10), chevron],
+    ];
+    final Widget row;
+    if (!centered) {
+      row = Row(
+        children: <Widget>[
+          // A full screen: the chevron leads.
+          if (leading) ...<Widget>[chevron, const SizedBox(width: 10)],
+          if (mark != null) ...<Widget>[mark, const SizedBox(width: 10)],
+          Expanded(child: words),
+          ...trailing,
+        ],
+      );
+    } else {
+      // Each control is 30 across with 10 before it: the group keeps 8 clear of the widest end.
+      final before = leading ? 40.0 : 0.0;
+      final after = (call != null ? 40.0 : 0.0) + (compose != null ? 40.0 : 0.0) + (chevron != null && !leading ? 40.0 : 0.0);
+      final inset = math.max(before, after) + 8.0;
+      row = Stack(
+        alignment: Alignment.center,
+        children: <Widget>[
+          Row(children: <Widget>[if (leading) chevron, const Spacer(), ...trailing]),
+          Padding(
+            padding: EdgeInsets.symmetric(horizontal: inset),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                if (mark != null) ...<Widget>[mark, const SizedBox(width: 8)],
+                Flexible(child: words),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
+    final glass = _headerGlass(l);
+    final fill = h.fill;
+    final Color color;
+    Gradient? gradient;
+    switch (h.style) {
+      case 'gradient':
+        color = l.ink(fill.color);
+        // Leading → trailing, mirrored in RTL.
+        gradient = LinearGradient(
+          begin: AlignmentDirectional.centerStart,
+          end: AlignmentDirectional.centerEnd,
+          colors: <Color>[l.ink(fill.color), l.ink(fill.colorTo ?? fill.color)],
+        );
+      case 'plain':
+        // No fill: the wallpaper runs under it — frosted with the chat's glass.
+        color = glass == null ? const Color(0x00000000) : fade(l.ink(fill.color), glass.surfaceOpacity);
+      case 'surface':
+        color = glass == null ? l.ink(fill.color) : fade(l.ink(fill.color), glass.surfaceOpacity);
+      default: // accent: solid
+        color = l.ink(fill.color);
+    }
     return Column(
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
         surfaceBox(
           key: ChatWindow.headerKey,
-          color: l.header,
+          color: color,
+          gradient: gradient,
           border: l.border,
           borderWidth: 0,
           radius: BorderRadius.zero,
           shadows: const <BoxShadow>[],
-          glass: l.glass,
-          height: 50 - line,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: Row(
-            children: <Widget>[
-              // A full screen: the chevron leads.
-              if (chevron != null && widget.leadingChevron) ...<Widget>[chevron, const SizedBox(width: 10)],
-              if (mark != null) ...<Widget>[mark, const SizedBox(width: 10)],
-              Expanded(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis, style: l.titleStyle),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: <Widget>[
-                        if (widget.online) ...<Widget>[
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(color: l.dot, shape: BoxShape.circle),
-                          ),
-                          const SizedBox(width: 6),
-                        ],
-                        Flexible(
-                          child: Text(widget.online ? online : (widget.connectingText ?? 'Connecting…'),
-                              maxLines: 1, overflow: TextOverflow.ellipsis, style: l.statusStyle),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              if (compose != null) ...<Widget>[const SizedBox(width: 10), compose],
-              if (chevron != null && !widget.leadingChevron) ...<Widget>[const SizedBox(width: 10), chevron],
-            ],
-          ),
+          glass: glass,
+          minHeight: 50 - line,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: row,
         ),
         // The header's bottom outline.
         if (line > 0) Container(height: line, color: l.border),
@@ -768,12 +1297,109 @@ class _ChatWindowState extends State<ChatWindow> {
     );
   }
 
-  /// THE THREAD: the Upcoming calls card first, then the messages (or the
-  /// empty chat) and the typing bubble, over the dot pattern, which stands
-  /// still while they scroll.
-  /// The lines to draw: the turns (with their times and delivery) — a day
-  /// line where the day changes, and an earlier call as one row — else the
-  /// captions.
+  // ── the banner ──────────────────────────────────────────────────────────
+
+  bool get _waiting =>
+      widget.turns?.any((GraineChatTurn t) =>
+          t.delivery == GraineChatDelivery.sending || t.delivery == GraineChatDelivery.failed) ??
+      false;
+
+  /// The calm banner: while the chat reconnects, or is offline with a message waiting.
+  Widget? _banner() {
+    final l = widget.look;
+    if (widget.reconnecting) {
+      return ChatReconnectBanner(
+        look: l,
+        reconnecting: true,
+        loader: widget.loader,
+        loaderColor: widget.loaderColor,
+        reconnectingText: widget.loader?.text.reconnecting,
+      );
+    }
+    if (widget.offline && _waiting) return ChatReconnectBanner(look: l, reconnecting: false);
+    return null;
+  }
+
+  // ── the thread ──────────────────────────────────────────────────────────
+
+  /// The brand's conversation starters, while the customer has written
+  /// nothing — and never on a conversation that continues.
+  List<String> _starters() {
+    if (widget.look.suggestions.isEmpty) return const <String>[];
+    final pieces = _pieces;
+    final fresh = pieces != null
+        ? pieces.starters
+        : !widget.messages.any((Caption m) => m.role == Role.customer);
+    return fresh ? widget.look.suggestions.take(ThemeChat.maxSuggestions).toList() : const <String>[];
+  }
+
+  /// The chips docked above the composer: the agent's replies where they
+  /// are placed there, else the brand's starters (when chips, placed `both`
+  /// or `above-composer`). Null: none.
+  Widget? _docked() {
+    final l = widget.look;
+    final k = l.chat;
+    final placement = k.chips.placement;
+    final replies = widget.quickReplies;
+    final chips = k.welcome.starters == 'chips';
+    if (placement == 'above-composer' && replies.isNotEmpty) {
+      return _dockedChips(l, ChatWindow.quickRepliesKey, <String>[for (final r in replies) r.label], ChatWindow.quickReplyKey,
+          (int i) => _tapReply(replies[i]));
+    }
+    final starters = _starters();
+    if (chips && starters.isNotEmpty && placement != 'inline') {
+      return _dockedChips(l, ChatWindow.suggestionsKey, starters, ChatWindow.suggestionKey, (int i) => widget.onSend(starters[i]));
+    }
+    return null;
+  }
+
+  /// Docked chips: on the customer's side, wrapping onto rows (v1) or in one
+  /// row that scrolls sideways, 8 above the composer.
+  Widget _dockedChips(ChatLook l, Key key, List<String> words, Key Function(int) chipKey, void Function(int) onTap) => Padding(
+        key: key,
+        padding: const EdgeInsets.only(bottom: 8),
+        child: chatChips(l, words,
+            chipKey: chipKey, onTap: onTap, alignment: WrapAlignment.end, edge: l.chat.density.edge),
+      );
+
+  void _tapReply(GraineQuickReply reply) {
+    final tap = widget.onQuickReply;
+    if (tap != null) {
+      tap(reply);
+    } else {
+      widget.onSend(reply.text);
+    }
+  }
+
+  /// The welcome is drawn (card, hero): a conversation that does not continue an earlier one.
+  bool get _welcomes {
+    final l = widget.look;
+    if (!l.designed) return false;
+    final layout = l.chat.welcome.layout;
+    if (layout != 'card' && layout != 'hero') return false;
+    final turns = _pieces?.turns;
+    return turns == null || !turns.any((GraineChatTurn t) => t.restored);
+  }
+
+  /// The starters drawn in the thread: as a list (always), or as chips placed `inline`.
+  Widget? _threadStarters(ChatLook l, {WrapAlignment alignment = WrapAlignment.end, double edge = 0}) {
+    final starters = _starters();
+    if (starters.isEmpty) return null;
+    final k = l.chat;
+    if (k.welcome.starters == 'list') {
+      return chatStarterList(l, starters,
+          key: ChatWindow.suggestionsKey, rowKey: ChatWindow.suggestionKey, onTap: (int i) => widget.onSend(starters[i]));
+    }
+    if (k.chips.placement != 'inline') return null;
+    return chatChips(l, starters,
+        key: ChatWindow.suggestionsKey,
+        chipKey: ChatWindow.suggestionKey,
+        onTap: (int i) => widget.onSend(starters[i]),
+        alignment: alignment,
+        edge: edge);
+  }
+
+  /// The messages and rows to draw, oldest first.
   List<_Line> _lines() {
     final turns = _pieces?.turns;
     if (turns != null) {
@@ -785,69 +1411,361 @@ class _ChatWindowState extends State<ChatWindow> {
       return <_Line>[
         for (final row in ChatRows.build(said, now: now))
           switch (row) {
-            ChatDayRow() => _Line.day(ChatRows.dayLabel(row, now: now), key: ChatWindow.dayKey(row.date)),
-            ChatVoiceRow() => _Line.call(row.at, key: ChatWindow.voiceKey(row.id.substring('voice-'.length))),
-            ChatTurnRow(turn: final t) => _Line(t.caption,
-                at: t.at, unsent: t.delivery == GraineChatDelivery.sending || t.delivery == GraineChatDelivery.failed),
+            ChatDayRow() => _Line.day(ChatRows.dayLabel(row, now: now), 'row-${row.key}', key: ChatWindow.dayKey(row.date)),
+            ChatVoiceRow() =>
+              _Line.call(row.at, 'row-${row.key}', key: ChatWindow.voiceKey(row.id.substring('voice-'.length))),
+            ChatTurnRow(turn: final t) => _Line(t.caption, 'row-${row.key}',
+                at: t.at,
+                status: switch (t.delivery) {
+                  GraineChatDelivery.sending => ChatMessageStatus.waiting,
+                  GraineChatDelivery.failed => ChatMessageStatus.failed,
+                  _ => ChatMessageStatus.sent,
+                }),
           },
       ];
     }
     return <_Line>[
-      for (final m in widget.messages)
-        if (m.text.trim().isNotEmpty) _Line(m),
+      for (var i = 0; i < widget.messages.length; i++)
+        if (widget.messages[i].text.trim().isNotEmpty) _Line(widget.messages[i], 'row-m$i'),
     ];
   }
 
-  Widget _thread(ChatLook l) {
-    final said = _lines();
+  /// THE THREAD's rows, in order: the pinned card (`contextCard: card`), the
+  /// booked calls, the welcome (a card, or a hero), the messages — grouped,
+  /// with their times and status — the agent's suggested replies under its
+  /// turn, the starters placed in the thread, the typing indicator, and the
+  /// rating once the agent ended the conversation.
+  List<_Item> _items(ChatLook l, List<_Line> lines) {
+    final k = l.chat;
+    final d = k.density;
+    final items = <_Item>[];
+    final pin = widget.pin;
+    if (pin != null && k.header.contextCard == 'card') {
+      items.add(_Item('pin', (BuildContext _) => chatPinCard(l, pin, key: ChatWindow.contextCardKey, decoration: _cardBox(l))));
+    }
     final card = _upcomingCard(l);
+    if (card != null) items.add(_Item('upcoming', (BuildContext _) => card));
+    final welcomes = _welcomes;
+    var startersPlaced = false;
+    if (welcomes) {
+      if (k.welcome.layout == 'hero') {
+        items.insert(0, _Item('hero', (BuildContext _) => _hero(l), bleed: true, gap: 0));
+      } else {
+        items.add(_Item('welcome', (BuildContext _) => _welcomeCard(l)));
+      }
+      startersPlaced = true;
+    }
+    final grouped = k.bubbles.grouping;
+    final positions = grouped
+        ? ChatGroups.positions(<ChatGroupItem>[
+            for (final line in lines)
+              line.caption.text.isEmpty
+                  ? const ChatGroupItem(breaks: true)
+                  : ChatGroupItem(
+                      role: line.caption.role == Role.agent ? 'agent' : 'customer', at: line.at?.millisecondsSinceEpoch),
+          ])
+        : List<ChatGroupPosition>.filled(lines.length, ChatGroupPosition.single);
+    var lastAgent = -1;
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].dayLabel == null && lines[i].callAt == null && lines[i].caption.role == Role.agent) lastAgent = i;
+    }
+    final replies = widget.quickReplies;
+    final repliesInThread = replies.isNotEmpty && k.chips.placement != 'above-composer';
+    var m = 0;
+    for (var i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      final first = items.isEmpty;
+      final afterHero = items.length == 1 && items.first.key == 'hero';
+      // Two messages of one group sit closer.
+      final inGroup = i > 0 &&
+          (positions[i] == ChatGroupPosition.middle || positions[i] == ChatGroupPosition.last) &&
+          lines[i - 1].dayLabel == null &&
+          lines[i - 1].callAt == null;
+      final gap = first ? 0.0 : (afterHero ? 16.0 : (inGroup ? d.groupGap : null));
+      if (line.dayLabel != null) {
+        items.add(_Item(line.id, (BuildContext _) => _dayLine(l, line), gap: gap));
+      } else if (line.callAt != null) {
+        items.add(_Item(line.id, (BuildContext _) => _callLine(l, line), gap: gap));
+      } else {
+        final index = m++;
+        final position = positions[i];
+        final time = line.at != null && ChatGroups.showsTime(k.timestamps.show, position) ? ChatTime.clock(line.at!, h24: _h24) : null;
+        final user = line.caption.role != Role.agent;
+        final text = line.caption.text;
+        final live = line.caption.live;
+        final blocks = user || live ? null : _blocksOf(text);
+        items.add(_Item(
+          line.id,
+          (BuildContext _) => ChatMessageRow(
+            look: l,
+            user: user,
+            text: text,
+            speaker: user ? 'You' : _title,
+            position: position,
+            bubbleKey: ChatWindow.messageKey(index),
+            live: live,
+            animate: _reveal,
+            blocks: blocks,
+            time: time,
+            status: line.status,
+            onRetry: widget.onRetry,
+            onCopy: _copy,
+            onOpenLink: widget.onOpenLink,
+          ),
+          gap: gap,
+          message: true,
+        ));
+        if (repliesInThread && i == lastAgent) items.add(_repliesItem(l, replies, gap: 8));
+      }
+    }
+    // Replies with no agent turn on screen (its words not drawn): at the thread's end, on the agent's side.
+    if (repliesInThread && lastAgent < 0) items.add(_repliesItem(l, replies, gap: items.isEmpty ? 0 : 8));
+    if (!startersPlaced) {
+      final row = k.chips.scroll == 'row' && k.welcome.starters == 'chips';
+      final starters = _threadStarters(l, edge: row ? d.edge : 0);
+      if (starters != null) {
+        items.add(_Item('starters', (BuildContext _) => starters, gap: items.isEmpty ? 0 : null, bleed: row));
+      }
+    }
+    if (widget.typing) {
+      items.add(_Item(
+        'typing',
+        (BuildContext _) => Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: ChatTypingIndicator(
+            key: ChatWindow.typingKey,
+            look: l,
+            name: _title,
+            loader: widget.loader,
+            loaderColor: widget.loaderColor,
+            bubble: (Widget child, {EdgeInsetsGeometry? padding}) => chatBubbleBox(l,
+                user: false,
+                position: ChatGroupPosition.single,
+                direction: Directionality.of(context),
+                padding: padding,
+                child: child),
+          ),
+        ),
+        gap: items.isEmpty ? 0 : null,
+      ));
+    }
+    if (widget.ended && k.rating.show && widget.onRate != null) {
+      items.add(_Item(
+        'rating',
+        (BuildContext _) => ChatRatingCard(
+          key: ChatWindow.ratingKey,
+          look: l,
+          decoration: _cardBox(l),
+          rating: widget.rating,
+          onRate: widget.onRate,
+        ),
+        gap: items.isEmpty ? 0 : null,
+      ));
+    }
+    return items;
+  }
+
+  /// The agent's replies in the thread, under its turn, on its side — a
+  /// sideways row runs the window's full width, starting the density's edge in.
+  _Item _repliesItem(ChatLook l, List<GraineQuickReply> replies, {required double gap}) {
+    final row = l.chat.chips.scroll == 'row';
+    return _Item(
+      'replies',
+      (BuildContext _) => chatChips(l, <String>[for (final r in replies) r.label],
+          key: ChatWindow.quickRepliesKey,
+          chipKey: ChatWindow.quickReplyKey,
+          onTap: (int r) => _tapReply(replies[r]),
+          alignment: WrapAlignment.start,
+          edge: row ? l.chat.density.edge : 0),
+      gap: gap,
+      bleed: row,
+    );
+  }
+
+  Widget _thread(ChatLook l, Widget? docked, bool floating) {
+    final k = l.chat;
+    final lines = _lines();
+    final empty = lines.isEmpty && !widget.typing;
+    final centeredWelcome = empty && (k.welcome.layout == 'centered' || !l.designed);
+    final items = centeredWelcome ? const <_Item>[] : _items(l, lines);
+    _noteGrowth(items, lines);
+
+    final pattern = l.chrome == null && k.header.style == 'plain' ? null : _patternPainter(l);
+    final bottom = floating ? _overlay : 0.0;
+    final edge = k.density.edge;
     final Widget content;
-    if (said.isEmpty && !widget.typing) {
-      final empty = l.designed ? _emptyChat(l) : _emptySentence(l);
-      content = card == null
-          ? (widget.fill ? Center(child: SingleChildScrollView(child: empty)) : empty)
+    if (centeredWelcome) {
+      content = Padding(padding: EdgeInsets.only(bottom: bottom), child: _emptyState(l));
+    } else {
+      final lazy = widget.fill || items.length >= 12;
+      final last = items.length - 1;
+      Widget row(BuildContext context, int i) {
+        final item = items[i];
+        final gap = i == 0 ? 0.0 : (item.gap ?? k.density.gap);
+        return KeyedSubtree(
+          key: ValueKey<String>(item.key),
+          child: Padding(
+            padding: EdgeInsets.only(top: gap, left: item.bleed ? 0 : edge, right: item.bleed ? 0 : edge),
+            child: item.build(context),
+          ),
+        );
+      }
+
+      // A hero is the thread's first block, flush under the header.
+      final padding = EdgeInsets.only(top: items.isNotEmpty && items.first.bleed ? 0 : edge, bottom: edge + bottom);
+      // Newest at the bottom, and the bottom is where it opens: a reversed list,
+      // so a short conversation sits by the composer, as the window always drew
+      // it, and rows added below a reader who scrolled up leave what they read
+      // where it is (the list lays out from the rows it already has).
+      // A welcome card or hero stays at the top of the conversation: a short
+      // thread hangs from the header instead of sitting by the composer.
+      final hangs = widget.fill && _welcomes;
+      final list = ListView.builder(
+        key: ChatWindow.threadKey,
+        controller: _scroll,
+        reverse: true,
+        shrinkWrap: hangs,
+        padding: padding,
+        itemCount: items.length,
+        findChildIndexCallback: (Key key) {
+          if (key is! ValueKey<String>) return null;
+          final i = items.indexWhere((_Item it) => it.key == key.value);
+          return i < 0 ? null : last - i;
+        },
+        itemBuilder: (BuildContext context, int index) => row(context, last - index),
+      );
+      content = lazy
+          ? (hangs ? Align(alignment: Alignment.topCenter, child: list) : list)
+          // A short thread in the compact window: every row built, as it always was.
           : SingleChildScrollView(
+              key: ChatWindow.threadKey,
+              controller: _scroll,
               reverse: true,
-              padding: const EdgeInsets.all(12),
+              padding: padding,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: <Widget>[card, SizedBox(height: l.gap), empty],
+                children: <Widget>[for (var i = 0; i < items.length; i++) row(context, i)],
               ),
             );
-    } else {
-      content = SingleChildScrollView(
-        // Newest at the bottom, and the bottom is where it opens.
-        reverse: true,
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            if (card != null) ...<Widget>[card, SizedBox(height: l.gap)],
-            for (var i = 0, m = 0; i < said.length; i++) ...<Widget>[
-              if (i > 0) SizedBox(height: l.gap),
-              if (said[i].dayLabel != null)
-                _dayLine(l, said[i])
-              else if (said[i].callAt != null)
-                _callLine(l, said[i])
-              else ...<Widget>[
-                chatBubble(l, said[i].caption, key: ChatWindow.messageKey(m++), unsent: said[i].unsent),
-                if (l.showTimestamps) _time(l, said[i]),
-              ],
-            ],
-            if (widget.typing) ...<Widget>[
-              if (said.isNotEmpty) SizedBox(height: l.gap),
-              _TypingBubble(key: ChatWindow.typingKey, look: l),
-            ],
-          ],
-        ),
-      );
     }
-    final pattern = l.pattern;
-    final painted = pattern == null ? content : CustomPaint(painter: _DotPattern(pattern), child: content);
-    if (widget.fill) return painted;
-    return ConstrainedBox(constraints: BoxConstraints(maxHeight: widget.lifted ? 150 : 260), child: painted);
+    final stack = Stack(
+      children: <Widget>[
+        if (pattern != null) Positioned.fill(child: CustomPaint(painter: pattern)),
+        if (widget.fill) Positioned.fill(child: content) else content,
+        if (floating)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: _Measured(
+              onSize: (Size s) {
+                if (!mounted || (s.height - _overlay).abs() <= 0.5) return;
+                setState(() => _overlay = s.height);
+                _stickToBottom();
+              },
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  if (docked != null) docked,
+                  Padding(padding: const EdgeInsets.fromLTRB(10, 0, 10, 10), child: _composer(l)),
+                ],
+              ),
+            ),
+          ),
+        if (!_following && !centeredWelcome)
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 8 + bottom,
+            child: Center(
+              child: ChatScrollPill(
+                key: ChatWindow.pillKey,
+                look: l,
+                unseen: _unseen,
+                onTap: _scrollToLatest,
+                shadows: _cardShadows(l),
+              ),
+            ),
+          ),
+        if (_copied)
+          Positioned(
+            left: 0,
+            right: 0,
+            top: 8,
+            child: Center(
+              child: Semantics(
+                liveRegion: true,
+                child: Container(
+                  key: ChatWindow.copiedKey,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(color: l.text, borderRadius: BorderRadius.circular(14)),
+                  child: Text('Copied', style: l.captionStrongStyle.copyWith(color: l.background)),
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
+    if (widget.fill) return stack;
+    final cap = (widget.lifted ? 150.0 : 260.0) + bottom;
+    if (centeredWelcome || items.length < 12) return ConstrainedBox(constraints: BoxConstraints(maxHeight: cap), child: stack);
+    // A long conversation: the thread at its full height, the list lazy inside it.
+    return SizedBox(height: cap, child: stack);
+  }
+
+  /// New rows: followed while the reader is at the bottom, counted while they read further up.
+  void _noteGrowth(List<_Item> items, List<_Line> lines) {
+    final messages = items.where((_Item i) => i.message).length;
+    final last = items.isEmpty ? '' : items.last.key;
+    // A reply still arriving grows its own row: the thread follows it too.
+    final lastText = lines.isEmpty ? 0 : lines.last.caption.text.length;
+    // What sits at the bottom of the thread. A row added at the top (a booked
+    // call, a pinned card) moves nothing in a reversed list; one at the bottom does.
+    final bottom = '$last|$lastText|${widget.typing}|${widget.ended}|${widget.rating}';
+    final signature = '${items.length}|$bottom';
+    if (signature == _lastSignature) return;
+    final added = math.max(0, messages - _messages);
+    final below = bottom != _lastBottom;
+    _lastSignature = signature;
+    _lastBottom = bottom;
+    _messages = messages;
+    if (_following) {
+      _stickToBottom();
+    } else if (below) {
+      // Something changed below a reader who scrolled up: what they read stays where it is.
+      _scroll.holdPlace();
+      if (added > 0) _unseen += added;
+    }
+  }
+
+  /// Before any message: the empty chat (v1) — or, before the chat's
+  /// tokens, the sentence the window always opened with — with the booked
+  /// calls above it and the starters placed in the thread under it.
+  Widget _emptyState(ChatLook l) {
+    final card = _upcomingCard(l);
+    final empty = l.designed ? _emptyChat(l) : _emptySentence(l);
+    final pin = widget.pin;
+    final pinCard = pin != null && l.chat.header.contextCard == 'card'
+        ? chatPinCard(l, pin, key: ChatWindow.contextCardKey, decoration: _cardBox(l))
+        : null;
+    final starters = l.designed ? _threadStarters(l, alignment: WrapAlignment.center) : null;
+    final edge = l.chat.density.edge;
+    if (card == null && pinCard == null && starters == null) {
+      return widget.fill ? Center(child: SingleChildScrollView(child: empty)) : empty;
+    }
+    final column = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        if (pinCard != null) ...<Widget>[pinCard, SizedBox(height: l.chat.density.gap)],
+        if (card != null) ...<Widget>[card, SizedBox(height: l.chat.density.gap)],
+        empty,
+        if (starters != null) starters,
+      ],
+    );
+    return SingleChildScrollView(reverse: true, padding: EdgeInsets.all(edge), child: column);
   }
 
   /// Before the chat's tokens: the sentence the window always opened with.
@@ -863,6 +1781,7 @@ class _ChatWindowState extends State<ChatWindow> {
   /// below that (only when the brand wrote one) — centred, no dot.
   Widget _emptyChat(ChatLook l) {
     final mark = _avatar(l, 48);
+    final w = l.chat.wallpaper;
     return Padding(
       key: ChatWindow.emptyKey,
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
@@ -870,27 +1789,107 @@ class _ChatWindowState extends State<ChatWindow> {
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
           if (mark != null) ...<Widget>[mark, const SizedBox(height: 12)],
-          Text(_title, textAlign: TextAlign.center, maxLines: 2, overflow: TextOverflow.ellipsis, style: l.emptyTitleStyle),
+          Text(_title,
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: l.emptyTitleStyle.copyWith(color: l.ink(w.text))),
           if (l.subtitle.isNotEmpty) ...<Widget>[
             const SizedBox(height: 4),
-            Text(l.subtitle, textAlign: TextAlign.center, style: l.emptySubtitleStyle),
+            Text(l.subtitle, textAlign: TextAlign.center, style: l.emptySubtitleStyle.copyWith(color: l.ink(w.textMuted))),
           ],
         ],
       ),
     );
   }
 
-  /// A day separator: centred, caption size, strong, muted (DESIGN.md "Day separators").
+  /// THE WELCOME AS A CARD: the avatar (40) beside the title over the
+  /// subtitle, and the starters inside it (a list, or chips placed inline).
+  Widget _welcomeCard(ChatLook l) {
+    final mark = _avatar(l, 40);
+    final starters = _threadStarters(l, alignment: WrapAlignment.start);
+    return Container(
+      key: ChatWindow.welcomeKey,
+      padding: EdgeInsets.all(l.pad),
+      decoration: _cardBox(l),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              if (mark != null) ...<Widget>[mark, const SizedBox(width: 10)],
+              Expanded(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Semantics(header: true, child: Text(_title, style: l.welcomeTitleStyle.copyWith(color: l.text))),
+                    if (l.subtitle.isNotEmpty) Text(l.subtitle, style: l.captionStyle),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (starters != null) ...<Widget>[SizedBox(height: l.chat.density.gap), starters],
+        ],
+      ),
+    );
+  }
+
+  /// THE WELCOME AS A HERO: the window's full width in the header's fill (a
+  /// gradient top → bottom), its bottom corners `radius.xl`; the avatar 56,
+  /// the title and subtitle centred, and the starters under them.
+  Widget _hero(ChatLook l) {
+    final fill = l.chat.header.fill;
+    final mark = _avatar(l, 56);
+    final starters = _threadStarters(l, alignment: WrapAlignment.center);
+    final top = l.ink(fill.color);
+    return Container(
+      key: ChatWindow.welcomeKey,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: fill.colorTo == null ? top : null,
+        gradient: fill.colorTo == null
+            ? null
+            : LinearGradient(begin: Alignment.topCenter, end: Alignment.bottomCenter, colors: <Color>[top, l.ink(fill.colorTo!)]),
+        borderRadius: BorderRadius.vertical(bottom: Radius.circular(l.xl)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          if (mark != null) ...<Widget>[Center(child: mark), const SizedBox(height: 12)],
+          Semantics(
+            header: true,
+            child: Text(_title,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: l.heroTitleStyle.copyWith(color: l.ink(fill.text))),
+          ),
+          if (l.subtitle.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(l.subtitle, textAlign: TextAlign.center, style: l.heroSubtitleStyle.copyWith(color: l.ink(fill.textMuted))),
+          ],
+          if (starters != null) ...<Widget>[const SizedBox(height: 16), starters],
+        ],
+      ),
+    );
+  }
+
+  /// A day separator: centred, caption size, strong, on the wallpaper (DESIGN.md "Day separators").
   Widget _dayLine(ChatLook l, _Line line) => Semantics(
         key: line.key,
         header: true,
-        child: Text(line.dayLabel!, textAlign: TextAlign.center, style: l.dayStyle),
+        child: Text(line.dayLabel!, textAlign: TextAlign.center, style: l.dayStyle.copyWith(color: l.ink(l.chat.wallpaper.textMuted))),
       );
 
   /// An earlier call, as one row: the call icon and "Voice call · 6:05 PM" —
   /// that it happened, never what was said.
   Widget _callLine(ChatLook l, _Line line) {
     final clock = ChatTime.clock(line.callAt!, h24: _h24);
+    final muted = l.ink(l.chat.wallpaper.textMuted);
     return Semantics(
       key: line.key,
       label: ChatRows.callSpoken(clock),
@@ -898,25 +1897,12 @@ class _ChatWindowState extends State<ChatWindow> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.center,
         children: <Widget>[
-          SdkIconView('call', color: l.muted, size: 14, style: l.iconStyle, stroke: l.iconStroke),
+          SdkIconView('call', color: muted, size: 14, style: l.iconStyle, stroke: l.iconStroke),
           const SizedBox(width: 6),
-          Flexible(child: Text(ChatRows.callLabel(clock), maxLines: 1, overflow: TextOverflow.ellipsis, style: l.callStyle)),
+          Flexible(
+              child: Text(ChatRows.callLabel(clock),
+                  maxLines: 1, overflow: TextOverflow.ellipsis, style: l.callStyle.copyWith(color: muted))),
         ],
-      ),
-    );
-  }
-
-  /// When a message was said, 4 under it, on its speaker's side, in the
-  /// device's short time.
-  Widget _time(ChatLook l, _Line line) {
-    final at = line.at;
-    if (at == null) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(top: 4),
-      child: Text(
-        ChatTime.clock(at, h24: _h24),
-        textAlign: line.caption.role == Role.agent ? TextAlign.left : TextAlign.right,
-        style: l.timeStyle,
       ),
     );
   }
@@ -947,12 +1933,7 @@ class _ChatWindowState extends State<ChatWindow> {
         if (_book) ...<Widget>[SizedBox(height: l.gap), _bookButton(l)],
       ],
     );
-    final decoration = BoxDecoration(
-      color: chrome == null ? l.cardFill : l.cardBody,
-      border: bw > 0 ? Border.all(color: l.border, width: bw) : null,
-      borderRadius: BorderRadius.circular(l.lg),
-      boxShadow: l.cardShadows,
-    );
+    final decoration = _cardBox(l, color: chrome == null ? l.cardFill : l.cardBody);
     if (chrome == null) {
       return Container(
         key: ChatWindow.upcomingKey,
@@ -972,7 +1953,7 @@ class _ChatWindowState extends State<ChatWindow> {
             look: chrome,
             surface: ChromeSurface.component,
             title: WindowChrome.title(ChromeSurface.component, componentTitle: title),
-            topRadius: WindowChrome.innerRadius(l.lg, bw),
+            topRadius: WindowChrome.innerRadius(l.chat.cards.radius, bw),
           ),
           Padding(padding: EdgeInsets.all(l.pad), child: body),
         ],
@@ -987,7 +1968,7 @@ class _ChatWindowState extends State<ChatWindow> {
         label: 'Book a call',
         onTap: widget.onBook,
         child: Container(
-          height: 32,
+          constraints: const BoxConstraints(minHeight: 32),
           alignment: Alignment.center,
           decoration: BoxDecoration(
             border: Border.all(color: l.accent, width: math.max(1, l.borderWidth)),
@@ -1009,6 +1990,7 @@ class _ChatWindowState extends State<ChatWindow> {
   /// words, and "{call name} will call you" under them.
   Widget _bookRow(ChatLook l) {
     final name = Booking.callName(<String?>[widget.callName, l.title, widget.heading]);
+    final cards = l.chat.cards;
     return Tap(
       key: ChatWindow.bookKey,
       label: 'Book a call',
@@ -1017,9 +1999,9 @@ class _ChatWindowState extends State<ChatWindow> {
         padding: EdgeInsets.symmetric(horizontal: l.pad, vertical: (l.pad * 0.75).roundToDouble()),
         decoration: BoxDecoration(
           color: l.cardFill,
-          border: l.borderWidth > 0 ? Border.all(color: l.border, width: l.borderWidth) : null,
-          borderRadius: BorderRadius.circular(l.lg),
-          boxShadow: l.cardShadows,
+          border: cards.border && l.borderWidth > 0 ? Border.all(color: l.border, width: l.borderWidth) : null,
+          borderRadius: BorderRadius.circular(cards.radius),
+          boxShadow: _cardShadows(l),
         ),
         child: Row(
           children: <Widget>[
@@ -1085,7 +2067,7 @@ class _ChatWindowState extends State<ChatWindow> {
           enabled: cancel != null && state != GraineUpcomingCancel.cancelling,
           onTap: cancel == null ? null : () => cancel(c.id),
           child: Container(
-            height: 32,
+            constraints: const BoxConstraints(minHeight: 32),
             padding: const EdgeInsets.symmetric(horizontal: 12),
             alignment: Alignment.center,
             decoration: BoxDecoration(
@@ -1099,235 +2081,262 @@ class _ChatWindowState extends State<ChatWindow> {
     );
   }
 
-  /// The brand's conversation starters, while the customer has written
-  /// nothing — and never on a conversation that continues.
-  List<String> _starters() {
-    if (widget.look.suggestions.isEmpty) return const <String>[];
-    final pieces = _pieces;
-    final fresh = pieces != null
-        ? pieces.starters
-        : !widget.messages.any((Caption m) => m.role == Role.customer);
-    return fresh ? widget.look.suggestions.take(ThemeChat.maxSuggestions).toList() : const <String>[];
+  // ── the composer ────────────────────────────────────────────────────────
+
+  /// The words the user is writing, and the placeholder while there are none.
+  Widget _field(ChatLook l, ThemeChatComposer c) {
+    final placeholder = l.placeholder.isNotEmpty ? l.placeholder : 'Message…';
+    final style = l.inputStyle.copyWith(color: l.ink(c.text));
+    return Stack(
+      alignment: AlignmentDirectional.centerStart,
+      children: <Widget>[
+        if (_draft.text.isEmpty)
+          IgnorePointer(
+            child: Text(placeholder, maxLines: 1, overflow: TextOverflow.ellipsis, style: style.copyWith(color: l.ink(c.placeholder))),
+          ),
+        // EditableText, not a Material TextField: the bar sits above the
+        // app's Navigator, where there is no Material and no Overlay for a
+        // text field's handles to live in.
+        EditableText(
+          controller: _draft,
+          focusNode: _focus,
+          style: style,
+          cursorColor: l.accent,
+          backgroundCursorColor: l.muted,
+          maxLines: 1,
+          textInputAction: TextInputAction.send,
+          // Sent, and the keyboard stays up for the next message.
+          onEditingComplete: () {},
+          onSubmitted: (String _) => _submit(),
+        ),
+      ],
+    );
   }
 
-  /// THE STARTERS, on the customer's side just above the composer: chips 34
-  /// high, outlined in the accent, wrapping onto more rows; a tap sends the
-  /// words as the customer's message, exactly as written.
-  Widget _suggestions(ChatLook l, List<String> starters) => Container(
-        key: ChatWindow.suggestionsKey,
-        color: l.background,
-        padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-        child: LayoutBuilder(
-          builder: (BuildContext context, BoxConstraints box) => Wrap(
-            alignment: WrapAlignment.end,
-            spacing: 8,
-            runSpacing: 8,
-            children: <Widget>[
-              for (var i = 0; i < starters.length; i++)
-                Tap(
-                  key: ChatWindow.suggestionKey(i),
-                  label: starters[i],
-                  onTap: () => widget.onSend(starters[i]),
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: box.maxWidth),
-                    child: Container(
-                      height: 34,
-                      padding: const EdgeInsets.symmetric(horizontal: 14),
-                      alignment: Alignment.center,
-                      decoration: BoxDecoration(
-                        color: l.background,
-                        border: Border.all(color: l.accent, width: math.max(1, l.borderWidth)),
-                        borderRadius: BorderRadius.circular(math.min(l.xl, 17)),
-                      ),
-                      child: Text(starters[i], maxLines: 1, overflow: TextOverflow.ellipsis, style: l.starterStyle),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      );
-
-  Widget _composer(ChatLook l) {
+  /// THE SEND BUTTON at [size] — or, with `composer.mic` and an empty field
+  /// where the agent takes calls, the microphone that calls it. `circle`:
+  /// round on `sendFill`; `rounded`: corners `min(radius.md, 12)`; `icon`: no
+  /// fill, the icon at 22 in a 44 target. The send icon mirrors in RTL.
+  Widget _send(ChatLook l, ThemeChatComposer c, double size) {
     final ready = _draft.text.trim().isNotEmpty;
-    final bw = l.borderWidth;
-    final placeholder = l.placeholder.isNotEmpty ? l.placeholder : 'Message…';
-    return Container(
-      height: 58,
-      color: l.background,
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      child: Row(
-        children: <Widget>[
-          Expanded(
-            // The whole field focuses the text, not only its one line.
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: _focus.requestFocus,
-              child: Container(
-                key: ChatWindow.composerKey,
-                height: 40,
-                padding: const EdgeInsets.symmetric(horizontal: 14),
-                alignment: Alignment.centerLeft,
-                decoration: BoxDecoration(
-                  color: l.raised,
-                  border: bw > 0 ? Border.all(color: l.composerBorder, width: bw) : null,
-                  borderRadius: BorderRadius.circular(l.xl),
+    final call = widget.onCall;
+    final mic = c.mic && call != null && !ready;
+    final iconOnly = c.send == 'icon';
+    final fill = c.sendFill == null ? null : l.accentInk(c.sendFill!);
+    final iconColor = fill != null ? l.inkOn(fill, c.sendIcon) : l.accentInk(c.sendIcon);
+    final rtl = Directionality.of(context) == TextDirection.rtl;
+    Widget icon = SdkIconView(mic ? 'mic' : 'send',
+        color: iconColor, size: iconOnly ? 22 : (size >= 40 ? 18 : 16), style: l.iconStyle, stroke: l.iconStroke);
+    if (rtl && !mic) icon = Transform.flip(flipX: true, child: icon);
+    final box = iconOnly ? 44.0 : size;
+    return Tap(
+      key: ChatWindow.sendKey,
+      label: mic ? 'Call $_title' : 'Send',
+      enabled: mic || ready,
+      onTap: mic ? call : _submit,
+      child: Opacity(
+        opacity: mic || ready ? 1 : 0.4,
+        child: Container(
+          width: box,
+          height: box,
+          alignment: Alignment.center,
+          decoration: iconOnly || fill == null
+              ? null
+              : BoxDecoration(
+                  color: fill,
+                  shape: c.send == 'rounded' ? BoxShape.rectangle : BoxShape.circle,
+                  borderRadius: c.send == 'rounded' ? BorderRadius.circular(math.min(l.md, 12)) : null,
                 ),
-                child: Stack(
-                  alignment: Alignment.centerLeft,
-                  children: <Widget>[
-                    if (_draft.text.isEmpty)
-                      IgnorePointer(
-                        child: Text(placeholder,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: l.inputStyle.copyWith(color: l.composerPlaceholder)),
-                      ),
-                    // EditableText, not a Material TextField: the bar sits above
-                    // the app's Navigator, where there is no Material and no
-                    // Overlay for a text field's handles to live in.
-                    EditableText(
-                      controller: _draft,
-                      focusNode: _focus,
-                      style: l.inputStyle,
-                      cursorColor: l.accent,
-                      backgroundCursorColor: l.muted,
-                      maxLines: 1,
-                      textInputAction: TextInputAction.send,
-                      // Sent, and the keyboard stays up for the next message.
-                      onEditingComplete: () {},
-                      onSubmitted: (String _) => _submit(),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Tap(
-            key: ChatWindow.sendKey,
-            label: 'Send',
-            enabled: ready,
-            onTap: _submit,
-            child: Opacity(
-              opacity: ready ? 1 : 0.4,
-              child: Container(
-                width: 40,
-                height: 40,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(color: l.accent, shape: BoxShape.circle),
-                child: SdkIconView('send', color: l.onAccent, size: 18, style: l.iconStyle, stroke: l.iconStroke),
-              ),
-            ),
-          ),
-        ],
+          child: icon,
+        ),
       ),
     );
   }
+
+  /// The paperclip (where the design asks for one and the app handles
+  /// attachments) and the call button (`escalation.call: composer`, where
+  /// the agent takes calls and the microphone does not already call).
+  List<Widget> _tools(ChatLook l, ThemeChatComposer c) {
+    final color = l.accentInk(c.icon);
+    final attach = widget.onAttach;
+    final call = widget.onCall;
+    Widget tool(Key key, String icon, String label, VoidCallback onTap) => Tap(
+          key: key,
+          label: label,
+          onTap: onTap,
+          child: SizedBox(
+            width: 40,
+            height: 40,
+            child: Center(child: SdkIconView(icon, color: color, size: 20, style: l.iconStyle, stroke: l.iconStroke)),
+          ),
+        );
+    return <Widget>[
+      if (c.attach && attach != null) tool(ChatWindow.attachKey, 'attach', 'Attach', attach),
+      if (l.chat.escalation.call == 'composer' && call != null && !c.mic)
+        tool(ChatWindow.composerCallKey, 'call', 'Call $_title', call),
+    ];
+  }
+
+  /// THE COMPOSER, by `composer.style`: `bar` — a strip 58 high, the field
+  /// and the send button beside it (v1); `pill` — a strip 60 high, the field
+  /// a pill with the send button inside it; `floating` — one raised capsule
+  /// over the thread, the send button inside it.
+  Widget _composer(ChatLook l) {
+    final c = l.chat.composer;
+    final tools = _tools(l, c);
+    final bw = l.borderWidth;
+    final border = bw > 0 ? Border.all(color: l.ink(c.border), width: bw) : null;
+    final fill = l.ink(c.fill);
+    switch (c.style) {
+      case 'pill':
+      case 'floating':
+        final floating = c.style == 'floating';
+        final glass = l.chat.glass;
+        final radius = BorderRadius.circular(floating ? c.radius : c.height / 2);
+        // The send button inside the field, 6 in from a floating capsule's edge, 4 from a pill's.
+        final inset = floating ? 6.0 : 4.0;
+        final capsule = GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          excludeFromSemantics: true,
+          onTap: _focus.requestFocus,
+          child: surfaceBox(
+            key: ChatWindow.composerKey,
+            color: glass == null ? fill : fade(fill, glass.opacity),
+            border: l.ink(c.border),
+            borderWidth: bw,
+            radius: radius,
+            shadows: floating ? shadowsOf(c.shadow) : const <BoxShadow>[],
+            glass: glass?.asGlass,
+            minHeight: c.height,
+            padding: EdgeInsetsDirectional.only(start: tools.isEmpty ? 14 : inset, end: inset),
+            child: Row(
+              children: <Widget>[
+                ...tools,
+                if (tools.isNotEmpty) const SizedBox(width: 4),
+                Expanded(child: _field(l, c)),
+                const SizedBox(width: 8),
+                _send(l, c, 36),
+              ],
+            ),
+          ),
+        );
+        if (floating) return capsule;
+        return Container(
+          constraints: const BoxConstraints(minHeight: 60),
+          color: c.strip == null ? null : l.ink(c.strip!),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          alignment: Alignment.center,
+          child: capsule,
+        );
+      default: // bar
+        final glass = l.chat.glass;
+        final radius = BorderRadius.circular(c.radius);
+        return Container(
+          constraints: const BoxConstraints(minHeight: 58),
+          color: c.strip == null ? null : l.ink(c.strip!),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          child: Row(
+            children: <Widget>[
+              ...tools,
+              if (tools.isNotEmpty) const SizedBox(width: 4),
+              Expanded(
+                // The whole field focuses the text, not only its one line.
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  excludeFromSemantics: true,
+                  onTap: _focus.requestFocus,
+                  child: frosted(
+                    radius: radius,
+                    glass: glass,
+                    child: Container(
+                      key: ChatWindow.composerKey,
+                      constraints: BoxConstraints(minHeight: c.height),
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                      alignment: AlignmentDirectional.centerStart,
+                      decoration: BoxDecoration(
+                        color: glass == null ? fill : fade(fill, glass.opacity),
+                        border: border,
+                        borderRadius: radius,
+                      ),
+                      child: _field(l, c),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              _send(l, c, 40),
+            ],
+          ),
+        );
+    }
+  }
 }
 
-/// One line of the thread: what was said, when, and whether it is still to go
-/// out — or a day separator, or an earlier call's one row.
+/// THE THREAD'S SCROLLING. The thread is a reversed list (its offset is the
+/// distance from the newest row); when rows arrive, grow or go below a reader
+/// who scrolled up, the list lays itself out again from the newest row and
+/// what they were reading would slide. [holdPlace] asks the next layout to
+/// move the offset by exactly what the content below them changed by, before
+/// anything is painted.
+class _ThreadScroll extends ScrollController {
+  bool _hold = false;
+
+  void holdPlace() => _hold = true;
+
+  @override
+  ScrollPosition createScrollPosition(ScrollPhysics physics, ScrollContext context, ScrollPosition? oldPosition) =>
+      _ThreadPosition(this, physics: physics, context: context, oldPosition: oldPosition, initialPixels: initialScrollOffset);
+}
+
+class _ThreadPosition extends ScrollPositionWithSingleContext {
+  _ThreadPosition(this._owner, {required super.physics, required super.context, super.oldPosition, super.initialPixels});
+
+  final _ThreadScroll _owner;
+
+  @override
+  bool applyContentDimensions(double minScrollExtent, double maxScrollExtent) {
+    if (_owner._hold && hasContentDimensions && hasPixels) {
+      _owner._hold = false;
+      final grew = maxScrollExtent - this.maxScrollExtent;
+      if (grew.abs() > 0.5) {
+        super.applyContentDimensions(minScrollExtent, maxScrollExtent);
+        correctPixels(pixels + grew);
+        return false; // lay out again at the held place
+      }
+    }
+    return super.applyContentDimensions(minScrollExtent, maxScrollExtent);
+  }
+}
+
+/// One line of the thread: what was said, when, and where it is — or a day
+/// separator, or an earlier call's one row.
 class _Line {
-  const _Line(this.caption, {this.at, this.unsent = false})
+  const _Line(this.caption, this.id, {this.at, this.status = ChatMessageStatus.sent})
       : dayLabel = null,
         callAt = null,
         key = null;
 
-  const _Line.day(String this.dayLabel, {this.key})
+  const _Line.day(String this.dayLabel, this.id, {this.key})
       : caption = const Caption(Role.agent, ''),
         at = null,
-        unsent = false,
+        status = ChatMessageStatus.sent,
         callAt = null;
 
-  const _Line.call(DateTime this.callAt, {this.key})
+  const _Line.call(DateTime this.callAt, this.id, {this.key})
       : caption = const Caption(Role.agent, ''),
         at = null,
-        unsent = false,
+        status = ChatMessageStatus.sent,
         dayLabel = null;
 
   final Caption caption;
+
+  /// Stable while the conversation grows.
+  final String id;
   final DateTime? at;
-  final bool unsent;
+  final ChatMessageStatus status;
   final String? dayLabel;
   final DateTime? callAt;
   final Key? key;
-}
-
-/// THE AGENT IS TYPING: three dots in an agent bubble, rising in turn —
-/// still when the OS asked for less motion.
-class _TypingBubble extends StatefulWidget {
-  const _TypingBubble({super.key, required this.look});
-
-  final ChatLook look;
-
-  @override
-  State<_TypingBubble> createState() => _TypingBubbleState();
-}
-
-class _TypingBubbleState extends State<_TypingBubble> with SingleTickerProviderStateMixin {
-  late final AnimationController _t = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200));
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final still = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    if (still) {
-      _t.stop();
-    } else if (!_t.isAnimating) {
-      _t.repeat();
-    }
-  }
-
-  @override
-  void dispose() {
-    _t.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final l = widget.look;
-    const Caption shape = Caption(Role.agent, ' ');
-    return Semantics(
-      label: 'Typing',
-      child: ExcludeSemantics(
-        child: chatBubble(
-          l,
-          shape,
-          content: AnimatedBuilder(
-            animation: _t,
-            builder: (BuildContext context, Widget? _) => Row(
-              mainAxisSize: MainAxisSize.min,
-              children: <Widget>[
-                for (var i = 0; i < 3; i++) ...<Widget>[
-                  if (i > 0) const SizedBox(width: 4),
-                  Transform.translate(
-                    offset: Offset(0, -2.5 * _lift(_t.value, i)),
-                    child: Container(
-                      width: 6,
-                      height: 6,
-                      decoration: BoxDecoration(
-                        color: fade(l.bubbles == 'filled' ? l.agentBubbleText : l.text, 0.55),
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// Dot [i]'s lift at [t] (0–1 through the cycle): up and down in the first
-  /// half of its own staggered slot.
-  static double _lift(double t, int i) {
-    final p = (t - i * 0.18) % 1.0;
-    return p < 0.5 ? math.sin(p * 2 * math.pi).abs() : 0;
-  }
 }
 
 /// The dot pattern over the thread (contract/DESIGN.md, "Chat window"): dots
@@ -1353,56 +2362,32 @@ class _DotPattern extends CustomPainter {
   bool shouldRepaint(_DotPattern old) => old.color != color;
 }
 
-/// ONE MESSAGE, per contract/DESIGN.md: at most 84% of the width, on the
-/// speaker's side; corners `radius.lg` with the one nearest the speaker at
-/// `radius.sm`; padding `cardPadding × 0.75` by `cardPadding`. `filled` —
-/// each side its own colours; `outline` — both clear, the customer outlined
-/// in `accent`, the agent in `border`, text in `text`; `minimal` — the
-/// agent's words plain on the page, the customer's on `accentSoft`.
-Widget chatBubble(ChatLook l, Caption m, {Key? key, Widget? content, bool unsent = false}) {
-  final user = m.role != Role.agent;
-  Color? fill;
-  Color ink;
-  Border? outline;
-  switch (l.bubbles) {
-    case 'outline':
-      fill = null;
-      ink = l.text;
-      if (l.borderWidth > 0) outline = Border.all(color: user ? l.accent : l.border, width: l.borderWidth);
-    case 'minimal':
-      fill = user ? l.soft : null;
-      ink = l.text;
-    default: // filled
-      fill = user ? l.userBubble : l.agentBubble;
-      ink = user ? l.userBubbleText : l.agentBubbleText;
+/// Reports its child's size after each layout that changes it — the height
+/// of what floats over the thread, which the thread's last row must clear.
+class _Measured extends SingleChildRenderObjectWidget {
+  const _Measured({required this.onSize, super.child});
+
+  final ValueChanged<Size> onSize;
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _RenderMeasured(onSize);
+
+  @override
+  void updateRenderObject(BuildContext context, _RenderMeasured renderObject) => renderObject.onSize = onSize;
+}
+
+class _RenderMeasured extends RenderProxyBox {
+  _RenderMeasured(this.onSize);
+
+  ValueChanged<Size> onSize;
+  Size? _last;
+
+  @override
+  void performLayout() {
+    super.performLayout();
+    if (size == _last) return;
+    _last = size;
+    final s = size;
+    WidgetsBinding.instance.addPostFrameCallback((Duration _) => onSize(s));
   }
-  final bare = l.bubbles == 'minimal' && !user;
-  final lg = Radius.circular(l.lg);
-  final sm = Radius.circular(l.sm);
-  final box = Container(
-    key: key,
-    padding: bare
-        ? const EdgeInsets.all(2)
-        : EdgeInsets.symmetric(horizontal: l.pad, vertical: (l.pad * 0.75).roundToDouble()),
-    decoration: bare
-        ? null
-        : BoxDecoration(
-            color: fill,
-            border: outline,
-            borderRadius: BorderRadius.only(
-              topLeft: lg,
-              topRight: lg,
-              bottomLeft: user ? lg : sm,
-              bottomRight: user ? sm : lg,
-            ),
-          ),
-    // Still arriving, or typed while offline and not sent yet: provisional.
-    child: content ??
-        Opacity(
-          opacity: unsent ? 0.6 : (m.live ? 0.75 : 1),
-          child: Text(m.text, style: l.bodyStyle.copyWith(color: ink)),
-        ),
-  );
-  final side = user ? Alignment.centerRight : Alignment.centerLeft;
-  return FractionallySizedBox(widthFactor: 0.84, alignment: side, child: Align(alignment: side, child: box));
 }

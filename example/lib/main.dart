@@ -39,6 +39,8 @@ Future<void> main() async {
   ));
   graine.identify(const <String, Object?>{'name': 'Sample Tester'});
   graine.addListener(EventLog());
+  // The rating the user gives when the agent ends a chat — for your analytics.
+  graine.chat.onRated = (GraineChatRating r) => debugPrint('[GraineSample] chat rated ${r.value} of ${r.scale}');
 
   runApp(SampleApp(prefs: prefs));
 }
@@ -112,6 +114,8 @@ class _KycScreenState extends State<KycScreen> {
   @override
   void initState() {
     super.initState();
+    // What a chat started here is about, above its thread (where the design shows it).
+    GraineInApp.instance.chat.pin(const GraineChatPin(title: 'Identity check', subtitle: 'Step 1 of 2'));
     // Something the agent may do. Declare it on the agent in the dashboard too.
     _unregister = GraineInApp.instance.registerAction('fill_pan', (Map<String, Object?> args) {
       final value = args['pan'];
@@ -126,6 +130,7 @@ class _KycScreenState extends State<KycScreen> {
   @override
   void dispose() {
     _unregister();
+    GraineInApp.instance.chat.pin(null);
     _pan.dispose();
     super.dispose();
   }

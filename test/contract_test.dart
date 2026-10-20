@@ -318,7 +318,8 @@ void main() {
 
     test('every section is covered — a new one fails here until this suite checks it', () {
       const covered = <String>{
-        'generatedBy', 'cases', 'legacy', 'glyphs', 'icons', 'ringtones', 'fontWeights', 'fontAssetVersion', 'fontOrigin',
+        'generatedBy', 'cases', 'legacy', 'glyphs', 'icons', 'ringtones', 'chatStyles', 'fontWeights', 'fontAssetVersion',
+        'fontOrigin',
         // The call screen's look (DESIGN.md "Call screen" → "The look"): its numbers and its vectors.
         'callScreen', 'callVectors',
       };
@@ -357,7 +358,7 @@ void main() {
       expect(canon(<String, Object?>{for (final e in Ringtone.all.entries) e.key: e.value.toJson()}), canon(want));
     });
 
-    test('draws the same nine icons from the same path data the dashboard draws', () {
+    test('draws the same icons from the same path data the dashboard draws', () {
       final want = fx['icons']! as Map<String, Object?>;
       expect(<String, Object?>{for (final e in SdkIcons.all.entries) e.key: e.value.toJson()}, want);
       for (final e in SdkIcons.all.entries) {
@@ -380,6 +381,125 @@ void main() {
         expect(canon(d!.light.toJson()), canon(raw['light']), reason: 'light ${c['config']}');
         expect(canon(d.dark.toJson()), canon(raw['dark']), reason: 'dark ${c['config']}');
         expect(canon(d.config), canon(raw['config']));
+      }
+    });
+
+    test('reads every chat window v2 group of every design exactly, both schemes', () {
+      var styled = 0;
+      for (final c in cases(fx, 'cases')) {
+        final raw = c['design']! as Map<String, Object?>;
+        final d = ResolvedDesign.fromJson(raw)!;
+        for (final scheme in <String>['light', 'dark']) {
+          final chat = (raw[scheme]! as Map<String, Object?>)['chat']! as Map<String, Object?>;
+          final t = scheme == 'light' ? d.light : d.dark;
+          expect(t.chat.styled, isTrue, reason: 'design.json carries the v2 groups: ${c['config']} $scheme');
+          final groups = t.chat.style.toJson();
+          for (final key in ChatWords.groups) {
+            expect(canon(groups[key]), canon(chat[key]), reason: '$key, ${c['config']} $scheme');
+          }
+          styled++;
+        }
+      }
+      expect(styled, 2 * cases(fx, 'cases').length, reason: 'every case, light and dark');
+    });
+
+    test('an older server — no v2 groups — draws classic, derived from the v1 tokens exactly as the server would', () {
+      // A design whose chat never touched a v2 knob resolves to classic: stripping its
+      // v2 groups must give back the very groups the server sent.
+      const v1Keys = <String>{
+        'title', 'subtitle', 'avatar', 'placeholder', 'showTimestamps', 'background', 'suggestions', 'size',
+        'showUpcomingCalls', 'upcomingTitle', 'showHistory', 'newConversation',
+      };
+      bool classicConfig(Map<String, Object?> config) {
+        final chat = config['chat'];
+        if (chat == null) return true;
+        final m = chat as Map<String, Object?>;
+        return m.entries.every((MapEntry<String, Object?> e) =>
+            v1Keys.contains(e.key) || (e.key == 'header' && e.value is String) || (e.key == 'preset' && e.value == 'classic'));
+      }
+
+      var classic = 0;
+      var styled = 0;
+      for (final c in cases(fx, 'cases')) {
+        final raw = c['design']! as Map<String, Object?>;
+        for (final scheme in <String>['light', 'dark']) {
+          final tokens = <String, Object?>{...raw[scheme]! as Map<String, Object?>};
+          final chat = tokens['chat']! as Map<String, Object?>;
+          final stripped = <String, Object?>{
+            for (final e in chat.entries)
+              if (!ChatWords.groups.contains(e.key)) e.key: e.value,
+          };
+          final t = ThemeTokens.fromJson(<String, Object?>{...tokens, 'chat': stripped}, scheme: scheme)!;
+          expect(t.chat.styled, isFalse);
+          expect(t.toJson()['chat'], isNot(contains('header')), reason: 'an older session reads back without them');
+          final derived = t.chat.style;
+          expect(derived.preset, 'classic');
+          if (classicConfig(c['config']! as Map<String, Object?>)) {
+            final groups = derived.toJson();
+            for (final key in ChatWords.groups) {
+              expect(canon(groups[key]), canon(chat[key]), reason: '$key, ${c['config']} $scheme');
+            }
+            classic++;
+          } else {
+            // A v2 design's v1 tokens are the nearest an older SDK can draw: classic, from them.
+            expect(derived.header.fill.color, t.chat.headerBackground);
+            expect(derived.bubbles.shape, 'rounded');
+            expect(derived.composer.style, 'bar');
+            expect(derived.timestamps.show, t.chat.showTimestamps ? 'always' : 'never');
+            expect(derived.wallpaper.color, t.chat.background);
+            styled++;
+          }
+        }
+      }
+      expect(classic, greaterThanOrEqualTo(60), reason: 'every case before v2, both schemes');
+      expect(styled, greaterThan(0));
+    });
+
+    test('a group present with a field missing or of the wrong type is that field\'s classic value; an unknown word, the first listed', () {
+      final raw = cases(fx, 'cases').first['design']! as Map<String, Object?>;
+      final light = <String, Object?>{...raw['light']! as Map<String, Object?>};
+      final chat = <String, Object?>{...light['chat']! as Map<String, Object?>};
+      final classic = ResolvedDesign.fromJson(raw)!.light.chat;
+      chat['header'] = <String, Object?>{'style': 'sparkly', 'align': 7, 'contextCard': 'sideways'};
+      chat['bubbles'] = <String, Object?>{'shape': 'blob', 'radius': 'big', 'maxWidth': 3, 'user': <String, Object?>{'color': null}};
+      chat['composer'] = <String, Object?>{'style': 'dock', 'strip': null, 'send': 42};
+      chat['wallpaper'] = <String, Object?>{'style': 'pattern', 'pattern': 'waves'};
+      chat['glass'] = 'frosted';
+      chat['density'] = <String, Object?>{'name': 'roomy'};
+      final t = ThemeTokens.fromJson(<String, Object?>{...light, 'chat': chat})!.chat;
+      expect(t.header.style, 'surface', reason: 'unknown: the first listed');
+      expect(t.header.align, classic.header.align, reason: 'wrong type: classic');
+      expect(t.header.contextCard, 'bar');
+      expect(t.header.fill.color, classic.header.fill.color, reason: 'missing: classic');
+      expect(t.bubbles.shape, 'rounded');
+      expect(t.bubbles.radius, classic.bubbles.radius);
+      expect(t.bubbles.maxWidth, 0.92, reason: 'clamped to its range');
+      expect(t.bubbles.user.color, isNull, reason: 'present and null: transparent');
+      expect(t.bubbles.user.text, classic.bubbles.user.text);
+      expect(t.composer.style, 'bar');
+      expect(t.composer.strip, isNull, reason: 'present and null: no strip');
+      expect(t.composer.send, classic.composer.send);
+      expect(t.wallpaper.pattern, 'dots', reason: 'a pattern this build does not know is its dots');
+      expect(t.glass, isNull, reason: 'not an object: solid');
+      expect(t.density.name, 'comfortable');
+      expect(t.density.gap, classic.density.gap);
+    });
+
+    test('the chat styles ship as data: every case names one, and Classic sets nothing', () {
+      final styles = cases(fx, 'chatStyles');
+      final ids = <String>[for (final s in styles) s['id']! as String];
+      expect(ids, containsAll(<String>['classic', 'soft', 'bold', 'glass', 'minimal', 'crisp', 'cozy', 'calm', 'compact', 'lively']));
+      expect((styles.first['knobs']! as Map<String, Object?>), isEmpty, reason: 'Classic: the chat as it always was');
+      for (final s in styles) {
+        expect(s['name'], isA<String>());
+        expect(s['knobs'], isA<Map<String, Object?>>(), reason: '${s['id']}');
+      }
+      for (final c in cases(fx, 'cases')) {
+        final d = ResolvedDesign.fromJson(c['design'])!;
+        final chat = (c['config']! as Map<String, Object?>)['chat'];
+        final named = chat is Map<String, Object?> && chat['preset'] is String ? chat['preset']! as String : 'classic';
+        expect(d.light.chat.preset, named, reason: '${c['config']}');
+        expect(ids, contains(d.light.chat.preset));
       }
     });
 

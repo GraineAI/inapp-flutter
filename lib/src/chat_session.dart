@@ -172,6 +172,88 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   /// The customer is in the chat ([open] was called and [close] was not).
   bool get isOpen => _wanted;
 
+  // ── chat window v2 (contract/DESIGN.md "Chat window v2" → SDK API) ───────
+
+  /// THE REPLIES THE AGENT SUGGESTS for its latest turn, for an app that
+  /// draws its own chat (the SDK's chat window draws them as chips). Gone
+  /// once the user sends anything, the agent starts another turn, an earlier
+  /// conversation is restored, or the conversation ends.
+  List<GraineQuickReply> get quickReplies => _transcript.quickReplies;
+
+  /// Send [reply] as the user's own message — a real turn, exactly as if
+  /// they had typed its words.
+  void sendQuickReply(GraineQuickReply reply) => send(reply.text);
+
+  /// The agent ended the conversation. The chat window asks for a rating
+  /// where the design does; a message from the user starts over.
+  bool get ended => _transcript.ended;
+
+  /// The user's answer to "How was this chat?", once given — one per conversation.
+  GraineChatRating? get rating => _transcript.rating;
+
+  /// Called with the user's rating the moment they give it — from the chat
+  /// window's rating card, or [rate].
+  void Function(GraineChatRating rating)? onRated;
+
+  /// RATE THE CONVERSATION, for an app that draws its own rating: thumbs 1
+  /// (up) or 0 (down), stars and emoji 1–5. Taken only after the agent ended
+  /// the conversation, once; recorded on the conversation as a quiet event
+  /// (it never makes the agent speak) while the chat is connected, and
+  /// announced through [onRated] either way. Null when it was not taken.
+  GraineChatRating? rate(GraineChatRatingStyle style, num value) {
+    if (_disposed) return null;
+    final rating = ChatRatings.of(style, value);
+    if (!_transcript.rated(rating)) return null;
+    if (_connected) _send(ChatRatings.frame(rating));
+    notifyListeners();
+    onRated?.call(rating);
+    return rating;
+  }
+
+  GraineChatPin? _pin;
+
+  /// What the app pinned ([pin]), as it is drawn; null when nothing is.
+  GraineChatPin? get pinned => _pin;
+
+  /// PIN WHAT THE CONVERSATION IS ABOUT — an item, a booking, a case — as a
+  /// bar under the chat window's header or a card atop its thread, as the
+  /// design says (nowhere when it says none). `pin(null)` takes it away. Never
+  /// sent to the agent: tell it about the screen with the screen context.
+  void pin(GraineChatPin? pin) {
+    final next = pin?.cleaned;
+    if (next == _pin) return;
+    _pin = next;
+    if (!_disposed) notifyListeners();
+  }
+
+  VoidCallback? _onAttach;
+
+  /// The paperclip's tap. The chat window draws the paperclip only where
+  /// the design asks for one AND this is set; the SDK sends nothing itself —
+  /// pick and send the file your own way.
+  VoidCallback? get onAttach => _onAttach;
+  set onAttach(VoidCallback? handler) {
+    if (identical(handler, _onAttach)) return;
+    _onAttach = handler;
+    if (!_disposed) notifyListeners();
+  }
+
+  /// A link the user tapped in one of the agent's messages (http, https,
+  /// mailto or tel). The SDK opens nothing itself: hand it to your own
+  /// launcher here. Unset, a tap does nothing.
+  void Function(Uri uri)? onOpenLink;
+
+  /// TRY AGAIN NOW to send what is waiting or could not be sent — what the
+  /// chat window's "Not sent · Tap to retry" does: the chat connects at once,
+  /// its reconnects start over, and every message still to go goes out.
+  void retry() {
+    if (_disposed) return;
+    if (!_wanted) _graine._takeConversation();
+    _wanted = true;
+    _retryNow();
+    notifyListeners();
+  }
+
   /// THE USER'S BOOKED CALLS still to ring, soonest first — what the chat
   /// window's Upcoming calls card shows (it draws the first three). Read when
   /// the chat connects, after a booking or a cancel through this SDK, back in
@@ -480,6 +562,10 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       case ChatHistory(turns: final turns):
         // The conversation continues: the earlier turns, before any agent message. Never announced as new ones.
         if (!_transcript.restore(turns)) return;
+      case ChatQuickReplies(replies: final replies):
+        _transcript.offerReplies(replies);
+      case ChatConversationEnd():
+        _transcript.conversationEnded();
     }
     notifyListeners();
   }
@@ -489,7 +575,10 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _teardown();
     _transcript.closed();
     _graine._conversationStateChanged();
-    if (_wanted) _scheduleReconnect();
+    // After the agent ended the conversation the server closes the socket
+    // itself: reconnecting would open a new conversation under the old one's
+    // goodbye. The next message the user sends connects again.
+    if (_wanted && !_transcript.ended) _scheduleReconnect();
     if (!_disposed) notifyListeners();
   }
 

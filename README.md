@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.12.0
+  graine_inapp: ^0.13.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -357,6 +357,52 @@ draws it; switching between the call and the chat keeps the size. With no bar,
 `GraineChat.open` shows the chat on your navigator — a sheet, a tablet's panel
 or a screen of its own — and `compact`, which rides on the bar, opens as
 `large`. The `GraineChat` widget stays as it is, for a chat you place yourself.
+
+### The chat's style
+
+Every piece of the chat window is set in the dashboard — **Embed & Widgets →
+Appearance → Chat window → Style**: a style to start from (Classic, Soft,
+Bold, Glass, Minimal, Crisp, Cozy, Calm, Compact, Lively), then the header,
+bubbles and grouping, times, wallpaper, chips, cards, composer, typing
+indicator, welcome, the end-of-chat rating and a call button, each on its own.
+The SDK draws them with no code. The chat also reveals the agent's replies
+smoothly as they arrive, formats them (bold, italics, lists, links, code),
+copies a message's words on a long press, keeps the thread where the user left
+it when they scroll up (a pill takes them back to what is new), says
+*Reconnecting…* calmly while the connection comes back, and marks a message
+that could not be sent — a tap sends it again. It follows the system's text
+size, screen reader and reduced-motion settings, and right-to-left languages.
+
+A few pieces need a word from your app:
+
+```dart
+final chat = GraineInApp.instance.chat;
+
+// What the conversation is about, pinned above the thread (where the design shows it).
+chat.pin(const GraineChatPin(title: 'Case 1042', subtitle: 'Opened today', badge: 'Open'));
+chat.pin(null);                                    // takes it away; never sent to the agent
+
+// The paperclip shows only when the design asks for one AND you handle it.
+chat.onAttach = () => pickAndSendAFile();
+
+// Links in the agent's replies: open them your way (the SDK opens nothing itself).
+chat.onOpenLink = (Uri uri) => launchUrl(uri);
+
+// The rating the user gave when the agent ended the conversation.
+chat.onRated = (GraineChatRating rating) => print('${rating.value} of ${rating.scale}');
+```
+
+Drawing your own chat? `chat.quickReplies` are the replies the agent
+suggests for its latest turn (`GraineQuickReply`: `label`, `text`) and
+`chat.sendQuickReply(reply)` sends one as the user's own message;
+`chat.ended` says the agent ended the conversation, `chat.rate(style, value)`
+records the user's rating (`GraineChatRatingStyle.thumbs` 1 up / 0 down,
+`.stars` and `.emoji` 1–5 — once per conversation, after it ended) and
+`chat.rating` holds it; `chat.retry()` sends again what could not be sent.
+The design's pieces are on `tokens.chat` — `header`, `bubbles`, `timestamps`,
+`wallpaper`, `chips`, `cards`, `composer`, `typing`, `density`, `welcome`,
+`rating`, `escalation` and `glass` — every one complete, and the chat as it
+always was (`preset: "classic"`) for a design that never set them.
 
 ## 9. Calls the user books
 

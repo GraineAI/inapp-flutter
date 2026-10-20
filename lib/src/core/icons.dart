@@ -98,6 +98,45 @@ abstract final class SdkIcons {
   static const SdkIcon speaker =
       SdkIcon(body: 'M4 9.5h3.5L12 5.5v13l-4.5-4H4z', lines: 'M15.5 9a4 4 0 0 1 0 6M18 6.5a7.5 7.5 0 0 1 0 11');
 
+  // The chat window v2's own (contract/DESIGN.md "Chat window v2").
+
+  /// The composer's paperclip, where the app handles attachments.
+  static const SdkIcon attach = SdkIcon(
+    lines: 'M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48',
+  );
+
+  /// The rating's thumbs.
+  static const SdkIcon thumbUp = SdkIcon(
+    body: 'M15 5.88L14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76'
+        'a2 2 0 0 0 1.79-1.11L12 2a3.13 3.13 0 0 1 3 3.88z',
+    lines: 'M7 10v12',
+  );
+  static const SdkIcon thumbDown = SdkIcon(
+    body: 'M9 18.12L10 14H4.17a2 2 0 0 1-1.92-2.56l2.33-8A2 2 0 0 1 6.5 2H20a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2.76'
+        'a2 2 0 0 0-1.79 1.11L12 22a3.13 3.13 0 0 1-3-3.88z',
+    lines: 'M17 14V2',
+  );
+
+  /// The rating's stars: filled up to the choice, stroked after it.
+  static const SdkIcon star = SdkIcon(
+    body: 'M11.525 2.295a0.53 0.53 0 0 1 0.95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166 0.756a0.53 0.53 0 0 1 '
+        '0.294 0.904l-3.736 3.638a2.123 2.123 0 0 0 -0.611 1.878l0.882 5.14a0.53 0.53 0 0 1 -0.771 0.56l-4.618 -2.428'
+        'a2.122 2.122 0 0 0 -1.973 0L6.396 21.01a0.53 0.53 0 0 1 -0.77 -0.56l0.881 -5.139a2.122 2.122 0 0 0 -0.611 '
+        '-1.879L2.16 9.795a0.53 0.53 0 0 1 0.294 -0.906l5.165 -0.755a2.122 2.122 0 0 0 1.597 -1.16z',
+  );
+
+  /// The scroll-to-latest pill.
+  static const SdkIcon arrowDown = SdkIcon(lines: 'M12 5v14M19 12l-7 7-7-7');
+
+  /// A message's delivery: sent, waiting, not sent.
+  static const SdkIcon check = SdkIcon(lines: 'M20 6L9 17l-5-5');
+  static const SdkIcon clock = SdkIcon(body: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z', lines: 'M12 7.5V12l3 2');
+  static const SdkIcon alert = SdkIcon(body: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18z', lines: 'M12 7.5v5M12 16.25v0.01');
+
+  /// Try again.
+  static const SdkIcon retry =
+      SdkIcon(lines: 'M3 12a9 9 0 0 1 15.36-6.36L21 8M21 3v5h-5M21 12a9 9 0 0 1-15.36 6.36L3 16M3 21v-5h5');
+
   /// The whole set, by the names the contract uses.
   static const Map<String, SdkIcon> all = <String, SdkIcon>{
     'mic': mic,
@@ -110,6 +149,15 @@ abstract final class SdkIcons {
     'close': close,
     'compose': compose,
     'speaker': speaker,
+    'attach': attach,
+    'thumbUp': thumbUp,
+    'thumbDown': thumbDown,
+    'star': star,
+    'arrowDown': arrowDown,
+    'check': check,
+    'clock': clock,
+    'alert': alert,
+    'retry': retry,
   };
 
   /// HOW [style] DRAWS AN ICON AT [stroke] (contract/DESIGN.md, "Icons"):

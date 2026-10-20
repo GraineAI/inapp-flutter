@@ -145,6 +145,84 @@ abstract final class ChatRows {
       '${y.toString().padLeft(4, '0')}-${m.toString().padLeft(2, '0')}-${d.toString().padLeft(2, '0')}';
 }
 
+/// Where a row sits in its group of messages (contract/DESIGN.md "Chat window v2" → Groups).
+enum ChatGroupPosition { single, first, middle, last }
+
+/// One row of the thread, as grouping sees it: who said it and when — or a
+/// row that breaks a group (a day separator, an earlier call's row, a component).
+class ChatGroupItem {
+  const ChatGroupItem({this.role, this.at, this.breaks = false});
+
+  /// `agent` or `customer`; anything else breaks a group.
+  final String? role;
+
+  /// When it was said, in ms since the epoch; null joins the group before it.
+  final num? at;
+  final bool breaks;
+}
+
+/// MESSAGES IN A ROW FROM ONE SIDE, each said within two minutes of the one
+/// before, are ONE group: drawn closer together, their inner corners tight,
+/// a tail (where the design draws one) on the last, a time (where the design
+/// shows times by group) under the last. The React Native SDK's chatGroups
+/// and chatShowsTime (protocol.ts), pinned by sdk/contract/chat-window.json →
+/// `groups`.
+abstract final class ChatGroups {
+  /// Two messages further apart than this are two groups.
+  static const int gapMs = 120000;
+
+  /// Where each item sits in its group, in the same order; an item that breaks a group is single.
+  static List<ChatGroupPosition> positions(List<ChatGroupItem> items) {
+    final out = List<ChatGroupPosition>.filled(items.length, ChatGroupPosition.single);
+    var start = -1;
+    void close(int end) {
+      if (start < 0) return;
+      if (end > start) {
+        out[start] = ChatGroupPosition.first;
+        for (var i = start + 1; i < end; i++) {
+          out[i] = ChatGroupPosition.middle;
+        }
+        out[end] = ChatGroupPosition.last;
+      }
+      start = -1;
+    }
+
+    num? prevAt;
+    for (var i = 0; i < items.length; i++) {
+      final item = items[i];
+      final groupable = !item.breaks && (item.role == 'agent' || item.role == 'customer');
+      if (!groupable) {
+        close(i - 1);
+        prevAt = null;
+        continue;
+      }
+      final raw = item.at;
+      final at = raw != null && raw.isFinite ? raw : null;
+      final prev = i > 0 ? items[i - 1] : null;
+      final joins = start >= 0 &&
+          prev != null &&
+          !prev.breaks &&
+          prev.role == item.role &&
+          (at == null || prevAt == null || (at - prevAt).abs() <= gapMs);
+      if (!joins) {
+        close(i - 1);
+        start = i;
+      }
+      if (at != null) prevAt = at;
+    }
+    close(items.length - 1);
+    return out;
+  }
+
+  /// Whether a row's time is drawn: every message for `always`, the last of
+  /// each group for `group`, none for `never` (or a word this build does not know).
+  static bool showsTime(String show, ChatGroupPosition position) {
+    if (show == 'always') return true;
+    if (show == 'group') return position == ChatGroupPosition.single || position == ChatGroupPosition.last;
+    return false;
+  }
+}
+
 /// THE PIECES A CHAT WINDOW DRAWS of those the design can leave out
 /// (contract/DESIGN.md, "Chat window" → Booked calls, Earlier messages, New
 /// conversation) — the React Native SDK's chatPieces, ported, and pinned for

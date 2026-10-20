@@ -9,6 +9,7 @@ export 'bar.dart';
 export 'booking.dart';
 export 'call_look.dart';
 export 'chat.dart';
+export 'chat_format.dart';
 export 'chat_rows.dart';
 export 'chat_size.dart';
 export 'config.dart';

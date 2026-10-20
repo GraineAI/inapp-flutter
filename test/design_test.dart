@@ -1601,13 +1601,20 @@ void main() {
           }
 
           // The card: surfaceRaised — or, opened as a window, surface under its
-          // surfaceRaised bar — radius.lg, the card shadow or the hard offset.
+          // surfaceRaised bar — the chat's card corners (radius.lg in classic),
+          // its shadow or the hard offset, its outline where the cards draw one.
           final chrome = decorationOf(tester, find.byKey(const ValueKey<String>('graine-surface-card')));
+          final cards = t.chat.cards;
           expect(chrome.color, hex(t.window ? t.colors.surface : t.colors.surfaceRaised), reason: why);
-          expect(chrome.borderRadius, BorderRadius.circular(t.shape.radius.lg), reason: why);
+          expect(chrome.borderRadius, BorderRadius.circular(cards.radius), reason: why);
           expect(chrome.boxShadow,
-              hasLength(hard != null ? 1 : (t.elevation.card == null ? 0 : 1)),
+              hasLength(cards.hard && hard != null ? 1 : (cards.shadow == null ? 0 : 1)),
               reason: why);
+          expect(chrome.border != null, cards.border, reason: why);
+          if (t.chat.preset == 'classic') {
+            expect(cards.radius, t.shape.radius.lg, reason: '$why: classic is the card it always was');
+            expect(cards.hard, hard != null, reason: why);
+          }
 
           // Window chrome: the card and the caption open as desktop windows,
           // the card's title moved into its bar; every other design is plain.

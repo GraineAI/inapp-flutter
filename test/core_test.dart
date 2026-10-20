@@ -1794,8 +1794,12 @@ void fontTests() {
 
 void iconTests() {
   group('SdkIcons', () {
-    test('the nine icons, each a body a fill can sit in and lines that are only stroked', () {
-      expect(SdkIcons.all.keys, <String>['mic', 'micOff', 'end', 'send', 'chat', 'call', 'chevron', 'close', 'compose', 'speaker']);
+    test('the icons, each a body a fill can sit in and lines that are only stroked', () {
+      expect(SdkIcons.all.keys, <String>[
+        'mic', 'micOff', 'end', 'send', 'chat', 'call', 'chevron', 'close', 'compose', 'speaker',
+        // The chat window v2's own.
+        'attach', 'thumbUp', 'thumbDown', 'star', 'arrowDown', 'check', 'clock', 'alert', 'retry',
+      ]);
       for (final e in SdkIcons.all.entries) {
         final icon = e.value;
         expect(icon.body != null || icon.lines != null, isTrue, reason: e.key);

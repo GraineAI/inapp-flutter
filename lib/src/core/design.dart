@@ -14,10 +14,14 @@
 /// every surface keeps drawing from `appearance` as it always has.
 library;
 
+import 'dart:math' as math;
+
 import 'appearance.dart';
 import 'call_look.dart';
 import 'chat_size.dart';
 import 'js.dart';
+
+part 'chat_style.dart';
 
 /// One drop shadow: `{ y, blur, spread, opacity, color }`.
 class ThemeShadow {
@@ -496,7 +500,11 @@ class ThemeChat {
     this.upcomingTitle = '',
     this.showHistory = true,
     this.newConversation = true,
-  });
+    ChatStyleGroups? style,
+    this.styled = false,
+    ChatClassicBase? base,
+  })  : _style = style,
+        _base = base;
 
   static const List<String> avatars = <String>['logo', 'glyph', 'none'];
   static const List<String> patterns = <String>['none', 'dots'];
@@ -550,23 +558,103 @@ class ThemeChat {
   /// `GraineChatSession.newConversation()` still works.
   final bool newConversation;
 
+  // ── v2 (contract/DESIGN.md "Chat window v2") ─────────────────────────────
+
+  final ChatStyleGroups? _style;
+  final ChatClassicBase? _base;
+
+  /// The session carried the v2 groups (a v2 server). False: they are
+  /// classic, derived from the v1 tokens above, and [toJson] leaves them out
+  /// — an older session read back is what it said.
+  final bool styled;
+
+  /// EVERY v2 GROUP, complete: the session's over classic, field by field —
+  /// or, from an older server, classic: the chat exactly as the v1 tokens
+  /// draw it.
+  ChatStyleGroups get style => _style ?? ChatClassic.derive(this, _base ?? ChatClassicBase.classic(_Fallback.light.colors, dark: false));
+
+  /// The chat style it came from (informational: the groups are resolved).
+  String get preset => style.preset;
+  ThemeChatHeader get header => style.header;
+  ThemeChatBubbles get bubbles => style.bubbles;
+  ThemeChatTimestamps get timestamps => style.timestamps;
+
+  /// Behind the thread; [background] is its base colour.
+  ThemeChatWallpaper get wallpaper => style.wallpaper;
+  ThemeChatChips get chips => style.chips;
+  ThemeChatCards get cards => style.cards;
+  ThemeChatComposer get composer => style.composer;
+  ThemeChatTyping get typing => style.typing;
+  ThemeChatDensity get density => style.density;
+  ThemeChatWelcome get welcome => style.welcome;
+  ThemeChatRating get rating => style.rating;
+  ThemeChatEscalation get escalation => style.escalation;
+
+  /// Frosted pieces (header, composer, chips, agent bubbles); null is solid.
+  ThemeChatGlass? get glass => style.glass;
+
   /// WHAT AN OLDER SERVER'S CHAT LOOKS LIKE — the window as it was drawn
   /// before these tokens: the page, the surface header, the raised composer,
-  /// and the launcher's mark (its glyph when the design has one).
-  factory ThemeChat.fallback(ThemeColors c, {required bool dark, required bool hasGlyph}) => ThemeChat(
-        avatar: hasGlyph ? 'glyph' : 'logo',
-        background: c.background,
-        patternColor: Design.mixHex(c.background, c.text, dark ? 0.14 : 0.1),
-        headerBackground: c.surface,
-        headerText: c.text,
-        headerSubtext: c.textMuted,
-        composerBackground: c.surfaceRaised,
-        composerText: c.text,
-        composerPlaceholder: c.textMuted,
-        composerBorder: c.border,
+  /// and the launcher's mark (its glyph when the design has one). [base] is
+  /// the rest of the design classic is derived from (Graine Classic's shapes
+  /// when not given).
+  factory ThemeChat.fallback(ThemeColors c, {required bool dark, required bool hasGlyph, ChatClassicBase? base}) {
+    final v1 = ThemeChat(
+      avatar: hasGlyph ? 'glyph' : 'logo',
+      background: c.background,
+      patternColor: Design.mixHex(c.background, c.text, dark ? 0.14 : 0.1),
+      headerBackground: c.surface,
+      headerText: c.text,
+      headerSubtext: c.textMuted,
+      composerBackground: c.surfaceRaised,
+      composerText: c.text,
+      composerPlaceholder: c.textMuted,
+      composerBorder: c.border,
+    );
+    final b = base ?? ChatClassicBase.classic(c, dark: dark);
+    return v1._withStyle(ChatClassic.derive(v1, b), styled: false, base: b);
+  }
+
+  /// This chat with [style] for its v2 groups.
+  ThemeChat _withStyle(ChatStyleGroups style, {required bool styled, required ChatClassicBase? base}) => ThemeChat(
+        title: title,
+        subtitle: subtitle,
+        avatar: avatar,
+        placeholder: placeholder,
+        showTimestamps: showTimestamps,
+        suggestions: suggestions,
+        background: background,
+        pattern: pattern,
+        patternColor: patternColor,
+        headerBackground: headerBackground,
+        headerText: headerText,
+        headerSubtext: headerSubtext,
+        composerBackground: composerBackground,
+        composerText: composerText,
+        composerPlaceholder: composerPlaceholder,
+        composerBorder: composerBorder,
+        size: size,
+        showUpcomingCalls: showUpcomingCalls,
+        upcomingTitle: upcomingTitle,
+        showHistory: showHistory,
+        newConversation: newConversation,
+        style: style,
+        styled: styled,
+        base: base,
       );
 
+  /// The session's chat over [d]: the v1 tokens key by key, then — from a v2
+  /// server — every v2 group over classic (derived from those v1 tokens and
+  /// the rest of the design, [d]'s base), field by field.
   static ThemeChat fromJson(Map<String, Object?> r, ThemeChat d) {
+    final v1 = _v1FromJson(r, d);
+    final base = d._base ?? ChatClassicBase.classic(_Fallback.light.colors, dark: false);
+    final classic = ChatClassic.derive(v1, base);
+    final styled = ChatWords.groups.any(r.containsKey);
+    return v1._withStyle(styled ? ChatStyleGroups.fromJson(r, classic) : classic, styled: styled, base: base);
+  }
+
+  static ThemeChat _v1FromJson(Map<String, Object?> r, ThemeChat d) {
     String words(Object? v, String fallback) => v is String ? v : fallback;
     String c(String key, String fallback) => Design.normaliseHex(r[key]) ?? fallback;
     final raw = r['suggestions'];
@@ -624,6 +712,8 @@ class ThemeChat {
         'upcomingTitle': upcomingTitle,
         'showHistory': showHistory,
         'newConversation': newConversation,
+        // Only what was served: an older session's chat reads back without them.
+        if (styled) ...style.toJson(),
       };
 }
 
@@ -1463,9 +1553,10 @@ class ThemeTokens {
   bool get window => chrome == 'window';
 
   /// The chat window's tokens — the session's, else the window as it was
-  /// drawn before they existed.
+  /// drawn before they existed (its v2 groups classic, from these tokens).
   ThemeChat get chat =>
-      servedChat ?? ThemeChat.fallback(colors, dark: dark, hasGlyph: icons.launcher != null);
+      servedChat ??
+      ThemeChat.fallback(colors, dark: dark, hasGlyph: icons.launcher != null, base: ChatClassicBase.of(this));
 
   /// The call screen's tokens — the session's, else the fixed dark screen (and its look, derived).
   ThemeCall get call => servedCall ?? ThemeCall.fallback(colors, weights: font.weights);
@@ -1486,23 +1577,38 @@ class ThemeTokens {
     final chat = Js.asMap(r['chat']);
     final call = Js.asMap(r['call']);
     final font = ThemeFont.fromJson(r['font'], d.font);
+    final shape = ThemeShape.fromJson(r['shape'], d.shape);
+    final spacing = ThemeSpacing.fromJson(r['spacing'], d.spacing);
+    final elevation = ThemeElevation.fromJson(r['elevation'], d.elevation);
+    final bubbles = _pick(r['bubbles'], Design.bubbleStyles) ?? d.bubbles;
+    // What the chat's classic v2 groups are derived from when the session sends none.
+    final base = ChatClassicBase(
+      colors: colors,
+      radius: shape.radius,
+      borderWidth: shape.borderWidth,
+      spacing: spacing,
+      cardShadow: elevation.card,
+      hard: elevation.hardOffset != null,
+      bubbles: bubbles,
+    );
     return ThemeTokens(
       v: v == null ? 1 : v.round(),
       preset: preset.isEmpty ? d.preset : preset,
       scheme: said,
       colors: colors,
       font: font,
-      shape: ThemeShape.fromJson(r['shape'], d.shape),
-      spacing: ThemeSpacing.fromJson(r['spacing'], d.spacing),
-      elevation: ThemeElevation.fromJson(r['elevation'], d.elevation),
+      shape: shape,
+      spacing: spacing,
+      elevation: elevation,
       motion: ThemeMotion.fromJson(r['motion'], d.motion),
       icons: icons,
       glass: r.containsKey('glass') ? ThemeGlass.fromJson(r['glass']) : d.glass,
-      bubbles: _pick(r['bubbles'], Design.bubbleStyles) ?? d.bubbles,
+      bubbles: bubbles,
       chrome: _pick(r['chrome'], Design.chromes) ?? d.chrome,
       servedChat: chat == null
           ? null
-          : ThemeChat.fromJson(chat, ThemeChat.fallback(colors, dark: said == 'dark', hasGlyph: icons.launcher != null)),
+          : ThemeChat.fromJson(
+              chat, ThemeChat.fallback(colors, dark: said == 'dark', hasGlyph: icons.launcher != null, base: base)),
       servedCall: call == null
           ? null
           : ThemeCall.fromJson(call, ThemeCall.fallback(colors, weights: font.weights), weights: font.weights),
@@ -1628,6 +1734,58 @@ abstract final class Design {
       out.write(v.toRadixString(16).padLeft(2, '0').toUpperCase());
     }
     return out.toString();
+  }
+
+  /// Words on the accent (and on a gradient of its shades) read at this
+  /// contrast, as the v1 accent header and customer bubble always have; any
+  /// other text at 4.5:1 (theme.ts ON_ACCENT_MIN).
+  static const double onAccentMin = 3;
+
+  /// WCAG relative luminance of a #RRGGBB colour (theme.ts luminanceOf).
+  static double luminance(String hex) {
+    final n = int.parse((normaliseHex(hex) ?? '#000000').substring(1), radix: 16);
+    double ch(int c) {
+      final s = c / 255;
+      return s <= 0.03928 ? s / 12.92 : math.pow((s + 0.055) / 1.055, 2.4).toDouble();
+    }
+
+    return 0.2126 * ch((n >> 16) & 255) + 0.7152 * ch((n >> 8) & 255) + 0.0722 * ch(n & 255);
+  }
+
+  /// WCAG contrast ratio, 1–21 (theme.ts contrastRatio).
+  static double contrastRatio(String a, String b) {
+    final la = luminance(a);
+    final lb = luminance(b);
+    return (math.max(la, lb) + 0.05) / (math.min(la, lb) + 0.05);
+  }
+
+  /// [fg] if it reaches [min] on [bg]; otherwise the nearest colour that
+  /// does, stepped toward black or white — theme.ts ensureContrast, step for
+  /// step, so a colour derived here is the one the server would send.
+  static String ensureContrast(String fg, String bg, [double min = 4.5]) {
+    if (contrastRatio(fg, bg) >= min) return fg;
+    final toward = luminance(bg) > 0.5 ? '#000000' : '#FFFFFF';
+    for (var t = 0.1; t <= 1.0001; t += 0.1) {
+      final c = mixHex(fg, toward, t);
+      if (contrastRatio(c, bg) >= min) return c;
+    }
+    return toward;
+  }
+
+  /// [fg] made to read on both [a] and [b].
+  static String ensureOnBoth(String fg, String a, String b, double min) => ensureContrast(ensureContrast(fg, a, min), b, min);
+
+  /// Text a step quieter than [text] on a fill ([a], or a gradient [a] → [b]):
+  /// mixed toward the fill as far as it still reads — 4.5:1, or on the accent
+  /// its own floor — on every end (theme.ts quietOn).
+  static String quietOn(String text, String a, String? b, double floor) {
+    double worst(String fg) => b == null ? contrastRatio(fg, a) : math.min(contrastRatio(fg, a), contrastRatio(fg, b));
+    final min = floor >= 4.5 ? 4.5 : math.max(onAccentMin, math.min(4.5, worst(text)));
+    for (final t in const <double>[0.3, 0.25, 0.2, 0.15, 0.1, 0.05]) {
+      final c = mixHex(text, a, t);
+      if (worst(c) >= min) return c;
+    }
+    return text;
   }
 
   /// THE APP'S OWN COPY OF A FAMILY, or null.

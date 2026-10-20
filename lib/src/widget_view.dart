@@ -133,6 +133,7 @@ class _Skin {
     required this.explicitPlatform,
     required this.soft,
     this.tokens,
+    this.ownAccent = false,
     this.chrome,
     this.windowBody,
   });
@@ -149,9 +150,10 @@ class _Skin {
     // An accent the host or the component chose — which beats the design's.
     final ownAccent = (w.accent != null && Appearance.argb(w.accent) != null) ? w.accent! : look?.accent;
     final accentHex = ownAccent ?? tokens?.colors.accent ?? dash.accent;
+    // The design's card corners (`chat.cards.radius`, `radius.lg` in classic) — the component's own still win.
     final radius = w.radius ??
         look?.radius?.toDouble() ??
-        (explicitPlatform ? grammar.radius.toDouble() : (tokens?.shape.radius.lg ?? dash.radius));
+        (explicitPlatform ? grammar.radius.toDouble() : (tokens?.chat.cards.radius ?? dash.radius));
     final palette = Appearance.palette(
       w.scheme != null ? <String, Object?>{'theme': w.scheme} : appearance,
       deviceDark: deviceDark(context),
@@ -189,6 +191,7 @@ class _Skin {
           ? fade(accent, 0.15)
           : (ownAccent == null ? colorOf(c.accentSoft)! : Color.lerp(surface, accent, tokens!.dark ? 0.22 : 0.12)!),
       tokens: tokens,
+      ownAccent: ownAccent != null,
       chrome: chrome,
       // Under window chrome a component's body is `surface`, so the
       // `surfaceRaised` bar reads as a title bar — white window, grey bar. A
@@ -219,6 +222,12 @@ class _Skin {
   /// Null before designs: every value below is then exactly what it was.
   final ThemeTokens? tokens;
 
+  /// The host or the component chose its own accent: its buttons keep it, filled.
+  final bool ownAccent;
+
+  /// The chat's card tokens (contract/DESIGN.md "Chat window v2" → Cards); null before designs.
+  ThemeChatCards? get cards => tokens?.chat.cards;
+
   /// The design opens components as desktop windows: the title bar every
   /// surface wears. Null for a plain card (and before designs).
   final ChromeLook? chrome;
@@ -233,13 +242,28 @@ class _Skin {
 
   double get borderWidth => tokens?.shape.borderWidth ?? 1;
 
-  /// The chrome's shadow: the card elevation, or the solid offset.
+  /// The chrome's shadow: `chat.cards.shadow`, or the design's solid offset
+  /// where the cards draw it (classic: the card elevation, or the offset).
   List<BoxShadow> get shadows {
     final t = tokens;
     if (t == null) return const <BoxShadow>[BoxShadow(color: Color(0x2E000000), blurRadius: 12, offset: Offset(0, 4))];
     final hard = t.elevation.hardOffset;
-    if (hard != null) return <BoxShadow>[hardShadowOf(hard, text)];
-    return shadowsOf(t.elevation.card);
+    final c = t.chat.cards;
+    if (c.hard && hard != null) return <BoxShadow>[hardShadowOf(hard, text)];
+    return shadowsOf(c.shadow);
+  }
+
+  /// The outline around a card: always before designs; with one, where `chat.cards.border` says.
+  Border? get cardBorder =>
+      (cards?.border ?? true) ? Border.all(color: border, width: borderWidth) : null;
+
+  /// A large image's height at [width] (gallery, spotlight): its own size
+  /// (`auto`), or `chat.cards.image` — square, 3:4 or 9:16 — within 100–260.
+  double heroImageHeight(double width, double own) {
+    final shape = cards?.image ?? 'auto';
+    if (shape == 'auto' || !width.isFinite) return own;
+    final h = switch (shape) { 'square' => width, 'landscape' => width * 3 / 4, _ => width * 9 / 16 };
+    return h.clamp(100.0, 260.0);
   }
 
   /// Inside the chrome: `spacing.cardPadding`, else [before].
@@ -528,7 +552,7 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
   BoxDecoration _boxDecoration(_Skin s, {BorderRadius? radius, Color? color}) => BoxDecoration(
         color: color ?? s.surface,
         borderRadius: radius ?? BorderRadius.circular(s.radius),
-        border: Border.all(color: s.border, width: s.borderWidth),
+        border: s.cardBorder,
         boxShadow: s.shadows,
       );
 
@@ -1055,6 +1079,20 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
 
     Widget button(bool wide) {
       final quiet = row.unavailable || outline;
+      // A main button the component left filled is drawn as the design's cards say
+      // (`chat.cards.button`); a component's own look or accent still wins.
+      final cards = s.cards;
+      final designed = !quiet && cards != null && !s.ownAccent && !s.explicitPlatform;
+      Color? fill = quiet ? null : s.accent;
+      Border? edge = quiet ? Border.all(color: row.unavailable ? s.border : s.accent, width: 1.5) : null;
+      var ink = row.unavailable ? s.muted : (outline ? s.accent : s.onAccent);
+      if (designed) {
+        fill = cards.buttonFill == null ? null : tokenColor(cards.buttonFill!);
+        ink = tokenColor(cards.buttonText);
+        edge = cards.button == 'outline' && cards.buttonBorder != null
+            ? Border.all(color: tokenColor(cards.buttonBorder!), width: math.max(1, s.borderWidth))
+            : null;
+      }
       return Tap(
         label: a11y,
         enabled: !row.unavailable,
@@ -1065,14 +1103,13 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
           padding: EdgeInsets.symmetric(horizontal: wide ? 12 : 14),
           alignment: wide ? Alignment.center : null,
           decoration: BoxDecoration(
-            color: quiet ? null : s.accent,
-            border: quiet ? Border.all(color: row.unavailable ? s.border : s.accent, width: 1.5) : null,
+            color: fill,
+            border: edge,
             borderRadius: BorderRadius.circular(wide ? s.wideButtonRadius : s.buttonRadius),
           ),
           child: Center(
             widthFactor: wide ? null : 1,
-            child: Text(label,
-                style: textStyle(row.unavailable ? s.muted : (outline ? s.accent : s.onAccent), wide ? 14 : 12.5, weight: 700)),
+            child: Text(label, style: textStyle(ink, wide ? 14 : 12.5, weight: 700)),
           ),
         ),
       );
@@ -1135,7 +1172,11 @@ class _GraineWidgetViewState extends State<GraineWidgetView> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisSize: MainAxisSize.min,
                 children: column(<Widget?>[
-                  image(double.infinity, _heroHeight[look.imageSize] ?? 140),
+                  if (row.image.isNotEmpty)
+                    LayoutBuilder(
+                      builder: (BuildContext context, BoxConstraints box) => image(
+                          double.infinity, s.heroImageHeight(box.maxWidth, _heroHeight[look.imageSize] ?? 140))!,
+                    ),
                   badge(),
                   titleLine(true),
                   facts(),

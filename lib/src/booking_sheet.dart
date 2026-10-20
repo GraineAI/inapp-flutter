@@ -267,6 +267,7 @@ class _GraineBookingSheetState extends State<GraineBookingSheet> {
             accent: colorOf(dash.accent) ?? colorOf(Appearance.defaultAccent)!,
             radius: dash.radius,
             shadows: const <BoxShadow>[BoxShadow(color: Color(0x29000000), blurRadius: 24, offset: Offset(0, 8))],
+            accentHex: dash.accent,
           );
     final danger = tokens != null ? tokenColor(tokens.colors.danger) : const Color(0xFFDC2626);
     final h24 = MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? false;

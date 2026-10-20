@@ -232,7 +232,7 @@ class _BarLook {
 
   /// Before designs: the palettes, corners and depth the bar always had,
   /// drawn onto the contract's elements.
-  factory _BarLook.appearance({required bool dark, required Color accent, required double radius}) {
+  factory _BarLook.appearance({required bool dark, required Color accent, required double radius, String? accentHex}) {
     final surface = dark ? const Color(0xFF17161A) : const Color(0xFFFFFFFF);
     final text = dark ? const Color(0xFFF2F3F5) : const Color(0xFF16181C);
     final sub = dark ? const Color(0xFF9AA0A6) : const Color(0xFF61666D);
@@ -258,7 +258,7 @@ class _BarLook {
       youStyle: textStyle(accent, 10.5, weight: 600, letterSpacing: 0.6),
       iconStyle: 'outline',
       iconStroke: 2,
-      chat: ChatLook.appearance(dark: dark, accent: accent, radius: radius, shadows: barShadows),
+      chat: ChatLook.appearance(dark: dark, accent: accent, radius: radius, shadows: barShadows, accentHex: accentHex),
     );
   }
 
@@ -576,6 +576,7 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
         dark: Appearance.isDark(theme.isEmpty ? 'auto' : theme, deviceDark(context)),
         accent: ownAccent ?? colorOf(dash.accent) ?? colorOf(Appearance.defaultAccent)!,
         radius: widget.radius ?? dash.radius,
+        accentHex: ownAccent != null ? widget.accent : dash.accent,
       );
     }
     final loader = Loaders.resolve(appearance['loader']);
@@ -623,10 +624,14 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
       caption: call.caption,
       agentSpeaking: call.agentSpeaking,
     );
+    // The chat window v2's pieces (contract/DESIGN.md "Chat window v2"), from the SDK's own chat.
+    final session = chat is GraineChatSession ? chat : null;
+    // After the agent ended the conversation the chat is idle, not connecting: the bar and the header say so.
+    final chatOnline = (chat?.connected ?? false) || ((session?.ended ?? false) && !(session?.connecting ?? false));
     final status = voiceBarStatus(
       error: fault != null,
       inChat: isChat,
-      chatOnline: chat?.connected ?? false,
+      chatOnline: chatOnline,
       online: call.online,
       reconnecting: call.reconnecting,
       connectivity: call.connectivity,
@@ -811,6 +816,21 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
     void closeChat() => canSwitch ? _setSurface(AgentSurface.voice, call) : _endOrClose(call);
     _closeShown = big ? closeChat : null;
 
+    // Calling the agent from the chat — the call button, the composer's microphone — is the
+    // switch back to the call and its microphone, exactly as the customer would: only where the
+    // agent takes calls as well as chats.
+    final VoidCallback? callFromChat = canSwitch
+        ? () {
+            _setSurface(AgentSurface.voice, call);
+            // What the bar's microphone does now: a failed load retries; a blocked one waits on the bar.
+            if (failed) {
+              call.retry();
+            } else if (!micBlocked && !call.connected) {
+              unawaited(call.start());
+            }
+          }
+        : null;
+
     Widget? above;
     if (isChat && !big) {
       above = _Rise(
@@ -825,10 +845,24 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
             heading: name,
             messages: chat!.messages,
             turns: chat is GraineChatSession ? chat.turns : null,
-            online: chat.connected,
+            online: chatOnline,
             typing: switch (chat) { GraineChatTyping(:final agentTyping) => agentTyping, _ => false },
             onSend: chat.send,
             connectingText: loader.text.connecting,
+            loader: loader,
+            loaderColor: loaderColor,
+            pin: session?.pinned,
+            quickReplies: session?.quickReplies ?? const <GraineQuickReply>[],
+            onQuickReply: session?.sendQuickReply,
+            ended: session?.ended ?? false,
+            rating: session?.rating,
+            onRate: session == null ? null : (GraineChatRatingStyle style, int value) => session.rate(style, value),
+            onAttach: session?.onAttach,
+            onCall: callFromChat,
+            reconnecting: session?.reconnecting ?? false,
+            offline: session != null && !session.connected && !session.connecting,
+            onRetry: session?.retry,
+            onOpenLink: session == null ? null : (Uri uri) => session.onOpenLink?.call(uri),
             // The SDK's own chat knows the user's booked calls: the Upcoming calls card.
             upcoming: chat is GraineChatSession ? chat.upcomingCalls : const <GraineScheduledCall>[],
             cancelStateOf: chat is GraineChatSession ? chat.cancelStateOf : null,
@@ -936,10 +970,24 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
           heading: name,
           messages: chat.messages,
           turns: chat is GraineChatSession ? chat.turns : null,
-          online: chat.connected,
+          online: chatOnline,
           typing: switch (chat) { GraineChatTyping(:final agentTyping) => agentTyping, _ => false },
           onSend: chat.send,
           connectingText: loader.text.connecting,
+          loader: loader,
+          loaderColor: loaderColor,
+          pin: session?.pinned,
+          quickReplies: session?.quickReplies ?? const <GraineQuickReply>[],
+          onQuickReply: session?.sendQuickReply,
+          ended: session?.ended ?? false,
+          rating: session?.rating,
+          onRate: session == null ? null : (GraineChatRatingStyle style, int value) => session.rate(style, value),
+          onAttach: session?.onAttach,
+          onCall: callFromChat,
+          reconnecting: session?.reconnecting ?? false,
+          offline: session != null && !session.connected && !session.connecting,
+          onRetry: session?.retry,
+          onOpenLink: session == null ? null : (Uri uri) => session.onOpenLink?.call(uri),
           upcoming: chat is GraineChatSession ? chat.upcomingCalls : const <GraineScheduledCall>[],
           cancelStateOf: chat is GraineChatSession ? chat.cancelStateOf : null,
           onCancelUpcoming: chat is GraineChatSession ? (String id) => chat.cancelUpcoming(id) : null,

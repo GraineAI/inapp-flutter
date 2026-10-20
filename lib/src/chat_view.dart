@@ -123,6 +123,7 @@ class GraineChat extends StatefulWidget {
             accent: colorOf(Appearance.defaultAccent)!,
             radius: 18,
             shadows: const <BoxShadow>[],
+            accentHex: Appearance.defaultAccent,
           );
     final sheet = presentation == ChatPresentation.sheet;
     return showGeneralDialog<void>(
@@ -265,12 +266,17 @@ class _GraineChatState extends State<GraineChat> {
         accent: ownAccent ?? colorOf(dash.accent) ?? colorOf(Appearance.defaultAccent)!,
         radius: dash.radius,
         shadows: const <BoxShadow>[],
+        accentHex: ownAccent != null ? widget.accent : dash.accent,
       );
     }
     final media = MediaQuery.of(context);
     final keyboard = media.viewInsets.bottom;
     final components = widget.showComponents ? (widget.components ?? app?.components) : null;
     final typing = switch (chat) { GraineChatTyping(:final agentTyping) => agentTyping, _ => false };
+    // The chat window v2's pieces, from the SDK's own chat. No call button here: with no voice bar
+    // on screen there is nothing to carry a call started from this chat.
+    final session = chat is GraineChatSession ? chat : null;
+    final loader = Loaders.resolve(appearance['loader']);
     return DefaultTextStyle(
       style: textStyle(look.text, 14),
       child: ColoredBox(
@@ -287,10 +293,24 @@ class _GraineChatState extends State<GraineChat> {
                 heading: widget.name ?? dash.heading,
                 messages: chat.messages,
                 turns: chat is GraineChatSession ? chat.turns : null,
-                online: chat.connected,
+                // After the agent ended the conversation the chat is idle, not connecting.
+                online: chat.connected || ((session?.ended ?? false) && !(session?.connecting ?? false)),
                 typing: typing,
                 onSend: chat.send,
-                connectingText: Loaders.resolve(appearance['loader']).text.connecting,
+                connectingText: loader.text.connecting,
+                loader: loader,
+                loaderColor: colorOf(loader.color) ?? look.accent,
+                pin: session?.pinned,
+                quickReplies: session?.quickReplies ?? const <GraineQuickReply>[],
+                onQuickReply: session?.sendQuickReply,
+                ended: session?.ended ?? false,
+                rating: session?.rating,
+                onRate: session == null ? null : (GraineChatRatingStyle style, int value) => session.rate(style, value),
+                onAttach: session?.onAttach,
+                reconnecting: session?.reconnecting ?? false,
+                offline: session != null && !session.connected && !session.connecting,
+                onRetry: session?.retry,
+                onOpenLink: session == null ? null : (Uri uri) => session.onOpenLink?.call(uri),
                 upcoming: chat is GraineChatSession ? chat.upcomingCalls : const <GraineScheduledCall>[],
                 cancelStateOf: chat is GraineChatSession ? chat.cancelStateOf : null,
                 onCancelUpcoming: chat is GraineChatSession ? (String id) => chat.cancelUpcoming(id) : null,
