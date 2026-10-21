@@ -273,7 +273,7 @@ class _GraineBookingSheetState extends State<GraineBookingSheet> {
     final h24 = MediaQuery.maybeAlwaysUse24HourFormatOf(context) ?? false;
     final rules = app?.schedulingRules ?? const GraineSchedulingRules();
     final now = _clock();
-    final days = Booking.days(Booking.bounds(rules, now), now);
+    final days = Booking.days(Booking.bounds(rules, now), now, window: rules.callingWindow);
     BookingDay? chosen() {
       for (final d in days) {
         if (d.key == _dayKey) return d;

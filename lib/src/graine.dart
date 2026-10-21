@@ -724,19 +724,15 @@ class GraineInApp with WidgetsBindingObserver {
   /// holding it — for a picker of your own: the sheet's 5-minute steps, from
   /// the earliest the rules allow ([GraineSchedulingRules.minLeadMinutes]
   /// from now, rounded up) to the latest ([GraineSchedulingRules.maxDaysAhead]),
-  /// in the device's time zone. Empty for a day outside them. Whether the
-  /// customer can book at all is [bookingAvailable] ([bookingUnavailableReason]
-  /// says why not); the agent's calling window is checked by Graine when the
-  /// call is booked ([scheduleCall] — `outsideWindow`).
-  List<DateTime> bookingSlots(DateTime day, {DateTime? now}) {
-    final at = now ?? DateTime.fromMillisecondsSinceEpoch(_clock());
-    final d = day.toLocal();
-    for (final offered in Booking.days(Booking.bounds(schedulingRules, at), at)) {
-      final first = offered.first.toLocal();
-      if (first.year == d.year && first.month == d.month && first.day == d.day) return Booking.slots(offered);
-    }
-    return const <DateTime>[];
-  }
+  /// in the device's time zone — and, when the agent has a calling window
+  /// ([GraineSchedulingRules.callingWindow]), only the times inside it: its
+  /// days, from its start up to, not including, its end, on the device's
+  /// clock. Empty for a day outside them. Whether the customer can book at
+  /// all is [bookingAvailable] ([bookingUnavailableReason] says why not);
+  /// Graine checks the window again when the call is booked ([scheduleCall] —
+  /// `outsideWindow`).
+  List<DateTime> bookingSlots(DateTime day, {DateTime? now}) =>
+      BookingClock.device.slotsOn(schedulingRules, day, now ?? DateTime.fromMillisecondsSinceEpoch(_clock()));
 
   /// The device's time zone (IANA, "Asia/Kolkata"), once the SDK has read it —
   /// the booking sheet names it beside the time chosen. Null before then.

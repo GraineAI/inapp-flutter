@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.14.0
+  graine_inapp: ^0.14.1
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -169,7 +169,7 @@ words for any state. From 0.14.0 the bar's one word is public too: `status`
 (`GraineVoiceStatus` — idle, connecting, listening, thinking, speaking,
 reconnecting, muted, failed with `failure` as a sentence, ended),
 `transportFallbackReason` beside `transport`, and `agentLevel` / `micLevel`
-(0 for now: the page that carries the call posts no audio levels yet). The brand's logo arrives as `Appearance.resolve(...)`'s
+(0–1, about five times a second while a call is live, from 0.14.1). The brand's logo arrives as `Appearance.resolve(...)`'s
 `logoUrl` and `logoPlate` (`LogoPlate.accent` or `.white`); `BrandLogo.box`
 and `BrandLogo.plateLook` give the square to fit it into and its plate.
 

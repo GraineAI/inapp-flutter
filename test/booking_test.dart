@@ -216,6 +216,43 @@ void main() {
       expect(Booking.onDay(today, 9, 0), today.first, reason: 'before the first time: the first');
       expect(Booking.clamp(DateTime(2026, 10, 20), Booking.bounds(rules, now)), DateTime(2026, 10, 16, 17, 55));
     });
+
+    test("the agent's calling window: a day it leaves out is not offered, and each day's times stay inside it", () {
+      final windowed = GraineSchedulingRules.of(CallsSetting.fromJson(<String, Object?>{
+        ...calls(),
+        'scheduling': <String, Object?>{
+          'usersCanBook': true, 'minLeadMinutes': 5, 'maxDaysAhead': 2,
+          // Monday to Thursday, 9 am up to 7 pm.
+          'callingWindow': <String, Object?>{'start': '09:00', 'end': '19:00', 'days': <int>[3, 0, 1, 2]},
+        },
+      }));
+      expect(windowed.callingWindow, const GraineCallingWindow(start: '09:00', end: '19:00', days: <int>[0, 1, 2, 3]));
+      // Wednesday 14 Oct, 5:58 pm: today until the window closes, Thursday, and never Friday.
+      final now = DateTime(2026, 10, 14, 17, 58, 37);
+      final days = Booking.days(Booking.bounds(windowed, now), now, window: windowed.callingWindow);
+      expect(days.map((BookingDay d) => d.key), <String>['2026-10-14', '2026-10-15']);
+      expect(days.map((BookingDay d) => d.label), <String>['Today', 'Tomorrow']);
+      expect(days[0].first, DateTime(2026, 10, 14, 18, 5));
+      expect(days[0].last, DateTime(2026, 10, 14, 18, 55), reason: 'the end is never offered');
+      expect(days[1].first, DateTime(2026, 10, 15, 9));
+      expect(days[1].last, DateTime(2026, 10, 15, 18, 55));
+      final thursday = Booking.slots(days[1], window: windowed.callingWindow);
+      expect(thursday, hasLength(120));
+      expect(thursday.first, DateTime(2026, 10, 15, 9));
+      expect(Booking.slots(days[1], stepMinutes: 15, window: windowed.callingWindow).last, DateTime(2026, 10, 15, 18, 45));
+      expect(Booking.onDay(days[1], 20, 0), DateTime(2026, 10, 15, 18, 55), reason: "the picker stays inside the window");
+      expect(Booking.onDay(days[1], 7, 30), DateTime(2026, 10, 15, 9));
+      expect(Booking.days(Booking.bounds(windowed, now), now), hasLength(3), reason: 'no window: every day, as before');
+      final shut = GraineSchedulingRules.of(CallsSetting.fromJson(<String, Object?>{
+        ...calls(),
+        'scheduling': <String, Object?>{
+          'usersCanBook': true, 'maxDaysAhead': 2,
+          'callingWindow': <String, Object?>{'start': '09:00', 'end': '17:00', 'days': <int>[5, 6]},
+        },
+      }));
+      expect(Booking.days(Booking.bounds(shut, now), now, window: shut.callingWindow), isEmpty,
+          reason: 'a weekend window seen on a Wednesday with two days ahead: nothing to offer');
+    });
   });
 
   group('the words', () {
@@ -387,6 +424,46 @@ void main() {
     h.dispose();
     k.dispose();
     await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets("GraineInApp.bookingSlots: only the times inside the agent's calling window", (WidgetTester tester) async {
+    final body = calls();
+    (body['scheduling']! as Map<String, Object?>)['callingWindow'] = <String, Object?>{
+      'start': '09:00', 'end': '17:30', 'days': <int>[0, 1, 2, 3, 4],
+    };
+    final server = Server(session: session(callsBody: body));
+    final g = GraineInApp.forTesting(const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'),
+        httpClient: server.client, clock: () => tester.binding.clock.now().millisecondsSinceEpoch);
+    await g.loadSession();
+    expect(g.schedulingRules.callingWindow, const GraineCallingWindow(start: '09:00', end: '17:30', days: <int>[0, 1, 2, 3, 4]));
+    final now = DateTime(2026, 10, 14, 17, 58, 37); // a Wednesday, after the window closed
+    expect(g.bookingSlots(now, now: now), isEmpty, reason: 'today the window has closed');
+    final thursday = g.bookingSlots(DateTime(2026, 10, 15, 9), now: now);
+    expect(thursday.first, DateTime(2026, 10, 15, 9));
+    expect(thursday.last, DateTime(2026, 10, 15, 17, 25), reason: 'the end is never offered');
+    expect(thursday, hasLength(102));
+    expect(g.bookingSlots(DateTime(2026, 10, 16, 12), now: now).last, DateTime(2026, 10, 16, 17, 25));
+    g.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
+  testWidgets("the sheet offers only the agent's calling window: a day it leaves out has no chip", (WidgetTester tester) async {
+    phone(tester);
+    final now = tester.binding.clock.now();
+    final tomorrow = DateTime(now.year, now.month, now.day + 1);
+    final after = DateTime(now.year, now.month, now.day + 2);
+    final body = calls();
+    (body['scheduling']! as Map<String, Object?>)['callingWindow'] = <String, Object?>{
+      'start': '00:00', 'end': '23:59',
+      'days': <int>[for (var d = 0; d < 7; d++) if (d != tomorrow.weekday - 1) d],
+    };
+    final g = await ready(tester, Server(session: session(callsBody: body)));
+    await tester.pumpWidget(host(GraineBookingSheet(app: g, now: () => tester.binding.clock.now())));
+    String key(DateTime d) =>
+        '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+    expect(find.byKey(GraineBookingSheet.dayKey(key(tomorrow))), findsNothing);
+    expect(find.byKey(GraineBookingSheet.dayKey(key(after))), findsOneWidget);
+    await done(tester, g);
   });
 
   // ── the sheet ────────────────────────────────────────────────────────────

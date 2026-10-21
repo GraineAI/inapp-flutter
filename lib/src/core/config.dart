@@ -143,6 +143,76 @@ class MemorySetting {
   }
 }
 
+/// THE AGENT'S CALLING WINDOW, as booking applies it (from the session's
+/// `calls.scheduling.callingWindow`): the hours Graine may ring — from
+/// [start] up to, not including, [end] ("HH:MM", 24-hour, never across
+/// midnight) on the [days] it names (0 Monday … 6 Sunday) — read on the
+/// device's clock, in its own time zone. The booking sheet and
+/// `GraineInApp.bookingSlots` offer only the times inside it.
+final class GraineCallingWindow {
+  const GraineCallingWindow({required this.start, required this.end, required this.days});
+
+  /// When it opens, "HH:MM" — offered.
+  final String start;
+
+  /// When it closes, "HH:MM" — never offered.
+  final String end;
+
+  /// The days it is open: 0 Monday … 6 Sunday, each once, in order.
+  final List<int> days;
+
+  @override
+  bool operator ==(Object other) =>
+      other is GraineCallingWindow &&
+      other.start == start &&
+      other.end == end &&
+      other.days.length == days.length &&
+      Iterable<int>.generate(days.length).every((int i) => other.days[i] == days[i]);
+
+  @override
+  int get hashCode => Object.hash(start, end, Object.hashAll(days));
+
+  @override
+  String toString() => 'GraineCallingWindow($start–$end, days: $days)';
+}
+
+final RegExp _clockTime = RegExp(r'^([01]\d|2[0-3]):([0-5]\d)$');
+
+/// The session's `callingWindow`, read as every Graine SDK reads it
+/// (sdk/contract/booking-slots.json, `window`): an object whose `start` and
+/// `end` are "HH:MM" with start before end; `days` missing or null for every
+/// day, else the whole numbers 0–6 it holds, each once, in order. Anything
+/// else — no day left, days not a list, a time that is not one — is no
+/// window: what cannot be read is never a reason to offer nothing.
+GraineCallingWindow? _callingWindowOf(Object? raw) {
+  if (raw is! Map) return null;
+  final r = Js.asMap(raw)!;
+  String? clock(Object? v) {
+    if (v is! String) return null;
+    final s = v.trim();
+    return _clockTime.hasMatch(s) ? s : null;
+  }
+
+  final start = clock(r['start']);
+  final end = clock(r['end']);
+  if (start == null || end == null || start.compareTo(end) >= 0) return null;
+  final rawDays = r['days'];
+  final List<int> days;
+  if (rawDays == null) {
+    days = const <int>[0, 1, 2, 3, 4, 5, 6];
+  } else if (rawDays is List) {
+    final kept = <int>{
+      for (final d in rawDays)
+        if (d is num && d.isFinite && d == d.roundToDouble() && d >= 0 && d <= 6) d.toInt(),
+    };
+    days = List<int>.unmodifiable(kept.toList()..sort());
+  } else {
+    return null;
+  }
+  if (days.isEmpty) return null;
+  return GraineCallingWindow(start: start, end: end, days: days);
+}
+
 /// What users may book from the app (Agent → Calls & scheduling).
 class SchedulingSetting {
   const SchedulingSetting({
@@ -150,6 +220,7 @@ class SchedulingSetting {
     this.maxDaysAhead = 14,
     this.minLeadMinutes = 5,
     this.maxPendingPerUser = 3,
+    this.callingWindow,
   });
 
   /// `scheduleCall` is allowed at all.
@@ -157,6 +228,10 @@ class SchedulingSetting {
   final int maxDaysAhead;
   final int minLeadMinutes;
   final int maxPendingPerUser;
+
+  /// The agent's calling window (`callingWindow`); null when it has none —
+  /// every time between the earliest and the latest is offered.
+  final GraineCallingWindow? callingWindow;
 
   static SchedulingSetting? fromJson(Object? raw) {
     final r = Js.asMap(raw);
@@ -171,6 +246,7 @@ class SchedulingSetting {
       maxDaysAhead: n(r['maxDaysAhead'], 14, 1, 30),
       minLeadMinutes: n(r['minLeadMinutes'], 5, 2, 1440),
       maxPendingPerUser: n(r['maxPendingPerUser'], 3, 1, 10),
+      callingWindow: _callingWindowOf(r['callingWindow']),
     );
   }
 }

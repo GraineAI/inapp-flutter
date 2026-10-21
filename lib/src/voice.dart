@@ -218,6 +218,8 @@ class GraineVoice extends ChangeNotifier
 
   /// A call was connected and is over: [status] says ended until the next start.
   bool _ended = false;
+  double _agentLevel = 0;
+  double _micLevel = 0;
   String? _transportFallbackReason;
 
   @override
@@ -299,14 +301,15 @@ class GraineVoice extends ChangeNotifier
         ended: _ended,
       );
 
-  /// How loud the agent is, 0–1, for a visualiser of your own. Always 0 for
-  /// now: the page that carries this call posts no audio levels yet, so draw
-  /// from [status] ([GraineVoiceStatus.speaking]) or [agentSpeaking] instead.
-  double get agentLevel => 0;
+  /// How loud the agent is as its voice plays, 0–1, as the page that carries
+  /// the call measures it — about five times a second while a call is live,
+  /// 0 otherwise. For a meter or a visualiser of your own; a listener hears
+  /// each change. From 0.14.1 (0.14.0 always said 0).
+  double get agentLevel => _agentLevel;
 
-  /// How loud the customer is, 0–1. Always 0 for now, as [agentLevel] is:
-  /// the page that carries this call posts no audio levels yet.
-  double get micLevel => 0;
+  /// How loud the customer's microphone is, 0–1 — as [agentLevel], and 0
+  /// while muted. From 0.14.1.
+  double get micLevel => _micLevel;
 
   /// Why [status] is [GraineVoiceStatus.failed], as a sentence for a person
   /// — [error] itself for a setting someone must change; null otherwise.
@@ -597,6 +600,7 @@ class GraineVoice extends ChangeNotifier
   @override
   void setMuted(bool muted) {
     _muted = muted;
+    if (muted) _heard(null, 0);
     _post(Protocol.out(ProtocolOut.setMuted, <String, Object?>{'muted': muted}));
     notifyListeners();
   }
@@ -742,6 +746,8 @@ class GraineVoice extends ChangeNotifier
     if (_connected && !connected) _ended = true;
     _connected = connected;
     _connecting = connecting;
+    // No call, no levels: the last ones heard never outlive it.
+    if (!connected) _heard(0, 0);
     if (liveChanged) _graine._conversationStateChanged();
     if (changed) {
       _graine.components._onCall(connected || connecting);
@@ -778,6 +784,13 @@ class GraineVoice extends ChangeNotifier
   }
 
   void _onBridge(String? raw) {
+    // The levels come five times a second while a call is live: read before
+    // anything else, and kept out of the debug log, which they would drown.
+    final levels = _levelsIn(raw);
+    if (levels != null) {
+      if (_heard(levels.agent, levels.mic)) notifyListeners();
+      return;
+    }
     if (_graine.config.debug) {
       final s = raw ?? '';
       debugPrint('[Graine] ← page ${s.length > 600 ? s.substring(0, 600) : s}');
@@ -831,6 +844,7 @@ class GraineVoice extends ChangeNotifier
         if (!connected && !connecting) _startedCall = false;
       case PageMuted(muted: final muted):
         _muted = muted;
+        if (muted) _heard(null, 0);
       case PageCaption(role: final role, text: final text, live: final live):
         _captions = Captions.fold(_captions, Caption(role, text, live: live));
         _agentSpeaking = role == Role.agent && live;
@@ -910,6 +924,18 @@ class GraineVoice extends ChangeNotifier
         final known = ConnectStage.from(stage);
         if (known != null) _connectStage = known;
     }
+  }
+
+  /// The page's levels: followed while a call is live (the microphone's
+  /// while it is not muted), 0 otherwise; one the page did not say stays as
+  /// it was. True when either moved.
+  bool _heard(double? agent, double? mic) {
+    final nextAgent = _connected ? (agent ?? _agentLevel) : 0.0;
+    final nextMic = _connected && !_muted ? (mic ?? _micLevel) : 0.0;
+    if (nextAgent == _agentLevel && nextMic == _micLevel) return false;
+    _agentLevel = nextAgent;
+    _micLevel = nextMic;
+    return true;
   }
 
   bool _onMicrophoneRequested({required bool onlyMicrophone}) {
@@ -1006,3 +1032,24 @@ class GraineVoice extends ChangeNotifier
     }
   }
 }
+
+/// THE VOICE BAR'S LEVELS — `{type: "graine:levels", agent, mic}`, each 0–1:
+/// the agent's voice as it plays and the customer's microphone, as the page
+/// measures them, about five times a second while a call is live. Each is
+/// held to 0–1, and one missing or not a number is null (it stays as it was);
+/// null for any other message. Not a [PageMessage], so a `switch` over those
+/// written before it still covers them all.
+({double? agent, double? mic})? _levelsIn(String? raw) {
+  if (raw == null || !raw.contains(_levelsType)) return null;
+  Object? decoded;
+  try {
+    decoded = jsonDecode(raw);
+  } catch (_) {
+    return null;
+  }
+  if (decoded is! Map || decoded['type'] != _levelsType) return null;
+  double? level(Object? v) => v is num && v.isFinite ? v.toDouble().clamp(0.0, 1.0) : null;
+  return (agent: level(decoded['agent']), mic: level(decoded['mic']));
+}
+
+const String _levelsType = 'graine:levels';

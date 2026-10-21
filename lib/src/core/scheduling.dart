@@ -181,6 +181,7 @@ class GraineSchedulingRules {
     this.callName,
     this.hostedRinging = false,
     this.platforms = const <String>[],
+    this.callingWindow,
   });
 
   /// The rules of [calls] (the session's `calls`; null: an older server).
@@ -195,6 +196,7 @@ class GraineSchedulingRules {
       callName: calls?.callName,
       hostedRinging: calls?.hosted ?? false,
       platforms: calls?.platforms ?? const <String>[],
+      callingWindow: s?.callingWindow,
     );
   }
 
@@ -215,6 +217,12 @@ class GraineSchedulingRules {
 
   /// Where it rings: `ios`, `android`.
   final List<String> platforms;
+
+  /// The agent's calling window — the hours, on the device's clock, a booked
+  /// call may ring; null when it has none. The booking sheet and
+  /// `GraineInApp.bookingSlots` offer only the times inside it; Graine still
+  /// checks it when a call is booked (`outsideWindow`).
+  final GraineCallingWindow? callingWindow;
 
   /// The soonest a call can be booked for: [now] + [minLeadMinutes].
   DateTime earliest(DateTime now) => now.add(Duration(minutes: minLeadMinutes));

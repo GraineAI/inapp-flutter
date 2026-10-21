@@ -249,7 +249,7 @@ void main() {
     expect(g.voice.status, GraineVoiceStatus.speaking);
     expect(g.voice.captions.last.live, isTrue, reason: "the agent's line as it is said — final once live is false");
     expect(<double>[g.voice.agentLevel, g.voice.micLevel], <double>[0, 0],
-        reason: 'the page posts no audio levels yet: 0, never an invented one');
+        reason: 'no levels from the page yet: 0, never an invented one');
     g.voice.setMuted(true);
     expect(g.voice.status, GraineVoiceStatus.muted);
     g.voice.setMuted(false);
@@ -261,6 +261,40 @@ void main() {
     expect(g.voice.failure, isNull);
     await g.voice.start();
     expect(g.voice.status, GraineVoiceStatus.connecting, reason: 'the next start places another');
+    await finish(tester, g);
+  });
+
+  // 0.14.1 — the page's levels (`graine:levels`), for a meter of your own.
+  testWidgets('the levels follow the page while a call is live, the microphone 0 while muted, both 0 once it is over',
+      (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    var heard = 0;
+    g.voice.addListener(() => heard++);
+    page.say(<String, Object?>{'type': 'graine:levels', 'agent': 0.5, 'mic': 0.5});
+    expect(<double>[g.voice.agentLevel, g.voice.micLevel], <double>[0, 0], reason: 'no call, no levels');
+    expect(heard, 0, reason: 'nothing moved: nobody is told');
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
+    page.say(<String, Object?>{'type': 'graine:levels', 'agent': 0.42, 'mic': 0.1});
+    expect(<double>[g.voice.agentLevel, g.voice.micLevel], <double>[0.42, 0.1]);
+    page.say(<String, Object?>{'type': 'graine:levels', 'agent': 3, 'mic': -1});
+    expect(<double>[g.voice.agentLevel, g.voice.micLevel], <double>[1, 0], reason: 'held to 0–1');
+    page.say(<String, Object?>{'type': 'graine:levels', 'agent': 'loud', 'mic': 0.3});
+    expect(<double>[g.voice.agentLevel, g.voice.micLevel], <double>[1, 0.3], reason: 'a level that is not a number leaves it as it was');
+    final before = heard;
+    page.say(<String, Object?>{'type': 'graine:levels', 'agent': 1, 'mic': 0.3});
+    expect(heard, before, reason: 'the same levels are no news');
+    g.voice.setMuted(true);
+    expect(g.voice.micLevel, 0, reason: 'muted: the microphone is 0');
+    page.say(<String, Object?>{'type': 'graine:levels', 'agent': 0.2, 'mic': 0.6});
+    expect(<double>[g.voice.agentLevel, g.voice.micLevel], <double>[0.2, 0]);
+    g.voice.setMuted(false);
+    page.say(<String, Object?>{'type': 'graine:ended'});
+    expect(<double>[g.voice.agentLevel, g.voice.micLevel], <double>[0, 0], reason: 'the call is over');
     await finish(tester, g);
   });
 
