@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.13.1
+  graine_inapp: ^0.14.0
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -137,9 +137,16 @@ below). Your app passes nothing about how it looks:
   a chat (Embed & Widgets → mode), gets the SDK's own text chat — the bar
   offers the switch as the dashboard allows, draws the chat window in the
   design, ends the call before it opens the chat (one conversation at a time)
-  and hangs the chat up when the customer leaves it. A typing bubble shows
-  while the agent composes; messages typed offline stay on screen and go the
-  moment it connects. Run your own chat instead with `chat:` (a
+  and ends the chat when the customer switches back to the call. A chat window
+  that leaves the screen otherwise (`GraineChat` closed, the bar gone) keeps
+  the conversation: opening the chat again goes on with it, and it closes once
+  it has been idle for 5 minutes (no message either way). When Graine ends it
+  — idle, or at the session's time limit — the window says *Disconnected* and
+  the customer's next message connects again; where a new conversation starts
+  under earlier messages, a quiet *Disconnected · new conversation* line says
+  so instead of a second welcome. A typing bubble shows while the agent
+  composes; messages typed offline stay on screen and go the moment it
+  connects. Run your own chat instead with `chat:` (a
   `GraineChatState`), or none with `builtInChat: false`; `onSurfaceChange`
   tells you when the customer switches;
 - from a server that predates designs it keeps the colours, corners and
@@ -158,7 +165,11 @@ dialling, retrying, switching, or null outside a connect), `slowConnect`
 is waiting on: a call being placed, or a bar on screen — `viewOpened()` /
 `viewClosed()` — while the page loads) and `callFailed` (nothing could carry
 the call; a `start()` tries again). `voiceBarStatus(...)` gives the bar's
-words for any state. The brand's logo arrives as `Appearance.resolve(...)`'s
+words for any state. From 0.14.0 the bar's one word is public too: `status`
+(`GraineVoiceStatus` — idle, connecting, listening, thinking, speaking,
+reconnecting, muted, failed with `failure` as a sentence, ended),
+`transportFallbackReason` beside `transport`, and `agentLevel` / `micLevel`
+(0 for now: the page that carries the call posts no audio levels yet). The brand's logo arrives as `Appearance.resolve(...)`'s
 `logoUrl` and `logoPlate` (`LogoPlate.accent` or `.white`); `BrandLogo.box`
 and `BrandLogo.plateLook` give the square to fit it into and its plate.
 
@@ -311,7 +322,12 @@ card heads the conversation: the time in their own time zone, and Cancel. Drawin
 `turns` (`GraineChatTurn`: `id`, `role`, `text`, `at`, `delivery` — sending,
 sent, failed — `proactive`, `component`), `connected`, `connecting`,
 `reconnecting` (a dropped chat being made again), `failed` (it gave up), `agentTyping`, `upcomingCalls`, `send()`, `open()`, `close()`,
-`cancelUpcoming(id)`.
+`cancelUpcoming(id)` — and from 0.14.0 `status` (`GraineChatStatus`, the
+header's one word: idle, connecting, connected, reconnecting, offline,
+failed, or *disconnected* once Graine ended an idle conversation),
+`newConversationBefore` (where a "Disconnected · new conversation" row goes)
+and `shown(true)` / `shown(false)` from your screen, so the conversation lasts
+as the SDK's own windows keep it: 5 idle minutes once no screen shows it.
 
 ### Conversations continue
 
@@ -322,7 +338,9 @@ last 50, kept for a while after the last one), earlier calls show as one
 "Voice call · 6:05 PM" row, and day lines say Today, Yesterday or the date.
 Drawing your own chat? `turn.restored` marks a message from an earlier
 conversation and `turn.channel` (`GraineChatChannel.chat`, `.voice`) where it
-was said; `ChatRows.build(turns, now: …)` gives the rows to draw.
+was said; `ChatRows.build(turns, now: …)` gives the rows to draw — handed
+`newConversationBefore: chat.newConversationBefore`, the "Disconnected · new
+conversation" rows too (`ChatNewConversationRow`).
 `await chat.newConversation()` starts a fresh thread (the chat window's header
 offers it while an earlier conversation is on screen); what the agent
 remembers about the user stays. `forgetMemory()` clears the chat on screen too.
@@ -458,7 +476,11 @@ workspace's In-app calling, for this platform), the agent lets users book, and
 the user is identified with the trait the agent's Identity setting names. The
 SDK's chat window follows the same rule: **Book a call** under the booked calls
 in its Upcoming calls card, or on its own in the card's place when none are
-booked — and none when the design hides the booked-calls card.
+booked — and none when the design hides the booked-calls card. A picker of
+your own (0.14.0): `bookingUnavailableReason` says why booking is not offered
+(`not_loaded`, `rings_not_set_up`, `scheduling_off`, `not_identified`), and
+`bookingSlots(day)` gives the times the sheet offers that day — its 5-minute
+steps, from the earliest the agent allows to the latest, in the phone's zone.
 
 ## 10. Listen
 
@@ -564,7 +586,20 @@ await GraineCalls.instance.startCall(reason: 'support');
 - **Your call screen** — `callScreen: GraineCallScreen.sdk` (the default) shows
   the SDK's; with `GraineCallScreen.app`, draw your own from
   `GraineCalls.instance` (a `ValueListenable<GraineCallSnapshot>`), in the
-  design's call colours (`GraineInApp.instance.tokens?.call`).
+  design's call colours (`GraineInApp.instance.tokens?.call`). From 0.14.0 the
+  snapshot carries everything the SDK's screen reads: `phase` (idle, ringing,
+  calling, connecting, active, reconnecting, ended with `endReason` and
+  `endCause`, missed), `captions` (the call's transcript), `agentLevel` (how
+  loud the agent is, 0–1, for a visualiser) and `connection` — the connection
+  report (setup, login, answer, first words and tap-to-voice times, the
+  audio's loss, jitter and round trip), final on each outcome, beside
+  `endCause` (`remote_bye`, `media_drop`, …: who or what ended the call);
+  `missedCall`, `callBack()` and `dismissMissedCall()` serve a missed-call
+  screen.
+- **Loudspeaker or earpiece** — agent calls start on the loudspeaker unless a
+  headset, a car or AirPlay is the route. `GraineCalls.instance.speakerByDefault
+  = false` starts them on the earpiece, like a phone call — set it before a
+  call; `setSpeaker()` moves the call in progress.
 - **Graine rings your users** — when your workspace has uploaded its push
   credentials (Workspace settings → In-app calling), Graine itself rings the
   calls the agent or the user booked: on Android, Firebase in the app is all it

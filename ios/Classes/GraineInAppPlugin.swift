@@ -74,12 +74,17 @@ public class GraineInAppPlugin: NSObject, FlutterPlugin, FlutterStreamHandler {
         case "end":
             host.end()
             result(nil)
-        case "setMuted", "setSpeaker":
+        case "setMuted", "setSpeaker", "setSpeakerByDefault":
             guard let on = call.arguments as? Bool else {
                 result(FlutterError(code: "invalid_arguments", message: "\(call.method) takes a bool", details: nil))
                 return
             }
-            if call.method == "setMuted" { host.setMuted(on) } else { host.setSpeaker(on) }
+            switch call.method {
+            case "setMuted": host.setMuted(on)
+            case "setSpeaker": host.setSpeaker(on)
+            // Where calls start their sound: kept by the host for the next cold start, held until configure.
+            default: host.setSpeakerByDefault(on)
+            }
             result(nil)
         case "setIdentity":
             // The traits as the app passed them: the SDK masks them for the agent

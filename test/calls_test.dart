@@ -430,6 +430,333 @@ void main() {
     });
   });
 
+  // 0.14.0 — contract/PUBLIC-STATE.md §3: everything the SDK's call screens
+  // read — the connection report, the phase, the transcript, a missed ring.
+  group('public state for a call screen of your own', () {
+    const report = <String, Object?>{
+      'transport': 'webrtc',
+      'prepared': true,
+      'preparedAgeSeconds': 75,
+      'credential': 'direct',
+      'setupMs': 412,
+      'loginMs': 180,
+      'answerMs': 640,
+      'firstWordsMs': 910,
+      'tapToVoiceMs': 1962,
+      'audio': <String, Object?>{'lossPct': 0.42, 'jitterAvgMs': 12, 'jitterPeakMs': 31.5, 'rttMs': 88, 'quality': 'good'},
+      'recoveries': 1,
+    };
+
+    test("the connection report: read off the host's state, each fact null until known, final on the outcome", () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      expect(GraineCalls.instance.value.connection, isNull, reason: 'no call, no report');
+      // The host's shape: `connection` always there — null with no report, else every key, null until known.
+      emit('state', <String, Object?>{'state': 'connecting', 'callId': 'c1', 'direction': 'outgoing', 'connection': null});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.connection, isNull);
+      emit('state', <String, Object?>{
+        'state': 'connecting',
+        'callId': 'c1',
+        'direction': 'outgoing',
+        'connection': <String, Object?>{
+          'transport': 'webrtc',
+          'prepared': false,
+          'preparedAgeSeconds': null,
+          'credential': null,
+          'setupMs': null,
+          'loginMs': null,
+          'answerMs': null,
+          'firstWordsMs': null,
+          'tapToVoiceMs': null,
+          'audio': <String, Object?>{'lossPct': null, 'jitterAvgMs': null, 'jitterPeakMs': null, 'rttMs': null, 'quality': null},
+          'recoveries': null,
+        },
+      });
+      await pumpEventQueue();
+      var c = GraineCalls.instance.value.connection!;
+      expect(c.transport, GraineCallTransport.webrtc);
+      expect(c.prepared, isFalse);
+      expect(c.setupMs, isNull, reason: 'not measured yet');
+      expect(c.audio, const GraineCallAudio(), reason: 'every figure still to be measured');
+      expect(c.toMap(), <String, Object?>{'transport': 'webrtc', 'prepared': false, 'audio': <String, Object?>{}});
+      emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'direction': 'outgoing', 'connection': report});
+      await pumpEventQueue();
+      c = GraineCalls.instance.value.connection!;
+      expect(c.prepared, isTrue);
+      expect(c.preparedAgeSeconds, 75);
+      expect(c.credential, 'direct');
+      expect(<int?>[c.setupMs, c.loginMs, c.answerMs, c.firstWordsMs, c.tapToVoiceMs], <int>[412, 180, 640, 910, 1962]);
+      expect(c.recoveries, 1);
+      expect(c.audio,
+          const GraineCallAudio(lossPct: 0.42, jitterAvgMs: 12, jitterPeakMs: 31.5, rttMs: 88, quality: GraineCallAudioQuality.good));
+      expect(c.toMap(), report, reason: "by the engine's own names");
+
+      final outcomes = <GraineCallOutcome>[];
+      final sub = GraineCalls.instance.outcomes.listen(outcomes.add);
+      emit('state', <String, Object?>{'state': 'idle'});
+      emit('outcome', <String, Object?>{'callId': 'c1', 'outcome': 'ended', 'reason': 'local', 'durationSeconds': 30});
+      emit('outcome', <String, Object?>{
+        'callId': 'c2',
+        'outcome': 'failed',
+        'error': 'no network',
+        'connection': <String, Object?>{'transport': 'websocket', 'setupMs': 5000},
+      });
+      emit('outcome', <String, Object?>{'callId': 'c3', 'outcome': 'missed'});
+      await pumpEventQueue();
+      await sub.cancel();
+      expect(GraineCalls.instance.value.connection, isNull, reason: 'idle again');
+      expect(outcomes[0].connection, c, reason: "an outcome with no report of its own carries the last the call's state did");
+      expect(outcomes[1].connection, const GraineCallConnection(transport: GraineCallTransport.websocket, setupMs: 5000),
+          reason: "the engine's own report wins");
+      expect(outcomes[2].connection, isNull, reason: 'nothing was measured for a ring nobody answered');
+    });
+
+    test('a fact that is not one is left out — never a zero', () {
+      expect(GraineCallConnection.fromMap(null), isNull);
+      expect(GraineCallConnection.fromMap('fast'), isNull);
+      expect(
+          GraineCallConnection.fromMap(<String, Object?>{
+            'transport': 'pigeon',
+            'prepared': 1,
+            'setupMs': -1,
+            'loginMs': 'fast',
+            'answerMs': double.infinity,
+            'credential': 'carrier',
+            'audio': <String, Object?>{'quality': 'great', 'lossPct': double.nan},
+            'recoveries': 2.4,
+          }),
+          const GraineCallConnection(audio: GraineCallAudio(), recoveries: 2));
+      expect(GraineCallAudioQuality.fromWire('poor'), GraineCallAudioQuality.poor);
+      expect(GraineCallAudioQuality.fromWire('POOR'), isNull);
+    });
+
+    test('the phase: calling before the agent answers, connecting for an answered ring, reconnecting, ended — and how', () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      final phases = <GraineCallPhase>[];
+      void listener() => phases.add(GraineCalls.instance.value.phase);
+      GraineCalls.instance.addListener(listener);
+      expect(GraineCalls.instance.value.phase, GraineCallPhase.idle);
+      emit('state', <String, Object?>{'state': 'connecting', 'callId': 'c1', 'direction': 'outgoing'});
+      emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'direction': 'outgoing'});
+      emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'direction': 'outgoing', 'reconnecting': true});
+      emit('state', <String, Object?>{'state': 'ended', 'callId': 'c1', 'direction': 'outgoing'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.endReason, isNull, reason: 'until its outcome says');
+      emit('outcome', <String, Object?>{'callId': 'c1', 'outcome': 'ended', 'reason': 'remote'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.endReason, 'remote');
+      emit('state', <String, Object?>{'state': 'idle'});
+      emit('state', <String, Object?>{'state': 'ringing', 'callId': 'c2', 'direction': 'incoming'});
+      emit('state', <String, Object?>{'state': 'connecting', 'callId': 'c2', 'direction': 'incoming'});
+      await pumpEventQueue();
+      GraineCalls.instance.removeListener(listener);
+      expect(phases, <GraineCallPhase>[
+        GraineCallPhase.calling,
+        GraineCallPhase.active,
+        GraineCallPhase.reconnecting,
+        GraineCallPhase.ended,
+        GraineCallPhase.ended,
+        GraineCallPhase.idle,
+        GraineCallPhase.ringing,
+        GraineCallPhase.connecting,
+      ]);
+      expect(GraineCalls.instance.value.endReason, isNull);
+      expect(GraineCallPhase.reconnecting.wire, 'reconnecting');
+      expect(
+          GraineCallPhase.of(GraineNativeCallStatus.connecting, direction: GraineCallDirection.outgoing), GraineCallPhase.calling);
+    });
+
+    test('a ring nobody answered: missed until it is called back, dismissed, or another call rings', () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      reply = (MethodCall c) => c.method == 'startCall' ? 'call_back_1' : (c.method == 'snapshot' ? <String, Object?>{} : null);
+      emit('incoming', <String, Object?>{'callId': 'c3', 'reason': 'payment_due', 'callerName': 'Acme'});
+      emit('state', <String, Object?>{'state': 'ringing', 'callId': 'c3', 'direction': 'incoming'});
+      emit('state', <String, Object?>{'state': 'idle'});
+      emit('outcome', <String, Object?>{'callId': 'c3', 'outcome': 'missed'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.phase, GraineCallPhase.missed);
+      expect(GraineCalls.instance.missedCall!.callId, 'c3');
+      expect(GraineCalls.instance.missedCall!.reason, 'payment_due');
+      expect(GraineCalls.instance.missedCall!.callerName, 'Acme');
+      GraineCalls.instance.dismissMissedCall();
+      expect(GraineCalls.instance.value.phase, GraineCallPhase.idle);
+      expect(GraineCalls.instance.missedCall, isNull);
+
+      emit('state', <String, Object?>{'state': 'ringing', 'callId': 'c4', 'direction': 'incoming', 'reason': 'renewal'});
+      emit('state', <String, Object?>{'state': 'idle'});
+      emit('outcome', <String, Object?>{'callId': 'c4', 'outcome': 'missed'});
+      await pumpEventQueue();
+      expect(await GraineCalls.instance.callBack(), 'call_back_1');
+      expect(argsOf('startCall').last, <String, Object?>{'reason': 'renewal', 'variables': <String, Object?>{}},
+          reason: "the ring's own reason, with the agent that rang");
+      expect(GraineCalls.instance.value.phase, GraineCallPhase.idle);
+      expect(await GraineCalls.instance.callBack(), isNull, reason: 'nothing left to call back');
+
+      emit('state', <String, Object?>{'state': 'ringing', 'callId': 'c5', 'direction': 'incoming'});
+      emit('state', <String, Object?>{'state': 'idle'});
+      emit('outcome', <String, Object?>{'callId': 'c5', 'outcome': 'missed'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.phase, GraineCallPhase.missed);
+      emit('state', <String, Object?>{'state': 'ringing', 'callId': 'c6', 'direction': 'incoming'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.missedCall, isNull, reason: 'another call rang');
+      expect(GraineCalls.instance.value.phase, GraineCallPhase.ringing);
+    });
+
+    test("the transcript: each line folded in — a live line replaced as its words arrive — and a new call's starts empty",
+        () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      Map<String, Object?> state(String status, String id, String? role, String? text, {bool live = false, bool muted = false}) =>
+          <String, Object?>{
+            'state': status,
+            'callId': id,
+            'direction': 'outgoing',
+            'muted': muted,
+            if (role != null) 'caption': <String, Object?>{'role': role, 'text': text, 'live': live},
+          };
+      emit('state', state('active', 'c1', 'agent', 'Hi', live: true));
+      emit('state', state('active', 'c1', 'agent', 'Hi Asha', live: true));
+      emit('state', state('active', 'c1', 'agent', 'Hi Asha, how can I help?'));
+      emit('state', state('active', 'c1', 'agent', 'Hi Asha, how can I help?', muted: true));
+      emit('state', state('active', 'c1', 'customer', 'My card is blocked'));
+      emit('state', state('ended', 'c1', 'customer', 'My card is blocked'));
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.captions, const <GraineCallCaption>[
+        GraineCallCaption(Role.agent, 'Hi Asha, how can I help?'),
+        GraineCallCaption(Role.customer, 'My card is blocked'),
+      ], reason: 'a line grows in place; the same line again (another change) is not said twice');
+      emit('state', <String, Object?>{'state': 'idle'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.captions, isEmpty);
+      emit('state', state('connecting', 'c2', 'agent', 'Hello'));
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.captions, const <GraineCallCaption>[GraineCallCaption(Role.agent, 'Hello')]);
+    });
+  });
+
+  // 0.14.0 — what the native engines added: who ended a call, how loud the
+  // agent is, and where a call starts its sound.
+  group('end cause, agent level, speaker by default', () {
+    test("the outcome's endCause: the engines' `cause`, or `endCause` — any word as given; null when absent", () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      final outcomes = <GraineCallOutcome>[];
+      final sub = GraineCalls.instance.outcomes.listen(outcomes.add);
+      emit('outcome', <String, Object?>{'callId': 'c1', 'outcome': 'ended', 'reason': 'remote', 'cause': 'remote_bye'});
+      emit('outcome', <String, Object?>{'callId': 'c2', 'outcome': 'failed', 'error': 'no network', 'endCause': 'failed'});
+      emit('outcome', <String, Object?>{'callId': 'c3', 'outcome': 'ended', 'reason': 'failed', 'cause': 'audio_watch_fail'});
+      emit('outcome', <String, Object?>{'callId': 'c4', 'outcome': 'ended', 'reason': 'local', 'cause': ''});
+      emit('outcome', <String, Object?>{'callId': 'c5', 'outcome': 'missed'});
+      await pumpEventQueue();
+      await sub.cancel();
+      expect(outcomes.map((GraineCallOutcome o) => o.endCause), <String?>['remote_bye', 'failed', 'audio_watch_fail', null, null],
+          reason: 'a word this build does not list comes as the engine said it; a blank one is none');
+      expect(const GraineCallOutcome('c9', GraineCallOutcomeKind.ended, endCause: 'media_drop').endCause, 'media_drop');
+    });
+
+    test("an outcome given the call's last report keeps its endCause", () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      final outcomes = <GraineCallOutcome>[];
+      final sub = GraineCalls.instance.outcomes.listen(outcomes.add);
+      emit('state', <String, Object?>{
+        'state': 'active',
+        'callId': 'c1',
+        'direction': 'outgoing',
+        'connection': <String, Object?>{'transport': 'webrtc', 'setupMs': 400},
+      });
+      emit('outcome', <String, Object?>{'callId': 'c1', 'outcome': 'ended', 'reason': 'failed', 'cause': 'media_drop'});
+      await pumpEventQueue();
+      await sub.cancel();
+      expect(outcomes.single.connection?.setupMs, 400);
+      expect(outcomes.single.endCause, 'media_drop');
+    });
+
+    test("the snapshot's endCause: the call's state's own, else its outcome's while it is ended", () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'direction': 'outgoing'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.endCause, isNull, reason: 'a call under way has none');
+      emit('state', <String, Object?>{'state': 'ended', 'callId': 'c1', 'direction': 'outgoing'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.endCause, isNull, reason: 'until something says');
+      emit('outcome', <String, Object?>{'callId': 'c1', 'outcome': 'ended', 'reason': 'remote', 'cause': 'remote_bye'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.endCause, 'remote_bye');
+      emit('state', <String, Object?>{'state': 'idle'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.endCause, isNull);
+      // An engine whose state says it: that wins.
+      emit('state', <String, Object?>{'state': 'ended', 'callId': 'c2', 'direction': 'outgoing', 'endCause': 'provider_reset'});
+      await pumpEventQueue();
+      expect(GraineCalls.instance.value.endCause, 'provider_reset');
+    });
+
+    test("the snapshot's agentLevel: 0–1 as the engine says it; 0 when it says nothing, or nothing a level can be", () async {
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      expect(GraineCalls.instance.value.agentLevel, 0);
+      final heard = <double>[];
+      void listener() => heard.add(GraineCalls.instance.value.agentLevel);
+      GraineCalls.instance.addListener(listener);
+      for (final level in <Object?>[0.42, 0.42, 0.9, 1.7, -0.3, 'loud', null]) {
+        emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'direction': 'outgoing', 'agentLevel': level});
+      }
+      emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'direction': 'outgoing', 'agentLevel': 0.3});
+      emit('state', <String, Object?>{'state': 'active', 'callId': 'c1', 'direction': 'outgoing'});
+      await pumpEventQueue();
+      GraineCalls.instance.removeListener(listener);
+      expect(heard, <double>[0.42, 0.9, 1, 0, 0.3, 0],
+          reason: 'clamped, read as 0 when it is not a number, and the same level again is no change');
+      expect(GraineCallSnapshot.fromMap(<String, Object?>{'state': 'active', 'agentLevel': double.nan}).agentLevel, 0);
+      expect(GraineCallSnapshot.fromMap(<String, Object?>{'state': 'active', 'agentLevel': 1}).agentLevel, 1.0);
+    });
+
+    test('speakerByDefault: the loudspeaker unless the app says otherwise — to the engine at once, and with every configure',
+        () async {
+      expect(GraineCalls.instance.speakerByDefault, isTrue);
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      expect(argsOf('setSpeakerByDefault'), isEmpty, reason: "never set: the engine's own default stands");
+      expect((argsOf('configure').single! as Map<Object?, Object?>).containsKey('speakerByDefault'), isFalse,
+          reason: 'an app that never chose sends what it always sent');
+      GraineCalls.instance.speakerByDefault = false;
+      await pumpEventQueue();
+      expect(GraineCalls.instance.speakerByDefault, isFalse);
+      expect(argsOf('setSpeakerByDefault'), <Object?>[false], reason: 'applied at once');
+      calls.clear();
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      expect(calls.map((MethodCall c) => c.method), <String>['configure', 'snapshot']);
+      expect((argsOf('configure').single! as Map<Object?, Object?>)['speakerByDefault'], isFalse,
+          reason: 'the host keeps it with the options — a configure without it would put calls back on the loudspeaker');
+      GraineCalls.instance.speakerByDefault = true;
+      await pumpEventQueue();
+      expect(argsOf('setSpeakerByDefault').last, isTrue);
+    });
+
+    test('speakerByDefault set before configure: sent at once (the host holds it), and with the configure', () async {
+      GraineCalls.instance.speakerByDefault = false;
+      await pumpEventQueue();
+      expect(argsOf('setSpeakerByDefault'), <Object?>[false]);
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      expect((argsOf('configure').single! as Map<Object?, Object?>)['speakerByDefault'], isFalse);
+    });
+
+    test('speakerByDefault: a native build without it is not an error; off Android and iOS it is only kept', () async {
+      reply = (MethodCall c) {
+        if (c.method == 'setSpeakerByDefault') throw MissingPluginException();
+        return c.method == 'snapshot' ? <String, Object?>{'state': 'idle'} : null;
+      };
+      GraineCalls.instance.speakerByDefault = false;
+      await pumpEventQueue();
+      expect(argsOf('setSpeakerByDefault'), <Object?>[false]);
+      expect(GraineCalls.instance.speakerByDefault, isFalse, reason: 'kept, for the engine that answers it');
+      await GraineCalls.instance.configure(const GraineCallsOptions(publishableKey: 'pk_test', displayName: 'Acme'));
+      expect(argsOf('snapshot'), hasLength(1), reason: 'configure went on');
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      GraineCalls.instance.speakerByDefault = true;
+      await pumpEventQueue();
+      expect(argsOf('setSpeakerByDefault'), hasLength(1), reason: 'nothing sent where there are no native calls');
+      expect(GraineCalls.instance.speakerByDefault, isTrue);
+    });
+  });
+
   test('a native call takes the line: the WebView engine will not start beside it', () async {
     final g = GraineInApp.forTesting(
       const GraineConfig(baseUrl: 'https://example.test', publishableKey: 'pk_test_1'),

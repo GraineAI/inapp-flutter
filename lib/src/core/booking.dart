@@ -35,6 +35,37 @@ final class BookingDay {
   final DateTime last;
 }
 
+/// WHY BOOKING IS NOT OFFERED HERE (contract/PUBLIC-STATE.md, "Booking and
+/// scheduled calls") — `GraineInApp.bookingUnavailableReason`, null while
+/// booking is available. [Booking.unavailableReason] decides it, in this
+/// order — the same words, in the same order, on every Graine SDK.
+enum GraineBookingUnavailableReason {
+  /// The agent's settings have not arrived yet.
+  notLoaded('not_loaded'),
+
+  /// Graine cannot ring this phone: the workspace has not set up in-app
+  /// calling, or not for this platform.
+  ringsNotSetUp('rings_not_set_up'),
+
+  /// The agent takes no bookings from the app (its Calls & scheduling
+  /// setting), or the server says nothing about booking.
+  schedulingOff('scheduling_off'),
+
+  /// Nobody is identified with the agent's identity trait — a booking needs
+  /// to know whose phones to ring.
+  notIdentified('not_identified');
+
+  const GraineBookingUnavailableReason(this.wire);
+
+  /// The word every Graine SDK uses.
+  final String wire;
+
+  /// The refusal the booking sheet words it with ([Booking.errorLine]):
+  /// [GraineErrorCode.identityRequired] for [notIdentified], else
+  /// [GraineErrorCode.schedulingOff].
+  GraineErrorCode get code => this == notIdentified ? GraineErrorCode.identityRequired : GraineErrorCode.schedulingOff;
+}
+
 abstract final class Booking {
   /// The sheet's words — the same on every platform.
   static const String title = 'Book a call';
@@ -87,6 +118,25 @@ abstract final class Booking {
   static bool available(CallsSetting? calls, {required String? platform, required bool identified}) =>
       blocker(calls, platform: platform, identified: identified) == null;
 
+  /// WHY BOOKING IS NOT OFFERED HERE, in finer words than [blocker], checked
+  /// in this order: the agent's settings not [loaded] yet (`not_loaded`);
+  /// Graine cannot ring this phone (`rings_not_set_up` — a web page books
+  /// for the user's app, so it is never this); the agent takes no bookings,
+  /// or a server says nothing about them (`scheduling_off`); nobody
+  /// identified (`not_identified`). Null exactly when [blocker] is.
+  static GraineBookingUnavailableReason? unavailableReason(CallsSetting? calls,
+      {required String? platform, required bool identified, bool loaded = true}) {
+    if (!loaded) return GraineBookingUnavailableReason.notLoaded;
+    if (platform != 'web') {
+      if (platform != 'ios' && platform != 'android') return GraineBookingUnavailableReason.ringsNotSetUp;
+      if (calls?.hosted != true) return GraineBookingUnavailableReason.ringsNotSetUp;
+      final named = calls!.platforms;
+      if (named.isNotEmpty && !named.contains(platform)) return GraineBookingUnavailableReason.ringsNotSetUp;
+    }
+    if (calls?.scheduling?.usersCanBook != true) return GraineBookingUnavailableReason.schedulingOff;
+    return identified ? null : GraineBookingUnavailableReason.notIdentified;
+  }
+
   static const int _step = roundMinutes * 60 * 1000;
 
   /// [rules]' bounds at [now]: the earliest rounded up to 5 minutes, the latest down.
@@ -137,6 +187,18 @@ abstract final class Booking {
       start = next;
     }
     return out;
+  }
+
+  /// THE TIMES [day] OFFERS, every [stepMinutes] on the clock's grid — the
+  /// sheet's 5 by default — from its first time to its last, in the device's
+  /// time zone: a picker of your own offers exactly what the sheet does.
+  static List<DateTime> slots(BookingDay day, {int stepMinutes = roundMinutes}) {
+    final step = (stepMinutes < 1 ? 1 : stepMinutes) * 60 * 1000;
+    final last = day.last.millisecondsSinceEpoch;
+    return <DateTime>[
+      for (var t = ((day.first.millisecondsSinceEpoch + step - 1) ~/ step) * step; t <= last; t += step)
+        DateTime.fromMillisecondsSinceEpoch(t),
+    ];
   }
 
   /// The time on [day] a picker answered with ([hour]:[minute] on the

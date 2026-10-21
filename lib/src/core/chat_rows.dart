@@ -3,9 +3,11 @@
 /// turn; ONE "Voice call · 6:05 PM" row for a run of voice turns on one day —
 /// that a call happened and when, never its transcript; and a day separator —
 /// Today, Yesterday, a date — before the first row when it is not from today,
-/// and wherever the device's day changes between rows. A conversation all from
-/// today draws exactly what it always did. The React Native SDK's chatRows
-/// (protocol.ts), ported. Pure: no Flutter, so `test/` runs every row.
+/// and wherever the device's day changes between rows; and, when asked for,
+/// "Disconnected · new conversation" where Graine began a new conversation
+/// under earlier lines. A conversation all from today draws exactly what it
+/// always did. The React Native SDK's chatRows (protocol.ts), ported. Pure: no
+/// Flutter, so `test/` runs every row.
 library;
 
 import 'chat.dart';
@@ -36,6 +38,32 @@ final class ChatDayRow extends ChatRow {
 
   @override
   String get key => 'day-$date';
+}
+
+/// "DISCONNECTED · NEW CONVERSATION" — where the chat connected again and
+/// Graine began a new conversation under the earlier lines (contract/DESIGN.md
+/// "A new conversation under earlier lines"; sdk/contract/history.json →
+/// `fresh`), before the turn [before], after that turn's day separator.
+///
+/// Drawn like a day separator — so it is one: a chat that draws every
+/// [ChatDayRow] with [ChatRows.dayLabel] draws it too, in its own words
+/// ([label]); match it before [ChatDayRow] to give a screen reader [spoken].
+/// [ChatRows.build] makes one only when it is handed `newConversationBefore`,
+/// so a chat that never asks sees exactly the rows it always did.
+final class ChatNewConversationRow extends ChatDayRow {
+  const ChatNewConversationRow(this.before, super.day, super.date, super.at);
+
+  /// The id of the turn it stands before — the new conversation's first.
+  final String before;
+
+  /// The words drawn: "Disconnected · new conversation".
+  String get label => ChatRows.newConversationLabel;
+
+  /// What a screen reader says: "Disconnected. A new conversation started."
+  String get spoken => ChatRows.newConversationSpoken;
+
+  @override
+  String get key => 'fresh-$before';
 }
 
 /// An earlier call: when its first turn was said, and which turns (indices
@@ -69,9 +97,21 @@ abstract final class ChatRows {
 
   static DateTime _deviceTime(DateTime t) => t.toLocal();
 
+  /// The words of a [ChatNewConversationRow], drawn like a day separator.
+  static const String newConversationLabel = ChatMarks.label;
+
+  /// What a screen reader says for a [ChatNewConversationRow].
+  static const String newConversationSpoken = ChatMarks.spoken;
+
   /// The rows for [turns] (oldest first). [local] reads an instant as the
   /// device's wall clock — the device's own zone unless a test says otherwise.
-  static List<ChatRow> build(List<GraineChatTurn> turns, {required DateTime now, DateTime Function(DateTime)? local}) {
+  ///
+  /// [newConversationBefore] — `GraineChatSession.newConversationBefore` —
+  /// adds a [ChatNewConversationRow] before each of those turns, after its
+  /// day separator: only under earlier lines (never above the first turn
+  /// laid out), and a marked voice turn starts a call row of its own.
+  static List<ChatRow> build(List<GraineChatTurn> turns,
+      {required DateTime now, DateTime Function(DateTime)? local, Set<String> newConversationBefore = const <String>{}}) {
     final wall = local ?? _deviceTime;
     final n = wall(now);
     final today = _date(n.year, n.month, n.day);
@@ -81,22 +121,27 @@ abstract final class ChatRows {
     String? lastDay;
     var openCall = -1;
     String? callDay;
+    var earlier = false;
     for (var index = 0; index < turns.length; index++) {
       final turn = turns[index];
       final l = wall(turn.at);
       final day = _date(l.year, l.month, l.day);
       final voice = turn.channel == GraineChatChannel.voice;
-      // One call, one row — until the day turns: a separator never sits inside a row.
+      // A new conversation begins here — set apart only from lines before it.
+      final fresh = earlier && newConversationBefore.contains(turn.id);
+      // One call, one row — until the day turns, or a new conversation begins: a separator never sits inside a row.
       final call = openCall >= 0 ? rows[openCall] : null;
-      if (voice && call is ChatVoiceRow && callDay == day) {
+      if (voice && !fresh && call is ChatVoiceRow && callDay == day) {
         rows[openCall] = ChatVoiceRow(call.id, call.at, call.first, index);
         continue;
       }
+      final kind = day == today ? ChatDay.today : (day == yesterday ? ChatDay.yesterday : ChatDay.date);
       if (lastDay == null ? day != today : day != lastDay) {
-        final kind = day == today ? ChatDay.today : (day == yesterday ? ChatDay.yesterday : ChatDay.date);
         rows.add(ChatDayRow(kind, day, turn.at));
       }
       lastDay = day;
+      if (fresh) rows.add(ChatNewConversationRow(turn.id, kind, day, turn.at));
+      earlier = true;
       if (voice) {
         rows.add(ChatVoiceRow('voice-${turn.id}', turn.at, index, index));
         openCall = rows.length - 1;
@@ -112,7 +157,9 @@ abstract final class ChatRows {
 
   /// "Today", "Yesterday", else the date — "Sat 10 Oct", and the year when it
   /// is not this one ("Wed 31 Dec 2025") — as `ChatTime.booked` writes a day.
+  /// A [ChatNewConversationRow]'s are its own: "Disconnected · new conversation".
   static String dayLabel(ChatDayRow row, {required DateTime now, DateTime Function(DateTime)? local}) {
+    if (row is ChatNewConversationRow) return row.label;
     switch (row.day) {
       case ChatDay.today:
         return 'Today';

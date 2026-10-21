@@ -442,6 +442,18 @@ void main() {
       expect(argsOf('configure'), hasLength(3));
     });
 
+    test("the app's speakerByDefault rides every configure — also the one an agent configured later sends", () async {
+      make('default', mainKey);
+      GraineCalls.instance.speakerByDefault = false;
+      await GraineCalls.instance.configure(options);
+      expect((argsOf('configure').single! as Map<Object?, Object?>)['speakerByDefault'], isFalse);
+      make('support', supportKey);
+      await pumpEventQueue();
+      expect(argsOf('configure'), hasLength(2));
+      expect((argsOf('configure').last! as Map<Object?, Object?>)['speakerByDefault'], isFalse,
+          reason: 'a configure without it would put calls back on the loudspeaker');
+    });
+
     test('the agents reach the engine as a map by name — the shape both native hosts read', () async {
       make('default', mainKey);
       make('support', supportKey);

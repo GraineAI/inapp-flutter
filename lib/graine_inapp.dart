@@ -19,9 +19,9 @@ export 'src/booking_sheet.dart' show GraineBooking, GraineBookingSheet;
 export 'src/chat_view.dart' show GraineChat;
 export 'src/core/core.dart'
     hide Js, SocketTrace, SvgPath, PathCommand, PathMoveTo, PathLineTo, PathCubicTo, PathQuadTo, PathArcTo, PathClose,
-        ChatPresentation, ChatClose, ChatWindowLayout;
+        ChatPresentation, ChatClose, ChatWindowLayout, ChatMarks;
 export 'src/engine.dart' show GraineEngine, WebViewEnginePage;
-export 'src/graine.dart';
+export 'src/graine.dart' hide ChatWindows, ChatSocketCloseCode;
 export 'src/launcher.dart' show GraineLauncher;
 export 'src/loader_view.dart' show GraineLoaderView;
 export 'src/transcript_view.dart' show GraineTranscriptView;

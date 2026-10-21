@@ -1,9 +1,10 @@
 // The chat window drawn as contract/DESIGN.md ("Chat window") says, from the
 // real sessions' tokens in sdk/contract/design.json: the header (an accent
 // header's own dot, no glass on it, the chevron in headerSubtext), the avatar's
-// fallbacks, the empty chat, the starters, timestamps, the dot grid, and the
-// Upcoming calls card with its Cancel. From an older server it is the window
-// it always was.
+// fallbacks, the empty chat, the starters, timestamps, the day separators and
+// the new-conversation row drawn like them, "Disconnected", the dot grid, and
+// the Upcoming calls card with its Cancel. From an older server it is the
+// window it always was.
 import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
@@ -61,12 +62,16 @@ void main() {
     DateTime Function()? now,
     bool fill = false,
     VoidCallback? onNewConversation,
+    Set<String> marks = const <String>{},
+    bool disconnected = false,
   }) =>
       ChatWindow(
         look: ChatLook.design(t),
         heading: 'Assistant',
         messages: <Caption>[for (final x in turns) x.caption],
         turns: turns,
+        marks: marks,
+        disconnected: disconnected,
         online: online,
         onSend: onSend ?? (String _) {},
         onCollapse: () {},
@@ -200,6 +205,65 @@ void main() {
     expect(find.byKey(ChatWindow.newConversationKey), findsNothing, reason: 'a live conversation is not an earlier one');
     expect(find.byKey(ChatWindow.suggestionsKey), findsOneWidget);
     expect(find.text('Today'), findsNothing, reason: 'a conversation all from today looks as it always did');
+  });
+
+  testWidgets('a new conversation under earlier lines: one centred row drawn as the day separator is, after it, read as a sentence',
+      (WidgetTester tester) async {
+    final t = chatCase((Map<String, Object?> chat) => chat['header'] == 'accent').light;
+    DateTime now() => DateTime(2026, 10, 14, 12);
+    const welcome = 'Hi Meera, I’m Asha, your care coach.';
+    final turns = <GraineChatTurn>[
+      GraineChatTurn(id: 't1', role: GraineChatRole.agent, text: welcome, at: DateTime(2026, 10, 13, 18)),
+      GraineChatTurn(
+          id: 't2', role: GraineChatRole.user, text: 'Is my dose due?', at: DateTime(2026, 10, 13, 18, 1), delivery: GraineChatDelivery.sent),
+      GraineChatTurn(id: 't3', role: GraineChatRole.agent, text: 'Yes, at 8 pm.', at: DateTime(2026, 10, 13, 18, 2)),
+      GraineChatTurn(id: 't4', role: GraineChatRole.agent, text: welcome, at: DateTime(2026, 10, 14, 9)),
+    ];
+    double top(Finder f) => tester.getRect(f).top;
+    double bottom(Finder f) => tester.getRect(f).bottom;
+    final today = find.byKey(ChatWindow.dayKey('2026-10-14'));
+
+    await tester.pumpWidget(host(window(t, turns: turns, now: now)));
+    expect(find.text('Disconnected · new conversation'), findsNothing, reason: 'no marker, no row');
+    final dayToMessage = top(find.text(welcome).last) - bottom(today);
+
+    await tester.pumpWidget(host(window(t, turns: turns, now: now, marks: const <String>{'t4'})));
+    final mark = find.byKey(ChatWindow.markKey('t4'));
+    expect(mark, findsOneWidget);
+    final words = tester.widget<Text>(find.text('Disconnected · new conversation'));
+    final day = tester.widget<Text>(find.text('Today'));
+    expect(words.style, day.style, reason: "the day separator's: caption size, the body family at weights.strong, textMuted");
+    expect(words.textAlign, TextAlign.center);
+    expect(top(mark), closeTo(bottom(today) + t.chat.density.gap, 0.01), reason: 'after the day separator, the gap from it');
+    expect(top(find.text(welcome).last) - bottom(mark), closeTo(dayToMessage, 0.01),
+        reason: 'the new welcome sits under it as it sat under the day separator');
+    expect(tester.getSemantics(mark).label, 'Disconnected. A new conversation started.');
+    expect(find.byKey(ChatWindow.messageKey(3)), findsOneWidget, reason: 'the marker is no message');
+
+    // A marker on a turn that draws nothing (a component's own) goes before the next one that does.
+    final drawn = <GraineChatTurn>[
+      ...turns.take(3),
+      GraineChatTurn(id: 't4', role: GraineChatRole.agent, text: '', at: DateTime(2026, 10, 14, 9)),
+      GraineChatTurn(id: 't5', role: GraineChatRole.agent, text: welcome, at: DateTime(2026, 10, 14, 9)),
+    ];
+    await tester.pumpWidget(host(window(t, turns: drawn, now: now, marks: const <String>{'t4'})));
+    expect(find.byKey(ChatWindow.markKey('t5')), findsOneWidget);
+
+    // With no earlier line on screen there is nothing to set it under.
+    await tester.pumpWidget(host(window(t, turns: <GraineChatTurn>[turns.last], now: now, marks: const <String>{'t4'})));
+    expect(find.byKey(ChatWindow.markKey('t4')), findsNothing);
+  });
+
+  testWidgets('Graine ended the conversation: the status line says "Disconnected", before "Online" and "Connecting…"',
+      (WidgetTester tester) async {
+    final t = chatCase((Map<String, Object?> chat) => chat['header'] == 'accent').light;
+    final hi = <GraineChatTurn>[GraineChatTurn(id: 't1', role: GraineChatRole.agent, text: 'Hi!', at: DateTime(2026, 10, 13, 21, 41))];
+    await tester.pumpWidget(host(window(t, turns: hi, online: false, disconnected: true)));
+    expect(find.text('Disconnected'), findsOneWidget);
+    expect(find.text('Connecting…'), findsNothing);
+    await tester.pumpWidget(host(window(t, turns: hi, disconnected: true)));
+    expect(find.text('Disconnected'), findsOneWidget);
+    expect(find.text(t.chat.subtitle), findsNothing);
   });
 
   testWidgets('the dots: 2 across on an 18-point grid, the first 9 in, still while the thread scrolls',

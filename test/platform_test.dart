@@ -2,9 +2,11 @@
 // every request (contract §1.2–1.3), the memory choice kept for them, sign-out
 // and forget, the calls they book (§4.2), the SDK's own text chat end to end
 // against a fake socket — ticket, frames, turns, typing, offline sends,
-// reconnects, components and actions — the bar and the full-screen chat
-// drawing it, and the screen context's timing, actions and taps. HTTP is a
-// mock; the device channel is a mock; nothing reaches a real host.
+// reconnects, how long a conversation lasts once its window closes, a new
+// conversation under earlier lines, components and actions — the bar and the
+// full-screen chat drawing it, and the screen context's timing, actions and
+// taps. HTTP is a mock; the device channel is a mock; nothing reaches a real
+// host.
 import 'dart:async';
 import 'dart:convert';
 
@@ -12,6 +14,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:graine_inapp/graine_inapp.dart';
 import 'package:graine_inapp/src/chat_window.dart';
+import 'package:graine_inapp/src/graine.dart' show ChatSocketCloseCode;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -80,7 +83,7 @@ class Server {
 }
 
 /// One chat socket, as the chat session sees it.
-class FakeSocket implements GraineChatSocket {
+class FakeSocket implements GraineChatSocket, ChatSocketCloseCode {
   FakeSocket(this.url, this.protocols);
 
   final Uri url;
@@ -88,6 +91,9 @@ class FakeSocket implements GraineChatSocket {
   final StreamController<Object?> _in = StreamController<Object?>();
   final List<Map<String, Object?>> sent = <Map<String, Object?>>[];
   bool closed = false;
+
+  @override
+  int? closeCode;
 
   @override
   Stream<Object?> get frames => _in.stream;
@@ -103,8 +109,11 @@ class FakeSocket implements GraineChatSocket {
 
   void say(Map<String, Object?> frame) => _in.add(jsonEncode(frame));
 
-  /// The server went away.
-  void drop() => unawaited(_in.close());
+  /// The server went away — with [code], when it closed with one.
+  void drop({int? code}) {
+    closeCode = code;
+    unawaited(_in.close());
+  }
 
   List<String> get types => <String>[for (final m in sent) m['type']! as String];
 }
@@ -121,6 +130,19 @@ class Connector {
   }
 
   FakeSocket get last => sockets.last;
+}
+
+/// A connector whose first connection waits until [gate] completes — a chat still being made.
+class _GatedConnector extends Connector {
+  final Completer<void> gate = Completer<void>();
+  int calls = 0;
+
+  @override
+  Future<GraineChatSocket> call(Uri url, List<String>? protocols) async {
+    calls++;
+    if (calls == 1) await gate.future;
+    return super.call(url, protocols);
+  }
 }
 
 /// What a page receives.
@@ -189,6 +211,42 @@ Future<FakeSocket> connected(WidgetTester tester, GraineInApp g, Connector c) as
   await tester.pump();
   expect(g.chat.connected, isTrue, reason: 'the chat did not connect');
   return c.last;
+}
+
+/// [g]'s chat on screen — the SDK's full-screen chat — and connected: its socket.
+Future<FakeSocket> onScreen(WidgetTester tester, GraineInApp g, Connector c) async {
+  await tester.pumpWidget(MediaQuery(
+    data: const MediaQueryData(size: Size(400, 800)),
+    child: Directionality(textDirection: TextDirection.ltr, child: GraineChat(app: g)),
+  ));
+  await tester.pump();
+  await tester.pump();
+  expect(g.chat.connected, isTrue, reason: 'the chat did not connect');
+  return c.last;
+}
+
+/// One whole agent turn, as the runtime sends it.
+Map<String, Object?> said(String words) => <String, Object?>{'type': 'text', 'data': '<beginning_of_stream>$words<end_of_stream>'};
+
+/// An app's own screen that closes the chat as it goes.
+class _ClosesOnDispose extends StatefulWidget {
+  const _ClosesOnDispose(this.chat);
+
+  final GraineChatSession chat;
+
+  @override
+  State<_ClosesOnDispose> createState() => _ClosesOnDisposeState();
+}
+
+class _ClosesOnDisposeState extends State<_ClosesOnDispose> {
+  @override
+  void dispose() {
+    widget.chat.close();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => const SizedBox();
 }
 
 void main() {
@@ -315,15 +373,23 @@ void main() {
       await finish(tester, g);
     });
 
-    testWidgets('anonymous to identified keeps the open conversation (the change reaches the next one)',
+    // 0.14.0 — contract/DESIGN.md "Who a chat belongs to": the reverse of what this used to pin.
+    testWidgets('anonymous to identified: the open chat was nobody\'s — it closes and connects again at once as the user',
         (WidgetTester tester) async {
+      final server = Server();
       final c = Connector();
-      final g = makeApp(tester, Server(), connector: c);
-      await connected(tester, g, c);
+      final g = makeApp(tester, server, connector: c);
+      final first = await connected(tester, g, c);
+      first.say(said('Hi, I am Asha.'));
+      await tester.pump();
       g.identify(<String, Object?>{'email': 'asha@example.com'});
       await tester.pump();
-      expect(c.sockets, hasLength(1));
-      expect(c.last.types, isNot(contains('stop')));
+      await tester.pump();
+      expect(first.types.last, 'stop', reason: 'closed normally');
+      expect(g.chat.turns, isEmpty, reason: "the anonymous chat's turns are not the user's");
+      expect(c.sockets, hasLength(2), reason: 'connected again at once');
+      expect(server.bodies('/api/embed/ticket').last['identity'], <String, Object?>{'value': 'asha@example.com'});
+      expect(g.chat.status, GraineChatStatus.connected);
       await finish(tester, g);
     });
 
@@ -1157,11 +1223,12 @@ void main() {
       await tester.tap(find.byKey(ChatWindow.collapseKey));
       expect(closed, 1);
       await tester.pumpWidget(const SizedBox());
-      expect(c.last.types.last, 'stop', reason: 'gone from the screen: the chat it opened hangs up');
+      expect(c.last.types, isNot(contains('stop')), reason: 'gone from the screen: the conversation is kept until it goes idle');
+      expect(g.chat.connected, isTrue);
       await finish(tester, g);
     });
 
-    testWidgets('a chat screen leaving over the bar: the bar hears the chat close after that frame, not during it',
+    testWidgets('a chat screen leaving over the bar keeps the conversation; a close from a dispose reaches the bar after that frame',
         (WidgetTester tester) async {
       final c = Connector();
       final g = makeApp(tester, Server(), connector: c, install: true);
@@ -1175,11 +1242,663 @@ void main() {
       await tester.pump();
       expect(g.chat.connected, isTrue);
       await tester.pumpWidget(screen(const <Widget>[GraineAgentBar(showComponents: false)]));
+      expect(tester.takeException(), isNull, reason: 'told from a dispose, while the tree is locked');
+      expect(c.last.types, isNot(contains('stop')), reason: 'no window shows it, and it is not idle yet');
+      expect(g.chat.isOpen, isTrue);
+
+      // An app's own screen that closes the chat as it goes.
+      await tester.pumpWidget(screen(<Widget>[const GraineAgentBar(showComponents: false), _ClosesOnDispose(g.chat)]));
+      await tester.pumpWidget(screen(const <Widget>[GraineAgentBar(showComponents: false)]));
       expect(tester.takeException(), isNull, reason: 'closed from a dispose, while the tree is locked');
-      expect(c.last.types.last, 'stop', reason: 'the chat screen that opened it closed it');
+      expect(c.last.types.last, 'stop');
       await tester.pump();
       expect(g.chat.isOpen, isFalse);
       await tester.pumpWidget(const SizedBox());
+      await finish(tester, g);
+    });
+  });
+
+  group('how long a conversation lasts', () {
+    testWidgets('the chat window closed, the conversation is kept: connected until 5 minutes go by with no message',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      s.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 15));
+      expect(g.chat.connected, isTrue, reason: 'no longer closed a moment after it leaves the screen');
+      await tester.pump(const Duration(minutes: 4, seconds: 44));
+      expect(g.chat.connected, isTrue, reason: '4:59 since the last message');
+      expect(s.types, isNot(contains('stop')));
+      await tester.pump(const Duration(seconds: 1));
+      expect(s.types.last, 'stop', reason: 'idle for 5 minutes with no window: it ends cleanly');
+      expect(g.chat.isOpen, isFalse);
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(s.closed, isTrue);
+      await tester.pump(const Duration(minutes: 1));
+      expect(c.sockets, hasLength(1), reason: 'a conversation closed for idleness does not reconnect');
+      await finish(tester, g);
+    });
+
+    testWidgets("a message while no window shows the chat starts its 5 minutes again — the agent's or the customer's",
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      s.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(minutes: 3));
+      s.say(said('Your order left the warehouse.'));
+      await tester.pump();
+      await tester.pump(const Duration(minutes: 4));
+      expect(g.chat.connected, isTrue, reason: "7 minutes since the window closed, 4 since the agent's message");
+      g.chat.send('Thanks!');
+      await tester.pump(const Duration(minutes: 4, seconds: 59));
+      expect(g.chat.connected, isTrue, reason: "the customer's message started them again");
+      await tester.pump(const Duration(seconds: 1));
+      expect(s.types.last, 'stop');
+      await finish(tester, g);
+    });
+
+    testWidgets('opening the chat again within the 5 minutes goes on with the same conversation: no new connection or welcome',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      s.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(minutes: 4));
+      await onScreen(tester, g, c);
+      expect(c.sockets, hasLength(1), reason: 'the same connection, so the agent does not welcome the customer again');
+      expect(find.text('Hi, I am Asha.'), findsOneWidget);
+      await tester.pump(const Duration(minutes: 6));
+      expect(g.chat.connected, isTrue, reason: 'on screen again: idleness no longer closes it');
+      expect(s.types, isNot(contains('stop')));
+      await tester.pumpWidget(const SizedBox());
+      await finish(tester, g);
+    });
+
+    testWidgets('idle (4408): Graine ended it — no reconnect, the lines stay, "Disconnected"; the next message connects again',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      s.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      s.drop(code: 4408);
+      await tester.pump();
+      expect(g.chat.connected || g.chat.connecting || g.chat.reconnecting, isFalse, reason: 'nothing reconnects by itself');
+      expect(find.text('Disconnected'), findsOneWidget, reason: "the header's status line");
+      expect(find.text('Hi, I am Asha.'), findsOneWidget, reason: 'the lines stay');
+      await tester.pump(const Duration(minutes: 1));
+      g.setForegroundForTesting(false);
+      await tester.pump(const Duration(seconds: 3));
+      g.setForegroundForTesting(true);
+      await tester.pump();
+      await tester.pump();
+      expect(c.sockets, hasLength(1), reason: 'not even back in the foreground');
+
+      g.chat.send('Still there?');
+      await tester.pump();
+      await tester.pump();
+      expect(c.sockets, hasLength(2), reason: "the customer's message connects again");
+      expect(c.last.sent.where((Map<String, Object?> m) => m['type'] == 'text').single['data'], 'Still there?');
+      expect(find.text('Disconnected'), findsNothing);
+      await tester.pumpWidget(const SizedBox());
+      await finish(tester, g);
+    });
+
+    testWidgets("the session's time limit (4410): the same — and opening the chat again connects again",
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      s.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      s.drop(code: 4410);
+      await tester.pump();
+      expect(find.text('Disconnected'), findsOneWidget);
+      await tester.pump(const Duration(minutes: 1));
+      expect(c.sockets, hasLength(1));
+      await tester.pumpWidget(const SizedBox());
+      await onScreen(tester, g, c);
+      expect(c.sockets, hasLength(2), reason: 'opened again: a new connection');
+      expect(find.text('Disconnected'), findsNothing);
+      expect(find.text('Hi, I am Asha.'), findsOneWidget, reason: 'the earlier lines are still there');
+      await tester.pumpWidget(const SizedBox());
+      await finish(tester, g);
+    });
+
+    testWidgets('in the bar, its status line says "Disconnected" too', (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      await tester.pumpWidget(MediaQuery(
+        data: const MediaQueryData(size: Size(800, 600)),
+        child: const Directionality(
+          textDirection: TextDirection.ltr,
+          child: Stack(children: <Widget>[GraineAgentBar(showComponents: false)]),
+        ),
+      ));
+      await tester.tap(find.byKey(GraineAgentBar.switchButtonKey));
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.connected, isTrue);
+      c.last.drop(code: 4408);
+      await tester.pump();
+      expect(find.text('Disconnected'), findsNWidgets(2), reason: "the chat window's header and the bar's status line");
+      await tester.pumpWidget(const SizedBox());
+      await finish(tester, g);
+    });
+
+    testWidgets('any other close is a dropped connection: it reconnects, as before', (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      s.drop(code: 1011);
+      await tester.pump();
+      expect(g.chat.reconnecting, isTrue);
+      expect(find.text('Disconnected'), findsNothing);
+      await tester.pump(const Duration(milliseconds: 1300));
+      await tester.pump();
+      expect(c.sockets, hasLength(2));
+      expect(g.chat.connected, isTrue);
+      await tester.pumpWidget(const SizedBox());
+      await finish(tester, g);
+    });
+
+    testWidgets('a call with the same agent ends a conversation no window shows: one conversation with an agent at a time',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      await tester.pumpWidget(const SizedBox());
+      final page = FakePage();
+      g.voice.attach(page);
+      await tester.pump();
+      page.say(<String, Object?>{'type': 'graine:ready'});
+      await tester.pump();
+      await g.voice.start();
+      expect(s.types.last, 'stop');
+      expect(g.chat.isOpen, isFalse);
+      await finish(tester, g);
+    });
+
+    testWidgets('the background ends a conversation no window shows, and so does close() — at once',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      await tester.pumpWidget(const SizedBox());
+      g.setForegroundForTesting(false);
+      await tester.pump(const Duration(seconds: 2));
+      expect(s.types.last, 'stop');
+      g.setForegroundForTesting(true);
+      await tester.pump();
+      await tester.pump();
+      expect(c.sockets, hasLength(1), reason: 'nobody is in the chat to reconnect it for');
+      expect(g.chat.isOpen, isFalse);
+
+      final again = await onScreen(tester, g, c);
+      await tester.pumpWidget(const SizedBox());
+      g.chat.close();
+      expect(again.types.last, 'stop');
+      await tester.pump(const Duration(minutes: 6));
+      expect(c.sockets, hasLength(2));
+      await finish(tester, g);
+    });
+  });
+
+  group('a new conversation under earlier lines', () {
+    testWidgets('a reconnect that starts over: a marker over the new welcome — an opening nobody answered is replaced',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final first = await onScreen(tester, g, c);
+      first.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      g.chat.send('Is my dose due?');
+      first.say(said('Yes, at 8 pm.'));
+      await tester.pump();
+      first.drop();
+      await tester.pump(const Duration(milliseconds: 1300));
+      await tester.pump();
+      expect(c.sockets, hasLength(2));
+      c.last.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.turns.map((GraineChatTurn t) => t.text), <String>['Hi, I am Asha.', 'Is my dose due?', 'Yes, at 8 pm.', 'Hi, I am Asha.'],
+          reason: 'turns are what they always were: the marker is not one');
+      final welcome = g.chat.turns.last.id;
+      expect(find.byKey(ChatWindow.markKey(welcome)), findsOneWidget);
+      expect(find.text('Disconnected · new conversation'), findsOneWidget);
+
+      // Dropped again before the customer said anything: the new opening replaces that one.
+      c.last.drop();
+      await tester.pump(const Duration(milliseconds: 1300));
+      await tester.pump();
+      c.last.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('Hi, I am Asha.'), findsNWidgets(2), reason: 'never a third welcome');
+      expect(find.text('Disconnected · new conversation'), findsOneWidget);
+      expect(find.byKey(ChatWindow.markKey(g.chat.turns.last.id)), findsOneWidget);
+
+      await g.chat.newConversation();
+      await tester.pump();
+      expect(find.text('Disconnected · new conversation'), findsNothing, reason: 'New conversation takes it away with the lines');
+      await tester.pumpWidget(const SizedBox());
+      await finish(tester, g);
+    });
+  });
+
+  // 0.14.0 — contract/PUBLIC-STATE.md §1: everything the SDK's chat windows
+  // read, for a chat screen of the app's own.
+  group('public state for a chat of your own', () {
+    testWidgets('status: idle, connecting, connected; reconnecting after a drop; failed once every try is spent; idle once closed',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      expect(g.chat.status, GraineChatStatus.idle);
+      g.chat.open();
+      expect(g.chat.status, GraineChatStatus.connecting);
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.connected);
+      expect(g.chat.status.wire, 'connected');
+      c.fail = true;
+      c.last.drop();
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.reconnecting, reason: 'a drop, retrying');
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(seconds: 20));
+        await tester.pump();
+      }
+      expect(g.chat.status, GraineChatStatus.failed);
+      c.fail = false;
+      g.chat.retry();
+      expect(g.chat.status, GraineChatStatus.connecting, reason: 'a tap tries again, from the start');
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.connected);
+      g.chat.close();
+      expect(g.chat.status, GraineChatStatus.idle);
+      await finish(tester, g);
+    });
+
+    testWidgets('status disconnected: Graine ended it (4408) and it waits for the customer; their message connects again',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await connected(tester, g, c);
+      s.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      s.drop(code: 4408);
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.disconnected);
+      expect(g.chat.status.wire, 'disconnected');
+      await tester.pump(const Duration(minutes: 1));
+      expect(g.chat.status, GraineChatStatus.disconnected, reason: 'nothing reconnects by itself');
+      g.chat.send('Still there?');
+      expect(g.chat.status, GraineChatStatus.connecting);
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.connected);
+      await finish(tester, g);
+    });
+
+    testWidgets("status after the agent's goodbye: idle, not failed — the customer's next message starts over",
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final s = await connected(tester, g, c);
+      s.say(said('Glad I could help. Goodbye!'));
+      s.say(<String, Object?>{'type': 'conversation_end'});
+      await tester.pump();
+      s.drop(code: 1000);
+      await tester.pump();
+      expect(g.chat.ended, isTrue);
+      expect(g.chat.status, GraineChatStatus.idle);
+      await tester.pump(const Duration(seconds: 30));
+      expect(c.sockets, hasLength(1), reason: 'a goodbye is not reconnected');
+      g.chat.send('One more thing');
+      expect(g.chat.status, GraineChatStatus.connecting);
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.connected);
+      await finish(tester, g);
+    });
+
+    testWidgets('status offline: in the chat, a message waiting, nothing connecting it — until something does',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      g.setForegroundForTesting(false);
+      g.chat.send('Hello?');
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.offline, reason: 'in the background nothing connects; the message waits');
+      expect(g.chat.turns.single.delivery, GraineChatDelivery.sending);
+      g.setForegroundForTesting(true);
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.connected);
+      expect(g.chat.turns.single.delivery, GraineChatDelivery.sent);
+      await finish(tester, g);
+    });
+
+    testWidgets('newConversationBefore: where a new conversation began under earlier lines — ChatRows.build lays it out',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      final first = await connected(tester, g, c);
+      first.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      g.chat.send('Is my dose due?');
+      first.say(said('Yes, at 8 pm.'));
+      await tester.pump();
+      expect(g.chat.newConversationBefore, isEmpty);
+      first.drop();
+      await tester.pump(const Duration(milliseconds: 1300));
+      await tester.pump();
+      c.last.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      final welcome = g.chat.turns.last;
+      expect(g.chat.newConversationBefore, <String>{welcome.id});
+      expect(g.chat.turns, hasLength(4), reason: 'turns are what they always were');
+
+      final rows = ChatRows.build(g.chat.turns, now: DateTime.now(), newConversationBefore: g.chat.newConversationBefore);
+      final marker = rows.whereType<ChatNewConversationRow>().single;
+      expect(marker.before, welcome.id);
+      expect(marker.key, 'fresh-${welcome.id}');
+      expect(marker.label, 'Disconnected · new conversation');
+      expect(marker.spoken, 'Disconnected. A new conversation started.');
+      expect(rows.indexOf(marker), rows.length - 2, reason: 'just before the turn it marks');
+      expect((rows.last as ChatTurnRow).turn.id, welcome.id);
+      expect(ChatRows.build(g.chat.turns, now: DateTime.now()).whereType<ChatNewConversationRow>(), isEmpty,
+          reason: 'only when asked for: a chat that never asks sees the rows it always did');
+
+      await g.chat.newConversation();
+      expect(g.chat.newConversationBefore, isEmpty, reason: 'New conversation takes the markers away with the lines');
+      await finish(tester, g);
+    });
+
+    testWidgets("shown(): a screen of the app's own keeps the conversation as the SDK's windows do — 5 idle minutes, then closed",
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c, install: true);
+      await g.loadSession();
+      g.chat.shown(true);
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.connected, reason: 'shown, the chat opens');
+      final s = c.last;
+      s.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      g.chat.shown(false);
+      await tester.pump(const Duration(minutes: 4, seconds: 59));
+      expect(g.chat.connected, isTrue, reason: 'gone from the screen: kept while it is idle under 5 minutes');
+      g.chat.shown(true);
+      await tester.pump();
+      expect(c.sockets, hasLength(1), reason: 'shown again in time: the same conversation, no new welcome');
+      expect(g.chat.connected, isTrue);
+      g.chat.shown(false);
+      await tester.pump(const Duration(minutes: 5));
+      expect(s.types.last, 'stop', reason: 'idle for 5 minutes with no screen: it closes cleanly');
+      expect(g.chat.isOpen, isFalse);
+      expect(g.chat.status, GraineChatStatus.idle);
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // A chat nobody reports is kept until Graine's own idle limit.
+      g.chat.open();
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(minutes: 10));
+      expect(g.chat.connected, isTrue);
+      await finish(tester, g);
+    });
+  });
+
+  // 0.14.0 — contract/DESIGN.md "Who a chat belongs to": every case.
+  group('who a chat belongs to', () {
+    testWidgets('a user to another, and a user to nobody: closed quietly, a fresh ticket for whoever is identified now — never a banner',
+        (WidgetTester tester) async {
+      final server = Server();
+      final c = Connector();
+      final g = makeApp(tester, server, connector: c);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      final heard = <GraineChatStatus>[];
+      g.chat.addListener(() => heard.add(g.chat.status));
+      final first = await connected(tester, g, c);
+      first.say(said('Hello Asha.'));
+      await tester.pump();
+      g.identify(<String, Object?>{'email': 'ravi@example.com'});
+      await tester.pump();
+      await tester.pump();
+      expect(first.types.last, 'stop');
+      expect(g.chat.turns, isEmpty);
+      expect(c.sockets, hasLength(2));
+      expect(server.bodies('/api/embed/ticket').last['identity'], <String, Object?>{'value': 'ravi@example.com'});
+      c.last.say(said('Hello Ravi.'));
+      await tester.pump();
+      g.identify(null);
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.turns, isEmpty);
+      expect(c.sockets, hasLength(3));
+      expect(server.bodies('/api/embed/ticket').last.containsKey('identity'), isFalse, reason: 'signed out: anonymous');
+      expect(heard, isNot(contains(GraineChatStatus.disconnected)));
+      expect(heard, isNot(contains(GraineChatStatus.reconnecting)), reason: 'no reconnect banner');
+      await finish(tester, g);
+    });
+
+    testWidgets('the same identity — other traits, another memory choice, another spelling — changes nothing on the open chat',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c);
+      g.identify(<String, Object?>{'email': 'asha@example.com', 'name': 'Asha'});
+      final first = await connected(tester, g, c);
+      first.say(said('Hello Asha.'));
+      await tester.pump();
+      g.identify(<String, Object?>{'email': 'Asha@Example.com ', 'name': 'Asha K', 'plan': 'Gold'});
+      g.identify(<String, Object?>{'email': 'asha@example.com'}, memory: false);
+      g.setMemory(true);
+      await tester.pump();
+      await tester.pump();
+      expect(c.sockets, hasLength(1));
+      expect(first.types, isNot(contains('stop')));
+      expect(g.chat.turns.map((GraineChatTurn t) => t.text), <String>['Hello Asha.']);
+      await finish(tester, g);
+    });
+
+    testWidgets('a line typed and not yet sent stays, and goes on the next connection — as the new identity',
+        (WidgetTester tester) async {
+      final server = Server();
+      final c = Connector();
+      final g = makeApp(tester, server, connector: c);
+      final first = await connected(tester, g, c);
+      first.say(said('Hi there.'));
+      await tester.pump();
+      c.fail = true;
+      first.drop();
+      await tester.pump();
+      g.chat.send('Typed in the tunnel');
+      await tester.pump();
+      expect(g.chat.turns.last.delivery, GraineChatDelivery.sending);
+      c.fail = false;
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      expect(g.chat.turns.map((GraineChatTurn t) => t.text), <String>['Typed in the tunnel'],
+          reason: 'only the line not yet sent stays');
+      await tester.pump();
+      await tester.pump();
+      expect(server.bodies('/api/embed/ticket').last['identity'], <String, Object?>{'value': 'asha@example.com'});
+      expect(c.last.sent.where((Map<String, Object?> m) => m['type'] == 'text').map((Map<String, Object?> m) => m['data']),
+          <Object?>['Typed in the tunnel']);
+      expect(g.chat.turns.single.delivery, GraineChatDelivery.sent);
+      await finish(tester, g);
+    });
+
+    testWidgets('identified while the chat is being made: that connection lands nobody\'s; the line waiting goes on the user\'s',
+        (WidgetTester tester) async {
+      final server = Server();
+      final c = _GatedConnector();
+      final g = makeApp(tester, server, connector: c);
+      await g.loadSession();
+      g.chat.send('Hello?');
+      await tester.pump();
+      expect(c.calls, 1, reason: 'a connection is being made, for nobody');
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      await tester.pump();
+      await tester.pump();
+      c.gate.complete();
+      await tester.pump();
+      await tester.pump();
+      final open = c.sockets.where((FakeSocket s) => !s.closed).toList();
+      expect(open, hasLength(1), reason: 'the one made for nobody closed itself as it landed');
+      expect(server.bodies('/api/embed/ticket').last['identity'], <String, Object?>{'value': 'asha@example.com'});
+      expect(open.single.sent.where((Map<String, Object?> m) => m['type'] == 'text').map((Map<String, Object?> m) => m['data']),
+          <Object?>['Hello?']);
+      expect(c.sockets.where((FakeSocket s) => s.closed).single.sent, isEmpty, reason: 'nothing was said on it');
+      await finish(tester, g);
+    });
+
+    testWidgets("not connected — Graine ended it: the turns go, Disconnected goes, nothing connects until the next message",
+        (WidgetTester tester) async {
+      final server = Server();
+      final c = Connector();
+      final g = makeApp(tester, server, connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      s.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      s.drop(code: 4408);
+      await tester.pump();
+      expect(g.chat.status, GraineChatStatus.disconnected);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.turns, isEmpty);
+      expect(g.chat.status, isNot(GraineChatStatus.disconnected), reason: 'the Disconnected was the identity before\'s');
+      expect(find.text('Disconnected'), findsNothing);
+      expect(c.sockets, hasLength(1), reason: 'nothing connects by itself');
+      g.chat.send('Still there?');
+      await tester.pump();
+      await tester.pump();
+      expect(c.sockets, hasLength(2), reason: 'the next message connects');
+      expect(server.bodies('/api/embed/ticket').last['identity'], <String, Object?>{'value': 'asha@example.com'});
+      await tester.pumpWidget(const SizedBox());
+      await finish(tester, g);
+    });
+
+    testWidgets('not connected — every retry spent: a failed line stays, still failed; it goes on the next connection',
+        (WidgetTester tester) async {
+      final server = Server();
+      final c = Connector();
+      final g = makeApp(tester, server, connector: c);
+      final first = await connected(tester, g, c);
+      c.fail = true;
+      first.drop();
+      await tester.pump();
+      g.chat.send('Lost line');
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(seconds: 20));
+        await tester.pump();
+      }
+      expect(g.chat.failed, isTrue);
+      expect(g.chat.turns.last.delivery, GraineChatDelivery.failed);
+      final made = c.sockets.length;
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      await tester.pump();
+      expect(g.chat.turns.map((GraineChatTurn t) => '${t.text}:${t.delivery?.name}'), <String>['Lost line:failed']);
+      expect(g.chat.failed, isTrue, reason: 'giving up is not the identity before\'s to take away');
+      await tester.pump(const Duration(seconds: 30));
+      expect(c.sockets.length, made, reason: 'nothing connects by itself');
+      c.fail = false;
+      g.chat.retry();
+      await tester.pump();
+      await tester.pump();
+      expect(server.bodies('/api/embed/ticket').last['identity'], <String, Object?>{'value': 'asha@example.com'});
+      expect(c.last.sent.where((Map<String, Object?> m) => m['type'] == 'text').map((Map<String, Object?> m) => m['data']),
+          <Object?>['Lost line']);
+      await finish(tester, g);
+    });
+
+    testWidgets('the markers and the booked calls go with the turns; the calls are read again for the new identity',
+        (WidgetTester tester) async {
+      final server = Server();
+      server.routes['/api/embed/calls/list'] = (Map<String, Object?> body) {
+        final who = (body['identity'] as Map<String, Object?>?)?['value'];
+        return jsonResponse(<String, Object?>{
+          'calls': <Object?>[
+            if (who == 'asha@example.com')
+              <String, Object?>{'id': 'sc_1', 'at': '2030-01-01T10:00:00Z', 'status': 'scheduled', 'source': 'sdk'},
+          ],
+        });
+      };
+      final c = Connector();
+      final g = makeApp(tester, server, connector: c, install: true);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      final first = await connected(tester, g, c);
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.upcomingCalls.map((GraineScheduledCall x) => x.id), <String>['sc_1']);
+      first.say(said('Hi, I am Asha.'));
+      g.chat.send('Is my dose due?');
+      first.say(said('Yes, at 8 pm.'));
+      await tester.pump();
+      first.drop();
+      await tester.pump(const Duration(milliseconds: 1300));
+      await tester.pump();
+      c.last.say(said('Hi, I am Asha.'));
+      await tester.pump();
+      expect(g.chat.newConversationBefore, isNotEmpty, reason: 'a marker, before the new welcome');
+      final lists = server.bodies('/api/embed/calls/list').length;
+      g.identify(<String, Object?>{'email': 'ravi@example.com'});
+      expect(g.chat.newConversationBefore, isEmpty, reason: 'the markers go with the turns');
+      expect(g.chat.upcomingCalls, isEmpty, reason: "Asha's booked calls are not Ravi's");
+      await tester.pump();
+      await tester.pump();
+      await tester.pump();
+      expect(server.bodies('/api/embed/calls/list').length, greaterThan(lists), reason: 'read again for the new identity');
+      expect(server.bodies('/api/embed/calls/list').last['identity'], <String, Object?>{'value': 'ravi@example.com'});
+      expect(g.chat.upcomingCalls, isEmpty);
+      await finish(tester, g);
+    });
+
+    testWidgets('a chat no window shows, still connected, is wanted: it connects again at once — and still closes once idle',
+        (WidgetTester tester) async {
+      final server = Server();
+      final c = Connector();
+      final g = makeApp(tester, server, connector: c, install: true);
+      await g.loadSession();
+      final s = await onScreen(tester, g, c);
+      s.say(said('Hi.'));
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox());
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      await tester.pump();
+      await tester.pump();
+      expect(c.sockets, hasLength(2));
+      expect(server.bodies('/api/embed/ticket').last['identity'], <String, Object?>{'value': 'asha@example.com'});
+      await tester.pump(const Duration(minutes: 5));
+      expect(c.last.types.last, 'stop', reason: 'no window, idle for 5 minutes: it closes as before');
       await finish(tester, g);
     });
   });

@@ -4,7 +4,8 @@ part of 'graine.dart';
 /// [GraineChatState], as [GraineCallFault] is beside the call state, so a
 /// host's own chat keeps compiling. [GraineChatSession] implements it; the
 /// bar opens a chat that does when the customer is in the chat, and closes it
-/// when they leave.
+/// when they leave (the SDK's own, once it has been idle for 5 minutes with
+/// no window showing it).
 abstract interface class GraineChatConnection {
   /// A connection is being made, or remade after a drop.
   bool get connecting;
@@ -35,8 +36,52 @@ abstract class GraineChatSocket {
   Future<void> close();
 }
 
+/// A CHAT SOCKET THAT SAYS HOW IT CLOSED — beside [GraineChatSocket], so a
+/// socket written before it keeps compiling. The real one does; a test's
+/// fake may. Not exported.
+abstract interface class ChatSocketCloseCode {
+  /// The code the server closed with, once [GraineChatSocket.frames] is done;
+  /// null before that, or when it gave none.
+  int? get closeCode;
+}
+
 /// Opens a [GraineChatSocket] to [url], offering [protocols].
 typedef GraineChatConnector = Future<GraineChatSocket> Function(Uri url, List<String>? protocols);
+
+/// WHAT THE SDK'S OWN CHAT WINDOWS ASK OF A CHAT — [GraineAgentBar] and
+/// [GraineChat] — beyond what a host's own chat offers: when one comes on
+/// screen and when it leaves, where the new-conversation markers go, and
+/// whether Graine ended the conversation. Not exported: a chat screen of the
+/// app's own reaches the same through [GraineChatSession.shown],
+/// [GraineChatSession.newConversationBefore] and [GraineChatSession.status].
+abstract final class ChatWindows {
+  /// A window came on screen with [chat]: the customer is in it.
+  static void shown(GraineChatConnection chat) {
+    if (chat is GraineChatSession) {
+      chat._windowShown();
+    } else {
+      chat.open();
+    }
+  }
+
+  /// A window with [chat] left the screen. The SDK's own chat is kept until
+  /// it has been idle for 5 minutes (contract/DESIGN.md "How long a
+  /// conversation lasts"); a host's own closes, as it always did.
+  static void left(GraineChatConnection chat) {
+    if (chat is GraineChatSession) {
+      chat._windowLeft();
+    } else {
+      chat.close();
+    }
+  }
+
+  /// The ids of [chat]'s turns a "Disconnected · new conversation" row is drawn before.
+  static Set<String> marks(GraineChatSession chat) => ChatMarks.of(chat._transcript);
+
+  /// Graine ended [chat]'s conversation itself — idle, or at the session's
+  /// time limit — and nothing is connecting: the header says "Disconnected".
+  static bool disconnected(GraineChatSession chat) => chat._disconnected;
+}
 
 /// THE TEXT CHAT — a conversation in writing with the agent, on its own
 /// socket, the same agent and the same context as the call.
@@ -49,6 +94,15 @@ typedef GraineChatConnector = Future<GraineChatSocket> Function(Uri url, List<St
 /// agent draws in the chat land in [GraineInApp.components] and are answered
 /// on this socket; its in-app actions run through [GraineInApp.registerAction];
 /// the screen reaches it as it changes.
+///
+/// How long it lasts (contract/DESIGN.md "How long a conversation lasts"):
+/// when the SDK's chat window closes, the conversation stays connected until
+/// it has been idle for 5 minutes — no message either way — so opening the
+/// chat again goes on with it. [close] ends it at once, and the app going to
+/// the background (`endOnBackground`) ends it as before. When Graine ends it
+/// itself — idle, or at the session's time limit — nothing reconnects until
+/// the customer opens the chat or sends something; the window says
+/// "Disconnected".
 ///
 /// [GraineInApp.chat] is the one instance. A [ChangeNotifier]: a widget that
 /// listens redraws on every change.
@@ -117,6 +171,28 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   Timer? _retry;
   Timer? _backgroundConfirm;
 
+  /// The SDK's chat windows showing this chat now ([ChatWindows]).
+  int _windows = 0;
+
+  /// When a message last went either way, or the chat last connected.
+  int? _lastActivity;
+
+  /// Set while no window shows the chat: closes it once it has been idle for [_idleMs].
+  Timer? _idleClose;
+
+  /// Graine ended the conversation itself: nothing reconnects until the
+  /// customer opens the chat or sends something.
+  bool _endedByGraine = false;
+
+  /// How long a chat no window shows stays connected with no message either
+  /// way: the window Graine's server applies (contract/DESIGN.md "How long a
+  /// conversation lasts").
+  static const int _idleMs = 5 * 60 * 1000;
+
+  /// The embed gateway's close codes for a conversation it ended: idle
+  /// (`idle_timeout`) and the session's time limit.
+  static const Set<int> _endedCodes = <int>{4408, 4410};
+
   /// Bumped whenever the chat is hung up on purpose: a connect still in
   /// flight from before is nobody's, and closes itself when it lands.
   int _generation = 0;
@@ -146,6 +222,19 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   /// failed), whether an agent turn was volunteered, and the component it drew.
   List<GraineChatTurn> get turns => _transcript.turns;
 
+  /// THE CHAT'S CURRENT SESSION — this connection's run, the id Execution
+  /// Logs shows for it — from the server's `session` frame (sdk/contract/
+  /// history.json `sessionFrame`). Null until it arrives, with a server that
+  /// sends none, once the connection closes, and after the identity changed.
+  /// Each turn carries the [GraineChatTurn.session] it was said in.
+  String? get sessionId => _transcript.sessionId;
+
+  /// THE SESSIONS THE THREAD HOLDS, oldest first (history.json `sessions`):
+  /// consecutive turns with the same session make one; turns kept before
+  /// sessions were recorded make one with no id — for a "past conversations"
+  /// list or session dividers of your own.
+  List<GraineChatSessionInfo> get sessions => ChatSessions.of(_transcript.turns, _transcript.sessionId);
+
   /// The socket is open: the window says "Online".
   @override
   bool get connected => _connected;
@@ -171,6 +260,49 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
 
   /// The customer is in the chat ([open] was called and [close] was not).
   bool get isOpen => _wanted;
+
+  // ── public state for a chat of your own (contract/PUBLIC-STATE.md) ──────
+
+  /// WHERE THE CHAT IS, in one word — what the SDK's own windows draw their
+  /// header and banner from. First match wins: connected; reconnecting (a
+  /// drop, retrying); connecting; disconnected (Graine ended the
+  /// conversation — idle, or its time limit — and it waits for the
+  /// customer); failed (every reconnect spent); offline (in the chat, a
+  /// message waiting, nothing connecting it); else idle.
+  GraineChatStatus get status {
+    if (_connected) return GraineChatStatus.connected;
+    if (reconnecting) return GraineChatStatus.reconnecting;
+    if (connecting) return GraineChatStatus.connecting;
+    if (_disconnected) return GraineChatStatus.disconnected;
+    if (_failed) return GraineChatStatus.failed;
+    if (_wanted && _transcript.pending.isNotEmpty) return GraineChatStatus.offline;
+    return GraineChatStatus.idle;
+  }
+
+  /// THE TURNS A "Disconnected · new conversation" ROW GOES BEFORE, by id
+  /// (contract/DESIGN.md "A new conversation under earlier lines";
+  /// sdk/contract/history.json → `fresh`): where the chat connected again and
+  /// Graine began a new conversation under the earlier lines. Empty when there
+  /// are none. The window's own rows, never turns — [turns] is as it always
+  /// was; [ChatRows.build] lays them out (`ChatNewConversationRow`).
+  Set<String> get newConversationBefore => ChatMarks.of(_transcript);
+
+  /// A CHAT SCREEN OF YOUR OWN CAME ON SCREEN (`true`) OR LEFT IT (`false`),
+  /// so the conversation lives as the SDK's own windows' does
+  /// (contract/DESIGN.md "How long a conversation lasts"). Shown, the chat
+  /// opens ([open]): a conversation kept since a screen left goes on as it
+  /// was, with no new welcome. Gone from every screen, it stays connected
+  /// until it has been idle for 5 minutes — no message either way — and then
+  /// closes. Each `true` is paired with one `false`. A chat nobody reports
+  /// stays connected until Graine's own idle limit; [close] ends it at once.
+  void shown(bool visible) {
+    if (_disposed) return;
+    if (visible) {
+      _windowShown();
+    } else {
+      _windowLeft();
+    }
+  }
 
   // ── chat window v2 (contract/DESIGN.md "Chat window v2" → SDK API) ───────
 
@@ -352,14 +484,68 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _wanted = false;
     _generation++;
     _cancelRetry();
+    _cancelIdleClose();
     _backgroundConfirm?.cancel();
     _backgroundConfirm = null;
     _hangUp();
     _ladder.reset();
     _failed = false;
     _remaking = false;
+    _endedByGraine = false;
     notifyListeners();
   }
+
+  /// A chat window came on screen: the customer is in the chat. A
+  /// conversation kept since a window left goes on as it was — the same
+  /// connection, nothing on screen changing.
+  void _windowShown() {
+    _windows++;
+    _cancelIdleClose();
+    open();
+  }
+
+  /// A chat window left the screen. When no window shows the chat any more
+  /// the conversation is kept, and closes once it has been idle for 5
+  /// minutes — no message either way: opening the chat within them goes on
+  /// with it (contract/DESIGN.md "How long a conversation lasts").
+  void _windowLeft() {
+    if (_windows > 0) _windows--;
+    if (_windows == 0) _scheduleIdleClose();
+  }
+
+  /// The close of a chat no window shows: 5 minutes after the last message
+  /// either way (at once when that was longer ago).
+  void _scheduleIdleClose() {
+    _cancelIdleClose();
+    if (!_wanted || _windows > 0 || _disposed) return;
+    final now = _graine._clock();
+    final due = (_lastActivity ?? now) + _idleMs - now;
+    _idleClose = Timer(Duration(milliseconds: due > 0 ? due : 0), () {
+      _idleClose = null;
+      close();
+    });
+  }
+
+  void _cancelIdleClose() {
+    _idleClose?.cancel();
+    _idleClose = null;
+  }
+
+  /// This agent's call is starting: a conversation kept only until it goes
+  /// idle, with no window showing it, ends — one conversation with an agent
+  /// at a time.
+  void _callStarting() {
+    if (_idleClose != null) close();
+  }
+
+  /// A message went either way: the conversation is not idle. While no
+  /// window shows the chat, its 5 minutes start again.
+  void _activity() {
+    _lastActivity = _graine._clock();
+    if (_idleClose != null) _scheduleIdleClose();
+  }
+
+  bool get _disconnected => _endedByGraine && !_connected && _opening == null;
 
   /// The customer typed [text] and sent it. Shown at once; sent now when
   /// connected, else kept and sent the moment the chat connects (and the
@@ -370,6 +556,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     final t = text.trim();
     if (t.isEmpty) return;
     _graine.noteInteraction();
+    _activity();
     final live = _connected && _socket != null;
     _transcript.customer(t, _now(), pending: !live);
     if (live) {
@@ -388,6 +575,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   void answerWidget(String widgetId, Map<String, Object?> data, String summary) {
     _graine.clearPendingWidget();
     if (!_connected) return;
+    _activity();
     _send(ChatWire.widgetResult(widgetId, data));
     if (summary.isNotEmpty) {
       _send(ChatWire.text(summary));
@@ -424,6 +612,8 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       _cancelRetry();
       _hangUp();
       _remaking = false;
+      // Asked for on purpose: whatever Graine had ended, the chat connects again.
+      _endedByGraine = false;
       notifyListeners();
     }
     try {
@@ -444,19 +634,23 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
 
   // ── the socket ───────────────────────────────────────────────────────────
 
-  /// Connect now: an explicit open or a message beats the backoff.
+  /// Connect now: an explicit open or a message beats the backoff — and
+  /// connects again a conversation Graine ended.
   void _retryNow() {
     if (_failed) {
       _failed = false;
       _ladder.reset();
       _transcript.retryFailed();
     }
+    _endedByGraine = false;
     _cancelRetry();
     _ensureConnected();
   }
 
   void _ensureConnected() {
     if (_disposed || !_wanted || _connected || _opening != null || _retry != null) return;
+    // Graine ended the conversation: only the customer's next open or message connects again.
+    if (_endedByGraine) return;
     if (!_graine._foreground) return; // back in the foreground, it connects
     final generation = _generation;
     _opening = _openSocket(generation).whenComplete(() {
@@ -499,6 +693,8 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       _failed = false;
       _remaking = false;
       _ladder.reset();
+      // A connection is where the idle time of a conversation starts.
+      _activity();
       // A new conversation: the last one's unanswered component must not come back over it.
       if (_graine._componentsFromChat) _graine.components.reset();
       _send(ChatWire.init(variables));
@@ -530,6 +726,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     }
     final frame = ChatFrame.parse(raw);
     if (frame == null) return;
+    _activity();
     switch (frame) {
       case ChatText(chunk: final chunk):
         if (chunk.startsTurn) _transcript.turnStarted();
@@ -566,19 +763,27 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
         _transcript.offerReplies(replies);
       case ChatConversationEnd():
         _transcript.conversationEnded();
+      case ChatSessionStart(id: final id):
+        _transcript.sessionStarted(id);
     }
     notifyListeners();
   }
 
   void _onClosed(GraineChatSocket socket) {
     if (!identical(socket, _socket)) return;
+    final code = switch (socket) { ChatSocketCloseCode(:final closeCode) => closeCode, _ => null };
     _teardown();
     _transcript.closed();
     _graine._conversationStateChanged();
+    // Graine ended the conversation itself — idle, or at the session's time
+    // limit: the lines stay, the header says "Disconnected", and the
+    // customer's next open or message connects again.
+    if (_endedCodes.contains(code)) _endedByGraine = true;
     // After the agent ended the conversation the server closes the socket
     // itself: reconnecting would open a new conversation under the old one's
-    // goodbye. The next message the user sends connects again.
-    if (_wanted && !_transcript.ended) _scheduleReconnect();
+    // goodbye. The next message the user sends connects again. Any other
+    // close is a drop, and reconnects.
+    if (_wanted && !_transcript.ended && !_endedByGraine) _scheduleReconnect();
     if (!_disposed) notifyListeners();
   }
 
@@ -672,24 +877,43 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _send(ChatWire.appEvent(name, detail: detail, data: data));
   }
 
-  /// Someone else is using the app now (a sign-out, another user): the open
-  /// conversation is not theirs. It ends, the transcript goes, and — if the
-  /// customer is still in the chat — a new conversation opens for whoever it is.
-  void _newUser() {
-    final wanted = _wanted;
+  /// WHO A CHAT BELONGS TO (contract/DESIGN.md): the identity changed —
+  /// nobody to a user (the app identified after the chat opened), a user to
+  /// another, or a user to nobody. A connection is whoever was identified when
+  /// its ticket was made, so:
+  ///  1. the one connected, connecting or coming back after a drop closes
+  ///     normally — no "Disconnected", no reconnect banner — and one still
+  ///     being made is nobody's when it lands;
+  ///  2. the turns it carried go, with their history and marker rows, and the
+  ///     booked calls shown for the identity before (read again for the new
+  ///     one as the chat connects);
+  ///  3. a line typed that has not gone out — still sending, or failed —
+  ///     stays, and goes on the next connection;
+  ///  4. a chat that was connected or connecting connects again at once, with
+  ///     a ticket for the new identity, when it is wanted; otherwise — and for
+  ///     a chat neither connected nor connecting, whose "Disconnected" goes
+  ///     too — the next open or message connects.
+  /// Called only when the identity's value changed: other traits, or the
+  /// memory choice, change nothing on an open chat.
+  void _identityChanged() {
+    if (_disposed) return;
+    final live = _connected || _opening != null || _retry != null;
     _generation++;
     _cancelRetry();
     _hangUp();
-    _transcript.clear();
-    // Their booked calls are not the next person's either.
+    _transcript.forgetAllButUnsent();
+    // Their booked calls are not the next identity's.
     _upcoming = const <GraineScheduledCall>[];
     _cancels.clear();
     _upcomingAt = null;
-    _ladder.reset();
-    _failed = false;
+    _endedByGraine = false;
     _remaking = false;
-    _wanted = wanted;
-    _ensureConnected();
+    _ladder.reset();
+    if (live && _wanted) {
+      _failed = false;
+      _transcript.retryFailed();
+      _ensureConnected();
+    }
     notifyListeners();
   }
 
@@ -708,6 +932,11 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _backgroundConfirm = Timer(const Duration(seconds: 2), () {
       _backgroundConfirm = null;
       if (_graine._foreground) return;
+      // Kept only until it went idle, with no window showing it: the background ends it, as close() does.
+      if (_idleClose != null) {
+        close();
+        return;
+      }
       _generation++;
       _cancelRetry();
       _hangUp();
@@ -733,13 +962,16 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
 Future<GraineChatSocket> _ioConnect(Uri url, List<String>? protocols) async =>
     _IoChatSocket(await WebSocket.connect(url.toString(), protocols: protocols));
 
-class _IoChatSocket implements GraineChatSocket {
+class _IoChatSocket implements GraineChatSocket, ChatSocketCloseCode {
   _IoChatSocket(this._ws);
 
   final WebSocket _ws;
 
   @override
   Stream<Object?> get frames => _ws;
+
+  @override
+  int? get closeCode => _ws.closeCode;
 
   @override
   void send(String data) {

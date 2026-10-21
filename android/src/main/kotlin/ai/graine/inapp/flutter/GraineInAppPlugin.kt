@@ -106,6 +106,8 @@ class GraineInAppPlugin :
                 "end" -> done(result) { GraineCallsHost.end() }
                 "setMuted" -> flag(call, result) { GraineCallsHost.setMuted(it) }
                 "setSpeaker" -> flag(call, result) { GraineCallsHost.setSpeaker(it) }
+                // Where calls start their sound: kept by the host for the next cold start, held until configure.
+                "setSpeakerByDefault" -> flag(call, result) { GraineCallsHost.setSpeakerByDefault(it) }
                 // The traits as the app passed them: the SDK masks them for the
                 // agent and keeps the identity raw for Graine, as its own identify does.
                 "setIdentity" -> done(result) { GraineCallsHost.setIdentity(call.arguments as? Map<*, *>) }

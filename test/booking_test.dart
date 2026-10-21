@@ -301,6 +301,94 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
   });
 
+  // 0.14.0 — contract/PUBLIC-STATE.md §4: why booking is not offered, and the times a picker of your own offers.
+  group('bookingUnavailableReason and the slots', () {
+    CallsSetting c([Map<String, Object?>? over]) => CallsSetting.fromJson(<String, Object?>{...calls(), ...?over})!;
+
+    test('one reason per rule, in the shared order — not loaded, rings, scheduling, identity — null exactly when the blocker is', () {
+      final off = c(<String, Object?>{'scheduling': <String, Object?>{'usersCanBook': false}});
+      expect(Booking.unavailableReason(c(), platform: 'ios', identified: true, loaded: false),
+          GraineBookingUnavailableReason.notLoaded);
+      expect(Booking.unavailableReason(c(<String, Object?>{'hosted': false}), platform: 'ios', identified: false),
+          GraineBookingUnavailableReason.ringsNotSetUp);
+      expect(
+          Booking.unavailableReason(c(<String, Object?>{'hosted': false, 'scheduling': <String, Object?>{'usersCanBook': false}}),
+              platform: 'ios', identified: true),
+          GraineBookingUnavailableReason.ringsNotSetUp,
+          reason: 'whether Graine rings this phone is said before the agent setting');
+      expect(Booking.unavailableReason(c(<String, Object?>{'platforms': <Object?>['android']}), platform: 'ios', identified: true),
+          GraineBookingUnavailableReason.ringsNotSetUp);
+      expect(Booking.unavailableReason(c(), platform: null, identified: true), GraineBookingUnavailableReason.ringsNotSetUp);
+      expect(Booking.unavailableReason(off, platform: 'ios', identified: false), GraineBookingUnavailableReason.schedulingOff,
+          reason: 'the agent before the customer: signing in would not help');
+      expect(Booking.unavailableReason(null, platform: 'web', identified: true), GraineBookingUnavailableReason.schedulingOff,
+          reason: 'a server that says nothing allows no booking');
+      expect(Booking.unavailableReason(c(), platform: 'ios', identified: false), GraineBookingUnavailableReason.notIdentified);
+      expect(Booking.unavailableReason(c(<String, Object?>{'hosted': false}), platform: 'web', identified: true), isNull,
+          reason: 'a web page books for the app: the ringing rule does not apply');
+      expect(Booking.unavailableReason(c(), platform: 'android', identified: true), isNull);
+      for (final (calls, platform, identified) in <(CallsSetting?, String?, bool)>[
+        (c(), 'ios', true), (c(), 'ios', false), (off, 'ios', true), (null, 'ios', true), (c(<String, Object?>{'hosted': false}), 'android', true),
+      ]) {
+        expect(Booking.unavailableReason(calls, platform: platform, identified: identified)?.code,
+            Booking.blocker(calls, platform: platform, identified: identified));
+      }
+      expect(<String>[for (final r in GraineBookingUnavailableReason.values) r.wire],
+          <String>['not_loaded', 'rings_not_set_up', 'scheduling_off', 'not_identified']);
+      expect(GraineBookingUnavailableReason.notIdentified.code, GraineErrorCode.identityRequired);
+      expect(Booking.errorLine(GraineBookingUnavailableReason.ringsNotSetUp.code, rules), "Booking a call isn't available right now");
+    });
+
+    test("a day's slots: every 5 minutes from its first time to its last, on the clock's grid", () {
+      final now = DateTime(2026, 10, 14, 17, 58, 37);
+      final days = Booking.days(Booking.bounds(rules, now), now);
+      final today = Booking.slots(days[0]);
+      expect(today.first, DateTime(2026, 10, 14, 18, 5));
+      expect(today.last, DateTime(2026, 10, 14, 23, 55));
+      expect(today, hasLength(71));
+      expect(Booking.slots(days[1]), hasLength(288), reason: 'a whole day');
+      final quarters = Booking.slots(days[0], stepMinutes: 15);
+      expect(quarters.first, DateTime(2026, 10, 14, 18, 15), reason: 'the first on the 15-minute grid');
+      expect(quarters.last, DateTime(2026, 10, 14, 23, 45));
+    });
+  });
+
+  testWidgets('GraineInApp: bookingUnavailableReason follows the session and the user; bookingSlots offers what the sheet does',
+      (WidgetTester tester) async {
+    final server = Server();
+    final g = GraineInApp.forTesting(const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'),
+        httpClient: server.client, clock: () => tester.binding.clock.now().millisecondsSinceEpoch);
+    expect(g.bookingUnavailableReason, GraineBookingUnavailableReason.notLoaded, reason: 'no session yet');
+    await g.loadSession();
+    expect(g.bookingUnavailableReason, GraineBookingUnavailableReason.notIdentified);
+    g.identify(<String, Object?>{'email': 'asha@example.com'});
+    expect(g.bookingUnavailableReason, isNull);
+    final now = DateTime(2026, 10, 14, 17, 58, 37);
+    final slots = g.bookingSlots(DateTime(2026, 10, 15, 9), now: now);
+    expect(slots.first, DateTime(2026, 10, 15));
+    expect(slots.last, DateTime(2026, 10, 15, 23, 55));
+    expect(slots, hasLength(288), reason: "the sheet's own 5-minute steps");
+    expect(g.bookingSlots(now, now: now).first, DateTime(2026, 10, 14, 18, 5), reason: 'today: from the earliest, rounded up');
+    expect(g.bookingSlots(DateTime(2026, 10, 16, 23), now: now).last, DateTime(2026, 10, 16, 17, 55), reason: 'to the latest');
+    expect(g.bookingSlots(DateTime(2026, 10, 20), now: now), isEmpty, reason: 'past maxDaysAhead');
+    g.identify(null);
+    await tester.pump();
+    g.dispose();
+
+    final off = Server(session: session(callsBody: calls(usersCanBook: false)));
+    final h = GraineInApp.forTesting(const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'), httpClient: off.client);
+    await h.loadSession();
+    h.identify(<String, Object?>{'email': 'asha@example.com'});
+    expect(h.bookingUnavailableReason, GraineBookingUnavailableReason.schedulingOff);
+    final unrung = Server(session: session(callsBody: calls(hosted: false)));
+    final k = GraineInApp.forTesting(const GraineConfig(baseUrl: base, publishableKey: 'pk_test_1'), httpClient: unrung.client);
+    await k.loadSession();
+    expect(k.bookingUnavailableReason, GraineBookingUnavailableReason.ringsNotSetUp);
+    h.dispose();
+    k.dispose();
+    await tester.pump(const Duration(seconds: 1));
+  });
+
   // ── the sheet ────────────────────────────────────────────────────────────
 
   testWidgets('the sheet: its title, the call name, a chip per day, the time, the zone, what it is about',

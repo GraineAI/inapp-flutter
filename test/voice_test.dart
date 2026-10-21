@@ -227,6 +227,94 @@ void main() {
     await finish(tester, g);
   });
 
+  // 0.14.0 — contract/PUBLIC-STATE.md §2: the voice bar's state, for a bar of your own.
+  testWidgets("status says where the call is in one word — the bar's own order — and ended once a call is over",
+      (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    expect(g.voice.status, GraineVoiceStatus.connecting, reason: 'the page is not ready');
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    expect(g.voice.status, GraineVoiceStatus.idle, reason: 'nothing started yet');
+    await g.voice.start();
+    expect(g.voice.status, GraineVoiceStatus.connecting);
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'retrying'});
+    expect(g.voice.status, GraineVoiceStatus.reconnecting, reason: 'the bar says "Reconnecting…" across a retry');
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
+    expect(g.voice.status, GraineVoiceStatus.listening);
+    page.say(<String, Object?>{'type': 'graine:caption', 'role': 'customer', 'text': 'What does it cost?', 'live': false});
+    expect(g.voice.status, GraineVoiceStatus.thinking);
+    page.say(<String, Object?>{'type': 'graine:caption', 'role': 'agent', 'text': 'It costs', 'live': true});
+    expect(g.voice.status, GraineVoiceStatus.speaking);
+    expect(g.voice.captions.last.live, isTrue, reason: "the agent's line as it is said — final once live is false");
+    expect(<double>[g.voice.agentLevel, g.voice.micLevel], <double>[0, 0],
+        reason: 'the page posts no audio levels yet: 0, never an invented one');
+    g.voice.setMuted(true);
+    expect(g.voice.status, GraineVoiceStatus.muted);
+    g.voice.setMuted(false);
+    page.say(<String, Object?>{'type': 'graine:reconnecting', 'active': true});
+    expect(g.voice.status, GraineVoiceStatus.reconnecting);
+    page.say(<String, Object?>{'type': 'graine:ended'});
+    expect(g.voice.status, GraineVoiceStatus.ended);
+    expect(g.voice.status.wire, 'ended');
+    expect(g.voice.failure, isNull);
+    await g.voice.start();
+    expect(g.voice.status, GraineVoiceStatus.connecting, reason: 'the next start places another');
+    await finish(tester, g);
+  });
+
+  testWidgets('status failed says why in a sentence: a setting, a refused microphone, a page that never loaded, a dead connect',
+      (WidgetTester tester) async {
+    var allow = false;
+    final g = app(tester,
+        config: GraineConfig(
+          baseUrl: base,
+          publishableKey: 'pk_test_1',
+          requestMicrophone: () async => allow,
+          timing: const GraineTiming(stallMs: 400, bootMs: 400, retryDelaysMs: <int>[100]),
+        ));
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    page.say(<String, Object?>{
+      'type': 'graine:transport',
+      'transport': 'ws',
+      'requested': 'rtc',
+      'reason': 'not_configured',
+      'message': 'This deployment has no WebRTC gateway.',
+    });
+    expect(g.voice.status, GraineVoiceStatus.failed);
+    expect(g.voice.failure, 'This deployment has no WebRTC gateway.');
+    expect(g.voice.transport, Transport.websocket);
+    expect(g.voice.transportFallbackReason, 'not_configured');
+
+    await g.voice.start();
+    expect(g.voice.status, GraineVoiceStatus.failed);
+    expect(g.voice.failure, GraineVoiceStatus.micRefused);
+
+    allow = true;
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': false, 'connecting': true});
+    page.say(<String, Object?>{'type': 'graine:progress', 'stage': 'failed'});
+    expect(g.voice.status, GraineVoiceStatus.failed);
+    expect(g.voice.failure, GraineVoiceStatus.couldNotConnect);
+
+    page.say(<String, Object?>{'type': 'graine:transport', 'transport': 'rtc', 'requested': 'rtc'});
+    expect(g.voice.transportFallbackReason, isNull, reason: 'it did not fall back');
+
+    page.sink.pageStarted();
+    page.sink.mainFrameError('load-error:-2');
+    await tester.pump(const Duration(milliseconds: 130));
+    page.sink.pageStarted();
+    page.sink.mainFrameError('load-error:-2');
+    expect(g.voice.connectivity, GraineConnectivity.failed);
+    expect(g.voice.status, GraineVoiceStatus.failed);
+    expect(g.voice.failure, GraineVoiceStatus.couldNotLoad);
+    await finish(tester, g);
+  });
+
   testWidgets('the captions switch: on by default, off keeps what is said, a clear forgets it and the call goes on',
       (WidgetTester tester) async {
     final g = app(tester);

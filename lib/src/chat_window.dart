@@ -542,6 +542,7 @@ class ChatWindow extends StatefulWidget {
     this.callName,
     this.now,
     this.turns,
+    this.marks = const <String>{},
     this.onNewConversation,
     this.bookingAvailable = false,
     this.onBook,
@@ -554,6 +555,7 @@ class ChatWindow extends StatefulWidget {
     this.onAttach,
     this.onCall,
     this.reconnecting = false,
+    this.disconnected = false,
     this.offline = false,
     this.onRetry,
     this.onOpenLink,
@@ -568,6 +570,10 @@ class ChatWindow extends StatefulWidget {
   /// The SDK's own chat's turns — when given, drawn instead of [messages],
   /// with their times and delivery.
   final List<GraineChatTurn>? turns;
+
+  /// The ids of the [turns] a "Disconnected · new conversation" row is drawn
+  /// before ([ChatMarks]): where Graine began a new conversation under them.
+  final Set<String> marks;
 
   /// The chat is connected: the subtitle ("Online"), else "Connecting…".
   final bool online;
@@ -670,6 +676,10 @@ class ChatWindow extends StatefulWidget {
   /// A dropped chat is being made again: "Reconnecting…" in the header and the banner.
   final bool reconnecting;
 
+  /// Graine ended the conversation itself (idle, or its time limit) and
+  /// nothing reconnects until the customer acts: "Disconnected" in the header.
+  final bool disconnected;
+
   /// Not connected and not trying: with a message waiting, the offline banner.
   final bool offline;
 
@@ -695,6 +705,9 @@ class ChatWindow extends StatefulWidget {
 
   /// An earlier call's one row, by its first turn's id.
   static Key voiceKey(String turnId) => ValueKey<String>('graine-chat-voice-$turnId');
+
+  /// "Disconnected · new conversation", by the id of the turn it stands before.
+  static Key markKey(String turnId) => ValueKey<String>('graine-chat-mark-$turnId');
 
   static const Key headerKey = ValueKey<String>('graine-chat-header');
   static const Key composerKey = ValueKey<String>('graine-chat-composer');
@@ -1147,14 +1160,17 @@ class _ChatWindowState extends State<ChatWindow> {
   }
 
   /// THE STATUS LINE under the title, first match wins: reconnecting,
-  /// connecting, the agent typing (with `typingStatus`), none, then the dot
-  /// and the words (`online`) or the words alone (`text`).
+  /// disconnected (Graine ended the conversation), connecting, the agent
+  /// typing (with `typingStatus`), none, then the dot and the words
+  /// (`online`) or the words alone (`text`).
   Widget? _status(ChatLook l, Color quiet, {required bool centered}) {
     final h = l.chat.header;
     String words;
     var dot = false;
     if (widget.reconnecting) {
       words = widget.loader?.text.reconnecting ?? 'Reconnecting…';
+    } else if (widget.disconnected) {
+      words = 'Disconnected';
     } else if (!widget.online) {
       words = widget.connectingText ?? 'Connecting…';
     } else if (widget.typing && h.typingStatus) {
@@ -1403,26 +1419,41 @@ class _ChatWindowState extends State<ChatWindow> {
   List<_Line> _lines() {
     final turns = _pieces?.turns;
     if (turns != null) {
-      final said = <GraineChatTurn>[
-        for (final t in turns)
-          if (t.text.trim().isNotEmpty) t,
-      ];
+      final said = <GraineChatTurn>[];
+      // The turns a new-conversation row goes before: one marking a turn
+      // that draws nothing (a component's own) moves to the next that does —
+      // and only under earlier lines, never atop the thread.
+      final marked = <String>{};
+      var owed = false;
+      for (final t in turns) {
+        if (widget.marks.contains(t.id)) owed = true;
+        if (t.text.trim().isEmpty) continue;
+        if (owed && said.isNotEmpty) marked.add(t.id);
+        owed = false;
+        said.add(t);
+      }
       final now = (widget.now ?? DateTime.now)();
-      return <_Line>[
-        for (final row in ChatRows.build(said, now: now))
-          switch (row) {
-            ChatDayRow() => _Line.day(ChatRows.dayLabel(row, now: now), 'row-${row.key}', key: ChatWindow.dayKey(row.date)),
-            ChatVoiceRow() =>
-              _Line.call(row.at, 'row-${row.key}', key: ChatWindow.voiceKey(row.id.substring('voice-'.length))),
-            ChatTurnRow(turn: final t) => _Line(t.caption, 'row-${row.key}',
-                at: t.at,
-                status: switch (t.delivery) {
-                  GraineChatDelivery.sending => ChatMessageStatus.waiting,
-                  GraineChatDelivery.failed => ChatMessageStatus.failed,
-                  _ => ChatMessageStatus.sent,
-                }),
-          },
-      ];
+      final lines = <_Line>[];
+      for (final row in ChatRows.build(said, now: now)) {
+        // After the day's separator, before the row's first turn.
+        final first = switch (row) { ChatTurnRow() => row.turn, ChatVoiceRow() => said[row.first], ChatDayRow() => null };
+        if (first != null && marked.contains(first.id)) {
+          lines.add(_Line.mark('row-mark-${first.id}', key: ChatWindow.markKey(first.id)));
+        }
+        lines.add(switch (row) {
+          ChatDayRow() => _Line.day(ChatRows.dayLabel(row, now: now), 'row-${row.key}', key: ChatWindow.dayKey(row.date)),
+          ChatVoiceRow() =>
+            _Line.call(row.at, 'row-${row.key}', key: ChatWindow.voiceKey(row.id.substring('voice-'.length))),
+          ChatTurnRow(turn: final t) => _Line(t.caption, 'row-${row.key}',
+              at: t.at,
+              status: switch (t.delivery) {
+                GraineChatDelivery.sending => ChatMessageStatus.waiting,
+                GraineChatDelivery.failed => ChatMessageStatus.failed,
+                _ => ChatMessageStatus.sent,
+              }),
+        });
+      }
+      return lines;
     }
     return <_Line>[
       for (var i = 0; i < widget.messages.length; i++)
@@ -1467,7 +1498,7 @@ class _ChatWindowState extends State<ChatWindow> {
         : List<ChatGroupPosition>.filled(lines.length, ChatGroupPosition.single);
     var lastAgent = -1;
     for (var i = 0; i < lines.length; i++) {
-      if (lines[i].dayLabel == null && lines[i].callAt == null && lines[i].caption.role == Role.agent) lastAgent = i;
+      if (lines[i].message && lines[i].caption.role == Role.agent) lastAgent = i;
     }
     final replies = widget.quickReplies;
     final repliesInThread = replies.isNotEmpty && k.chips.placement != 'above-composer';
@@ -1479,11 +1510,12 @@ class _ChatWindowState extends State<ChatWindow> {
       // Two messages of one group sit closer.
       final inGroup = i > 0 &&
           (positions[i] == ChatGroupPosition.middle || positions[i] == ChatGroupPosition.last) &&
-          lines[i - 1].dayLabel == null &&
-          lines[i - 1].callAt == null;
+          lines[i - 1].message;
       final gap = first ? 0.0 : (afterHero ? 16.0 : (inGroup ? d.groupGap : null));
       if (line.dayLabel != null) {
         items.add(_Item(line.id, (BuildContext _) => _dayLine(l, line), gap: gap));
+      } else if (line.mark) {
+        items.add(_Item(line.id, (BuildContext _) => _markLine(l, line), gap: gap));
       } else if (line.callAt != null) {
         items.add(_Item(line.id, (BuildContext _) => _callLine(l, line), gap: gap));
       } else {
@@ -1883,6 +1915,17 @@ class _ChatWindowState extends State<ChatWindow> {
         key: line.key,
         header: true,
         child: Text(line.dayLabel!, textAlign: TextAlign.center, style: l.dayStyle.copyWith(color: l.ink(l.chat.wallpaper.textMuted))),
+      );
+
+  /// "Disconnected · new conversation" — where Graine began a new
+  /// conversation under earlier lines, drawn as a day separator is
+  /// (DESIGN.md "A new conversation under earlier lines"), read as one sentence.
+  Widget _markLine(ChatLook l, _Line line) => Semantics(
+        key: line.key,
+        header: true,
+        label: ChatMarks.spoken,
+        excludeSemantics: true,
+        child: Text(ChatMarks.label, textAlign: TextAlign.center, style: l.dayStyle.copyWith(color: l.ink(l.chat.wallpaper.textMuted))),
       );
 
   /// An earlier call, as one row: the call icon and "Voice call · 6:05 PM" —
@@ -2309,24 +2352,35 @@ class _ThreadPosition extends ScrollPositionWithSingleContext {
 }
 
 /// One line of the thread: what was said, when, and where it is — or a day
-/// separator, or an earlier call's one row.
+/// separator, an earlier call's one row, or where a new conversation began.
 class _Line {
   const _Line(this.caption, this.id, {this.at, this.status = ChatMessageStatus.sent})
       : dayLabel = null,
         callAt = null,
+        mark = false,
         key = null;
 
   const _Line.day(String this.dayLabel, this.id, {this.key})
       : caption = const Caption(Role.agent, ''),
         at = null,
         status = ChatMessageStatus.sent,
-        callAt = null;
+        callAt = null,
+        mark = false;
 
   const _Line.call(DateTime this.callAt, this.id, {this.key})
       : caption = const Caption(Role.agent, ''),
         at = null,
         status = ChatMessageStatus.sent,
-        dayLabel = null;
+        dayLabel = null,
+        mark = false;
+
+  const _Line.mark(this.id, {this.key})
+      : caption = const Caption(Role.agent, ''),
+        at = null,
+        status = ChatMessageStatus.sent,
+        dayLabel = null,
+        callAt = null,
+        mark = true;
 
   final Caption caption;
 
@@ -2336,7 +2390,13 @@ class _Line {
   final ChatMessageStatus status;
   final String? dayLabel;
   final DateTime? callAt;
+
+  /// "Disconnected · new conversation".
+  final bool mark;
   final Key? key;
+
+  /// Something said, not one of the window's own rows.
+  bool get message => dayLabel == null && callAt == null && !mark;
 }
 
 /// The dot pattern over the thread (contract/DESIGN.md, "Chat window"): dots

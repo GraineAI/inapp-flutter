@@ -137,6 +137,119 @@ CallPhase callPhase({
   return CallPhase.listening;
 }
 
+/// WHERE THE VOICE BAR'S CALL IS, in one word (contract/PUBLIC-STATE.md,
+/// "Voice") — what the SDK's own bar draws from, for a bar of your own:
+/// `GraineVoice.status`. [of] derives it in the bar's order ([voiceBarStatus]).
+enum GraineVoiceStatus {
+  /// No call yet; a start places one.
+  idle('idle'),
+
+  /// The engine page loading, or a call being placed.
+  connecting('connecting'),
+
+  /// On the call; the agent is waiting for the customer.
+  listening('listening'),
+
+  /// The customer finished a sentence and the agent has not answered yet.
+  thinking('thinking'),
+
+  /// The agent is talking.
+  speaking('speaking'),
+
+  /// The network interrupted the call and it is being re-established — or the
+  /// page is loading again after a failed load, or the call being placed is
+  /// trying again or moving to the other transport.
+  reconnecting('reconnecting'),
+
+  /// On the call with the customer's microphone muted.
+  muted('muted'),
+
+  /// The call cannot happen as things stand — `GraineVoice.failure` says why
+  /// in a sentence: a setting someone must change, the microphone refused,
+  /// an engine page that could not load, or a call neither transport could
+  /// carry. A start (or `retry()`, for the page) tries again.
+  failed('failed'),
+
+  /// A call was on and is over; the next start places another.
+  ended('ended');
+
+  const GraineVoiceStatus(this.wire);
+
+  /// The word every Graine SDK uses.
+  final String wire;
+
+  /// The status of a call in this state — the voice bar's own order: a
+  /// setting to fix; a reconnect; a refusal, a load or a connect that failed;
+  /// connecting (the page not ready, or a call being placed); then on the
+  /// call muted, thinking, speaking or listening; else ended (a call was on)
+  /// or idle.
+  static GraineVoiceStatus of({
+    String? error,
+    required bool reconnecting,
+    required GraineConnectivity connectivity,
+    ConnectStage? connectStage,
+    required bool micDenied,
+    bool callFailed = false,
+    required bool ready,
+    required bool connecting,
+    required bool connected,
+    required bool muted,
+    required CallPhase phase,
+    bool ended = false,
+  }) {
+    if (error != null) return failed;
+    if (reconnecting ||
+        connectivity == GraineConnectivity.retrying ||
+        connectStage == ConnectStage.retrying ||
+        connectStage == ConnectStage.switching) {
+      return GraineVoiceStatus.reconnecting;
+    }
+    if (micDenied || connectivity == GraineConnectivity.failed || callFailed) return failed;
+    if (connecting || !ready) return GraineVoiceStatus.connecting;
+    if (connected) {
+      if (muted) return GraineVoiceStatus.muted;
+      return switch (phase) {
+        CallPhase.thinking => thinking,
+        CallPhase.speaking => speaking,
+        _ => listening,
+      };
+    }
+    return ended ? GraineVoiceStatus.ended : idle;
+  }
+
+  /// The sentence a failed load gives: the page could not be reached.
+  static const String couldNotLoad = 'The assistant could not load. Check your connection and try again.';
+
+  /// The sentence a refused microphone gives.
+  static const String micRefused = 'The microphone is not allowed, so the call could not start.';
+
+  /// The sentence a call neither transport could carry gives.
+  static const String couldNotConnect = 'The call could not be connected. Try again.';
+
+  /// Why [of] is [failed], as a sentence for a person — [error] itself for a
+  /// setting to fix — in the same order; null when it is not.
+  static String? failureOf({
+    String? error,
+    required bool reconnecting,
+    required GraineConnectivity connectivity,
+    ConnectStage? connectStage,
+    required bool micDenied,
+    bool callFailed = false,
+  }) {
+    if (error != null) return error;
+    if (reconnecting ||
+        connectivity == GraineConnectivity.retrying ||
+        connectStage == ConnectStage.retrying ||
+        connectStage == ConnectStage.switching) {
+      return null;
+    }
+    if (micDenied) return micRefused;
+    if (connectivity == GraineConnectivity.failed) return couldNotLoad;
+    if (callFailed) return couldNotConnect;
+    return null;
+  }
+}
+
 /// What the voice bar's status line says ([voiceBarStatus]).
 class BarStatus {
   const BarStatus(this.text, {this.waiting, this.meter = false, this.label});

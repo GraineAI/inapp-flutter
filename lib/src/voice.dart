@@ -216,6 +216,10 @@ class GraineVoice extends ChangeNotifier
   bool _callFailed = false;
   bool _captionsOn = true;
 
+  /// A call was connected and is over: [status] says ended until the next start.
+  bool _ended = false;
+  String? _transportFallbackReason;
+
   @override
   bool get connected => _connected;
   @override
@@ -267,6 +271,53 @@ class GraineVoice extends ChangeNotifier
 
   /// The transport that actually carries the call, once the page has said.
   Transport? get transport => _transport;
+
+  /// Why the call runs on [transport] rather than the transport asked for —
+  /// the page's word: `not_configured` (a setting someone must change),
+  /// `unreachable` (the network or the server), `screen_channel` (the audio
+  /// connected but the screen did not), `media` (answered, but no audio could
+  /// flow) or `stalled` (dropped seconds after it connected). Null when it
+  /// did not fall back.
+  String? get transportFallbackReason => _transportFallbackReason;
+
+  /// WHERE THE CALL IS, in one word — what the SDK's own bar draws from
+  /// (contract/PUBLIC-STATE.md, "Voice"), in the bar's order: failed (with
+  /// [failure]), reconnecting, connecting, then on the call muted, thinking,
+  /// speaking or listening; else ended (a call was on) or idle.
+  GraineVoiceStatus get status => GraineVoiceStatus.of(
+        error: _error,
+        reconnecting: _reconnecting,
+        connectivity: _connectivity,
+        connectStage: _connectStage,
+        micDenied: _micDenied,
+        callFailed: _callFailed,
+        ready: _ready,
+        connecting: _connecting,
+        connected: _connected,
+        muted: _muted,
+        phase: phase,
+        ended: _ended,
+      );
+
+  /// How loud the agent is, 0–1, for a visualiser of your own. Always 0 for
+  /// now: the page that carries this call posts no audio levels yet, so draw
+  /// from [status] ([GraineVoiceStatus.speaking]) or [agentSpeaking] instead.
+  double get agentLevel => 0;
+
+  /// How loud the customer is, 0–1. Always 0 for now, as [agentLevel] is:
+  /// the page that carries this call posts no audio levels yet.
+  double get micLevel => 0;
+
+  /// Why [status] is [GraineVoiceStatus.failed], as a sentence for a person
+  /// — [error] itself for a setting someone must change; null otherwise.
+  String? get failure => GraineVoiceStatus.failureOf(
+        error: _error,
+        reconnecting: _reconnecting,
+        connectivity: _connectivity,
+        connectStage: _connectStage,
+        micDenied: _micDenied,
+        callFailed: _callFailed,
+      );
 
   /// Whether an engine page is attached ([GraineEngine] is mounted).
   bool get attached => _page != null;
@@ -372,6 +423,7 @@ class GraineVoice extends ChangeNotifier
     _error = null;
     _clearProgress();
     _setCall(false, false);
+    _ended = false;
     notifyListeners();
   }
 
@@ -453,7 +505,8 @@ class GraineVoice extends ChangeNotifier
   /// asked for the microphone first and a refusal places nothing. Before the
   /// page is ready the start is held and fired on ready — which is what the
   /// customer meant. One conversation at a time: a call or a chat another
-  /// agent of the app holds ends.
+  /// agent of the app holds ends, and so does this agent's own chat that no
+  /// window shows any more.
   @override
   Future<void> start() async {
     if (GraineCalls._nativeLive) {
@@ -469,8 +522,10 @@ class GraineVoice extends ChangeNotifier
       return;
     }
     _graine._takeConversation();
+    _graine._chat?._callStarting();
     _micDenied = false;
     _error = null;
+    _ended = false;
     // A new attempt: the last one's failure and stage are not news.
     _clearProgress();
     // A new call, not a continuation: the last one's words do not open this one.
@@ -683,6 +738,8 @@ class GraineVoice extends ChangeNotifier
   void _setCall(bool connected, bool connecting) {
     final changed = connected != _connected || connecting != _connecting;
     final liveChanged = connected != _connected;
+    // A call that was on is over: ended, until the next start.
+    if (_connected && !connected) _ended = true;
     _connected = connected;
     _connecting = connecting;
     if (liveChanged) _graine._conversationStateChanged();
@@ -817,6 +874,7 @@ class GraineVoice extends ChangeNotifier
           message: final message
         ):
         _transport = transport;
+        _transportFallbackReason = transport == requested ? null : reason;
         _graine._report((GraineListener l) => l.onTransport(transport, requested, reason, message));
         // A misconfiguration is an error even though the call survived it —
         // held, so a bar can say so, and reported to whoever has to fix it.
@@ -903,8 +961,7 @@ class GraineVoice extends ChangeNotifier
       _setConnectivity(GraineConnectivity.failed, reason);
       _pendingStart = false;
       _setCall(false, false);
-      _graine._report((GraineListener l) =>
-          l.onError('The assistant could not load. Check your connection and try again.'));
+      _graine._report((GraineListener l) => l.onError(GraineVoiceStatus.couldNotLoad));
       notifyListeners();
       return;
     }

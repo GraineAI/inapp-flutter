@@ -320,9 +320,11 @@ class GraineInApp with WidgetsBindingObserver {
 
   /// THE TEXT CHAT — the conversation in writing, on its own connection.
   /// [GraineAgentBar] and [GraineChat] draw it and open it when the customer
-  /// is in the chat; a host drawing its own calls [GraineChatSession.open]
-  /// and [GraineChatSession.close] itself. One conversation at a time: the
-  /// bar ends the call before it opens the chat, and opening it ends any
+  /// is in the chat — and when their window closes, keep the conversation
+  /// until it has been idle for 5 minutes; a host drawing its own calls
+  /// [GraineChatSession.open] and [GraineChatSession.close] itself. One
+  /// conversation at a time: the bar ends the call before it opens the chat
+  /// (and the chat when it goes back to the call), and opening it ends any
   /// other agent's call and closes its chat.
   GraineChatSession get chat => _chat ??= GraineChatSession._(this, connector: _chatConnector);
 
@@ -361,12 +363,18 @@ class GraineInApp with WidgetsBindingObserver {
   /// recalled. Kept on the device for this user, so it need not be repeated;
   /// left out, their last choice stands (on until they make one).
   ///
-  /// Identity is fixed per conversation: a change reaches the next one — a
-  /// call already open keeps the identity it opened with. Null signs out:
-  /// this device stops being the user's (Graine is told), a chat open for
-  /// them ends with its transcript, and later conversations are anonymous.
-  /// Someone else signing in without a sign-out first signs the last user out
-  /// the same way.
+  /// A call already open keeps the identity it opened with: a change reaches
+  /// the next one. A chat belongs to whoever was identified when it
+  /// connected (contract/DESIGN.md "Who a chat belongs to"): when the identity
+  /// changes — signing in after it opened, another user, or a sign-out — a
+  /// chat connected or connecting closes quietly, its turns go (a line typed
+  /// and not yet sent stays, and goes next), and it connects again at once as
+  /// the new identity; one not connected forgets the same way and connects at
+  /// the next open or message. The same identity with other traits, or
+  /// another memory choice, changes nothing on the open chat. Null signs out:
+  /// this device stops being the user's (Graine is told), and later
+  /// conversations are anonymous. Someone else signing in without a sign-out
+  /// first signs the last user out the same way.
   ///
   /// One user for the whole app: every agent the app configured hears it —
   /// each keeps the trait its own Identity setting names, and a sign-out
@@ -400,12 +408,13 @@ class GraineInApp with WidgetsBindingObserver {
       _memoryNow = null; // this user's own last choice applies
     }
     // Signed out — or someone else signed in without a sign-out first: the
-    // device is no longer the last user's, and their conversation is not the
-    // next person's. Anonymous to identified keeps the open one.
+    // device is no longer the last user's.
     if (before != null && (traits == null || (beforeValue != null && afterValue != null && beforeValue != afterValue))) {
       unawaited(_signOut(before));
     }
-    if (beforeValue != null && beforeValue != afterValue) _chat?._newUser();
+    // A chat belongs to whoever was identified when it connected — nobody to a
+    // user included: their conversation is not the next identity's.
+    if (_identityKey(beforeValue) != _identityKey(afterValue)) _chat?._identityChanged();
     _announceVariables();
     _scheduleContext();
     _announceIdentity();
@@ -493,6 +502,13 @@ class GraineInApp with WidgetsBindingObserver {
   /// user's own last choice, kept on the device.
   bool? _memoryNow;
   final List<void Function()> _identityWatchers = <void Function()>[];
+
+  /// An identity value as a chat compares them: normalised for the session's
+  /// trait — the same user however the app spells it — and null for nobody.
+  String? _identityKey(String? value) {
+    final s = session;
+    return s == null || value == null ? null : Identity.normaliseValue(s.identitySetting.field, value);
+  }
 
   /// The identity in [traits] for the session's setting; null before the
   /// session arrives (no conversation can start before it does).
@@ -694,6 +710,33 @@ class GraineInApp with WidgetsBindingObserver {
   /// identified); null when it is true.
   GraineErrorCode? get bookingBlocker =>
       Booking.blocker(session?.calls, platform: _bookingPlatform, identified: _identityValueFor(_traits) != null);
+
+  /// WHY [bookingAvailable] IS FALSE, in words an app can act on (the same
+  /// rule as [bookingBlocker], finer), checked in this order: `not_loaded`
+  /// (the session has not arrived), `rings_not_set_up` (Graine cannot ring
+  /// this phone), `scheduling_off` (the agent takes no bookings) and
+  /// `not_identified` (nobody is identified); null when booking is available.
+  /// [bookingListenable] redraws a widget when it may have changed.
+  GraineBookingUnavailableReason? get bookingUnavailableReason => Booking.unavailableReason(session?.calls,
+      platform: _bookingPlatform, identified: _identityValueFor(_traits) != null, loaded: session != null);
+
+  /// THE TIMES THE SDK'S OWN BOOKING SHEET OFFERS on [day] — the device's day
+  /// holding it — for a picker of your own: the sheet's 5-minute steps, from
+  /// the earliest the rules allow ([GraineSchedulingRules.minLeadMinutes]
+  /// from now, rounded up) to the latest ([GraineSchedulingRules.maxDaysAhead]),
+  /// in the device's time zone. Empty for a day outside them. Whether the
+  /// customer can book at all is [bookingAvailable] ([bookingUnavailableReason]
+  /// says why not); the agent's calling window is checked by Graine when the
+  /// call is booked ([scheduleCall] — `outsideWindow`).
+  List<DateTime> bookingSlots(DateTime day, {DateTime? now}) {
+    final at = now ?? DateTime.fromMillisecondsSinceEpoch(_clock());
+    final d = day.toLocal();
+    for (final offered in Booking.days(Booking.bounds(schedulingRules, at), at)) {
+      final first = offered.first.toLocal();
+      if (first.year == d.year && first.month == d.month && first.day == d.day) return Booking.slots(offered);
+    }
+    return const <DateTime>[];
+  }
 
   /// The device's time zone (IANA, "Asia/Kolkata"), once the SDK has read it —
   /// the booking sheet names it beside the time chosen. Null before then.

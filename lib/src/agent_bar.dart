@@ -147,8 +147,9 @@ class GraineAgentBar extends StatefulWidget {
   /// [GraineInApp.chat]) — the bar offers the switch between them as the
   /// dashboard allows, draws the chat window above itself, and opens the chat
   /// while the customer is in it (ending the call first: one conversation at
-  /// a time) and closes it when they leave. An app that runs the chat itself
-  /// hands its own here.
+  /// a time) and ends it when they switch back to the call; when the bar goes,
+  /// the SDK's own is kept until it has been idle for 5 minutes. An app that
+  /// runs the chat itself hands its own here, closed when they leave.
   final GraineChatState? chat;
 
   /// Use the SDK's own chat when [chat] is null. Off: without a [chat] the
@@ -402,26 +403,38 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
   /// while it is, a page still loading is a customer waiting.
   GraineVoice? _viewing;
 
-  /// The chat this bar opened because the customer is in it — closed when
-  /// they leave it, and when the bar goes.
+  /// The chat this bar opened because the customer is in it. Back to the
+  /// call, it ends at once; when it leaves the screen otherwise — the bar
+  /// goes — the SDK's own is kept until it has been idle for 5 minutes.
   GraineChatConnection? _openedChat;
+
+  /// The chat this bar has told it is on screen ([ChatWindows.shown]).
+  GraineChatConnection? _toldChat;
 
   /// The chat to draw: the app's, else the SDK's own.
   GraineChatState? get _chatState => widget.chat ?? (widget.builtInChat ? _app?.chat : null);
 
-  /// Open the chat while the customer is in it; close the one this bar opened
-  /// when they are not. After the frame: opening notifies, and this runs
-  /// while the bar is being built.
+  /// Open the chat while the customer is in it; when they are not, tell the
+  /// one this bar opened that it left the screen. After the frame: opening
+  /// notifies, and this runs while the bar is being built.
   void _syncChat(GraineChatState? chat, bool inChat) {
     GraineChatConnection? wanted;
     if (inChat && chat is GraineChatConnection) wanted = chat as GraineChatConnection;
     if (identical(wanted, _openedChat)) return;
-    final before = _openedChat;
     _openedChat = wanted;
     SchedulerBinding.instance.addPostFrameCallback((Duration _) {
-      before?.close();
-      if (mounted && identical(_openedChat, wanted)) wanted?.open();
+      if (mounted) _tellChat(_openedChat);
     });
+  }
+
+  /// Tell the chats what this bar shows now: the one it showed has left it,
+  /// the one it shows came.
+  void _tellChat(GraineChatConnection? next) {
+    if (identical(next, _toldChat)) return;
+    final before = _toldChat;
+    _toldChat = next;
+    if (before != null) ChatWindows.left(before);
+    if (next != null) ChatWindows.shown(next);
   }
 
   void _holdView() {
@@ -448,8 +461,8 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
     _finishOpen();
     _viewing?.viewClosed();
     _viewing = null;
-    _openedChat?.close();
     _openedChat = null;
+    _tellChat(null);
     super.dispose();
   }
 
@@ -531,9 +544,13 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
   }
 
   /// Move the customer between the call and the chat. Going to the chat ends
-  /// the call — exactly one conversation is open at a time.
+  /// the call, and back to the call the chat ends at once, not once it goes
+  /// idle — exactly one conversation is open at a time.
   void _setSurface(AgentSurface next, GraineCallState call) {
     if (next == AgentSurface.chat && (call.connected || call.connecting)) call.end();
+    // The SDK's own chat ends now; an app's own closes once the bar leaves it, as it always did.
+    final chat = _openedChat;
+    if (next == AgentSurface.voice && chat is GraineChatSession) chat.close();
     setState(() => _chosen = next);
   }
 
@@ -628,27 +645,31 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
     final session = chat is GraineChatSession ? chat : null;
     // After the agent ended the conversation the chat is idle, not connecting: the bar and the header say so.
     final chatOnline = (chat?.connected ?? false) || ((session?.ended ?? false) && !(session?.connecting ?? false));
-    final status = voiceBarStatus(
-      error: fault != null,
-      inChat: isChat,
-      chatOnline: chatOnline,
-      online: call.online,
-      reconnecting: call.reconnecting,
-      connectivity: call.connectivity,
-      micDenied: call.micDenied,
-      ready: call.ready,
-      connecting: call.connecting,
-      muted: call.muted,
-      connected: call.connected,
-      thinking: phase == CallPhase.thinking,
-      speaking: phase == CallPhase.speaking,
-      quality: call.quality,
-      callFailed: callFailed,
-      connectStage: progress?.connectStage,
-      slowConnect: progress?.slowConnect ?? false,
-      // The brand's words for connecting: a wording it chose is never replaced.
-      connectingText: loader.text.connecting,
-    );
+    // Graine ended it (idle, or its time limit) and nothing reconnects: "Disconnected", here as in the header.
+    final chatDisconnected = session != null && ChatWindows.disconnected(session);
+    final status = isChat && chatDisconnected && fault == null
+        ? const BarStatus('Disconnected')
+        : voiceBarStatus(
+            error: fault != null,
+            inChat: isChat,
+            chatOnline: chatOnline,
+            online: call.online,
+            reconnecting: call.reconnecting,
+            connectivity: call.connectivity,
+            micDenied: call.micDenied,
+            ready: call.ready,
+            connecting: call.connecting,
+            muted: call.muted,
+            connected: call.connected,
+            thinking: phase == CallPhase.thinking,
+            speaking: phase == CallPhase.speaking,
+            quality: call.quality,
+            callFailed: callFailed,
+            connectStage: progress?.connectStage,
+            slowConnect: progress?.slowConnect ?? false,
+            // The brand's words for connecting: a wording it chose is never replaced.
+            connectingText: loader.text.connecting,
+          );
     final failed = call.connectivity == GraineConnectivity.failed;
     // The microphone cannot act while the call is being placed, before the
     // page is ready (a failed load aside: then it retries), once it has been
@@ -845,7 +866,9 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
             heading: name,
             messages: chat!.messages,
             turns: chat is GraineChatSession ? chat.turns : null,
+            marks: session == null ? const <String>{} : ChatWindows.marks(session),
             online: chatOnline,
+            disconnected: chatDisconnected,
             typing: switch (chat) { GraineChatTyping(:final agentTyping) => agentTyping, _ => false },
             onSend: chat.send,
             connectingText: loader.text.connecting,
@@ -970,7 +993,9 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
           heading: name,
           messages: chat.messages,
           turns: chat is GraineChatSession ? chat.turns : null,
+          marks: session == null ? const <String>{} : ChatWindows.marks(session),
           online: chatOnline,
+          disconnected: chatDisconnected,
           typing: switch (chat) { GraineChatTyping(:final agentTyping) => agentTyping, _ => false },
           onSend: chat.send,
           connectingText: loader.text.connecting,

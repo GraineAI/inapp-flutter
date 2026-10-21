@@ -21,10 +21,12 @@ import 'widget_view.dart';
 ///       pageBuilder: (context, _, __) => GraineChat(onClose: () => Navigator.of(context).pop()),
 ///     ));
 ///
-/// It opens the chat while it is on screen and closes it when it goes
-/// (unless the app had opened it itself), draws the components the agent
-/// shows above the composer, keeps clear of the status bar, the home
-/// indicator and the keyboard, and says "Connecting…" while it connects.
+/// It opens the chat while it is on screen. When it goes, the conversation
+/// is kept — opening the chat again goes on with it, nothing on screen
+/// changing — until it has been idle for 5 minutes, no message either way,
+/// and then closes. It draws the components the agent shows above the
+/// composer, keeps clear of the status bar, the home indicator and the
+/// keyboard, and says "Connecting…" while it connects.
 ///
 /// In an app with several agents, hand it the one this screen talks to:
 /// `GraineChat(app: GraineInApp.named('support'))`.
@@ -193,7 +195,11 @@ class GraineChat extends StatefulWidget {
 }
 
 class _GraineChatState extends State<GraineChat> {
+  /// The chat this screen shows.
   GraineChatConnection? _opened;
+
+  /// The chat this screen has told it is on screen ([ChatWindows.shown]).
+  GraineChatConnection? _told;
 
   /// The agent this screen talks to: the one it was handed, else the one its
   /// chat belongs to, else the default agent.
@@ -222,18 +228,26 @@ class _GraineChatState extends State<GraineChat> {
     GraineChatConnection? wanted;
     if (chat is GraineChatConnection) wanted = chat as GraineChatConnection;
     if (identical(wanted, _opened)) return;
-    final before = _opened;
     _opened = wanted;
     SchedulerBinding.instance.addPostFrameCallback((Duration _) {
-      before?.close();
-      if (mounted && identical(_opened, wanted)) wanted?.open();
+      if (mounted) _tell(_opened);
     });
+  }
+
+  /// Tell the chats what this screen shows now: the one it showed has left
+  /// it (the SDK's own is kept until it goes idle), the one it shows came.
+  void _tell(GraineChatConnection? next) {
+    if (identical(next, _told)) return;
+    final before = _told;
+    _told = next;
+    if (before != null) ChatWindows.left(before);
+    if (next != null) ChatWindows.shown(next);
   }
 
   @override
   void dispose() {
-    _opened?.close();
     _opened = null;
+    _tell(null);
     super.dispose();
   }
 
@@ -293,8 +307,10 @@ class _GraineChatState extends State<GraineChat> {
                 heading: widget.name ?? dash.heading,
                 messages: chat.messages,
                 turns: chat is GraineChatSession ? chat.turns : null,
+                marks: session == null ? const <String>{} : ChatWindows.marks(session),
                 // After the agent ended the conversation the chat is idle, not connecting.
                 online: chat.connected || ((session?.ended ?? false) && !(session?.connecting ?? false)),
+                disconnected: session != null && ChatWindows.disconnected(session),
                 typing: typing,
                 onSend: chat.send,
                 connectingText: loader.text.connecting,

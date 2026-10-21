@@ -178,15 +178,19 @@ sealed class ChatFrame {
       case 'interruption':
         return const ChatClear();
       case 'history':
-        // A history whose turns are not a list is not one: ignored, never an error.
-        final turns = ChatHistoryReader.read(o);
-        return turns == null ? null : ChatHistory(turns);
+        // A history whose turns are not a list restores nothing, never an
+        // error — but it still says the conversation continued
+        // (sdk/contract/history.json → `fresh`).
+        return ChatHistory(ChatHistoryReader.read(o) ?? const <GraineChatTurn>[]);
       case 'quick_replies':
         // Replies whose list is not a list are not replies: ignored. [] takes them away.
         final replies = QuickReplies.read(o);
         return replies == null ? null : ChatQuickReplies(replies);
       case 'conversation_end':
         return const ChatConversationEnd();
+      case 'session':
+        // The connection's session began (sdk/contract/history.json `sessionFrame`).
+        return ChatSessionStart(ChatHistoryReader.session(o['id']));
       default:
         return null; // pong, ack, and whatever a newer runtime adds
     }
@@ -567,10 +571,14 @@ abstract final class ChatHistoryReader {
         delivery: role == GraineChatRole.user ? GraineChatDelivery.sent : null,
         restored: true,
         channel: o['channel'] == 'voice' ? GraineChatChannel.voice : GraineChatChannel.chat,
+        session: session(o['session']),
       ));
     }
     return out;
   }
+
+  /// A session id as a frame carries it: a non-empty string; anything else is none.
+  static String? session(Object? v) => v is String && v.isNotEmpty ? v : null;
 
   /// ISO-8601 with a zone, fractions or not, as UTC — the server writes UTC
   /// with a Z. A time with no zone is not one.
@@ -581,6 +589,14 @@ abstract final class ChatHistoryReader {
     s = s.replaceFirstMapped(RegExp(r'([+-]\d{2})(\d{2})$'), (Match m) => '${m[1]}:${m[2]}');
     return DateTime.tryParse(s)?.toUtc();
   }
+}
+
+/// THE CONNECTION'S SESSION BEGAN — `{"type":"session","id","at"}`, sent once
+/// when a chat connection starts (sdk/contract/history.json `sessionFrame`):
+/// [id] is the chat's session id, null for one that is not a non-empty string.
+final class ChatSessionStart extends ChatFrame {
+  const ChatSessionStart(this.id);
+  final String? id;
 }
 
 /// The agent's words (and turn markers).
@@ -631,6 +647,45 @@ enum GraineChatDelivery { sending, sent, failed }
 /// earlier conversation's turn is).
 enum GraineChatChannel { chat, voice }
 
+/// WHERE THE CHAT IS, in one word (contract/PUBLIC-STATE.md, "Chat") — what
+/// the SDK's own chat windows draw their header and banner from, for a chat of
+/// your own: `GraineChatSession.status`.
+enum GraineChatStatus {
+  /// Not in the chat: never opened, closed, put away in the background, or
+  /// closed after 5 idle minutes with no screen showing it — and after the
+  /// agent ended the conversation (`ended`): the customer's next message
+  /// starts over.
+  idle('idle'),
+
+  /// A connection is being made: "Connecting…".
+  connecting('connecting'),
+
+  /// Connected: "Online".
+  connected('connected'),
+
+  /// A dropped connection — or a try that failed — is being made again:
+  /// "Reconnecting…".
+  reconnecting('reconnecting'),
+
+  /// In the chat with a message of the customer's waiting to go, and nothing
+  /// connecting it: "Offline · messages send when you're back".
+  offline('offline'),
+
+  /// Every reconnect was spent. A tap (`retry()`), the customer's next
+  /// message or `open()` tries again.
+  failed('failed'),
+
+  /// Graine ended the conversation itself — idle (close 4408) or at the
+  /// session's time limit (4410) — and it waits for the customer: the header
+  /// says "Disconnected", and the next open or message connects again.
+  disconnected('disconnected');
+
+  const GraineChatStatus(this.wire);
+
+  /// The word every Graine SDK uses.
+  final String wire;
+}
+
 /// ONE TURN OF THE CHAT — WIRE.md's `GraineChatTurn`, the same in every SDK.
 class GraineChatTurn {
   const GraineChatTurn({
@@ -644,6 +699,7 @@ class GraineChatTurn {
     this.live = false,
     this.restored = false,
     this.channel = GraineChatChannel.chat,
+    this.session,
   });
 
   /// This chat's id for the turn: `t1`, `t2`, … (a restored turn: Graine's)
@@ -676,10 +732,19 @@ class GraineChatTurn {
   /// turns as one "Voice call" row, never their words.
   final GraineChatChannel channel;
 
+  /// The session it was said in (sdk/contract/history.json `sessions`): a
+  /// restored turn's own — a chat connection's, or a call's id for a voice
+  /// turn — null for one kept before sessions were recorded; a live turn's,
+  /// the session of the connection that carries it. Null while that is not
+  /// known yet (a line typed before the chat connected, or said before the
+  /// connection's session frame), and from a server that sends no sessions.
+  final String? session;
+
   /// The turn as a caption — what a [Caption]-drawing window shows.
   Caption get caption => Caption(role == GraineChatRole.agent ? Role.agent : Role.customer, text, live: live);
 
-  GraineChatTurn copyWith({String? text, bool? live, GraineChatDelivery? delivery, GraineComponent? component}) =>
+  GraineChatTurn copyWith(
+          {String? text, bool? live, GraineChatDelivery? delivery, GraineComponent? component, Object? session = _same}) =>
       GraineChatTurn(
         id: id,
         role: role,
@@ -691,7 +756,11 @@ class GraineChatTurn {
         live: live ?? this.live,
         restored: restored,
         channel: channel,
+        session: identical(session, _same) ? this.session : session as String?,
       );
+
+  /// copyWith's "leave [session] as it is" — a null there is a session of none.
+  static const Object _same = Object();
 
   @override
   bool operator ==(Object other) =>
@@ -705,15 +774,17 @@ class GraineChatTurn {
       identical(other.component, component) &&
       other.live == live &&
       other.restored == restored &&
-      other.channel == channel;
+      other.channel == channel &&
+      other.session == session;
 
   @override
-  int get hashCode => Object.hash(id, role, text, at, delivery, proactive, component, live, restored, channel);
+  int get hashCode => Object.hash(id, role, text, at, delivery, proactive, component, live, restored, channel, session);
 
   @override
   String toString() => 'GraineChatTurn($id ${role.name}, "$text"${live ? ', live' : ''}'
       '${delivery != null ? ', ${delivery!.name}' : ''}${proactive ? ', proactive' : ''}'
-      '${restored ? ', restored' : ''}${channel == GraineChatChannel.voice ? ', voice' : ''})';
+      '${restored ? ', restored' : ''}${channel == GraineChatChannel.voice ? ', voice' : ''}'
+      '${session != null ? ', session $session' : ''})';
 }
 
 /// HOW A CHAT'S FRAMES BECOME ITS TURNS.
@@ -738,12 +809,49 @@ class ChatTranscript {
   /// history replaces. Null before any open.
   Set<String>? _settledAtOpen;
 
+  /// The connection opened and neither its first agent turn nor a history
+  /// has come yet: an agent turn first means Graine began a new conversation.
+  bool _freshOpen = false;
+
+  /// The turns a "Disconnected · new conversation" row is drawn before
+  /// ([ChatMarks]) — the window's own rows, never turns.
+  final Set<String> _marks = <String>{};
+
+  /// A marker is owed to the next turn: the new conversation began before
+  /// any of its turns was here.
+  bool _markNext = false;
+
+  /// The current connection's session ([sessionStarted]); null until its
+  /// frame arrives, once it closes, and after the identity changed.
+  String? _sessionId;
+
+  /// The turns said with no session known yet — typed before the chat
+  /// connected, or said before the session frame: the next frame's.
+  final Set<String> _unstamped = <String>{};
+
   // Chat window v2 (protocol.ts foldChat; sdk/contract/chat-window.json → `fold`).
   List<GraineQuickReply> _replies = const <GraineQuickReply>[];
   bool _ended = false;
   GraineChatRating? _rating;
 
   List<GraineChatTurn> get turns => List<GraineChatTurn>.unmodifiable(_turns);
+
+  /// The current connection's session id, from its session frame; null until
+  /// it arrives, once the connection closes, and after the identity changed.
+  String? get sessionId => _sessionId;
+
+  /// THE CONNECTION'S SESSION BEGAN (its `session` frame): the chat's
+  /// [sessionId] from now, and the session of every line typed before the
+  /// chat connected or said before the frame.
+  void sessionStarted(String? id) {
+    _sessionId = id;
+    if (_unstamped.isEmpty) return;
+    for (var i = 0; i < _turns.length; i++) {
+      final t = _turns[i];
+      if (_unstamped.contains(t.id) && !t.restored) _turns[i] = t.copyWith(session: id);
+    }
+    _unstamped.clear();
+  }
 
   /// The replies the agent suggests for its latest turn: gone once the user
   /// sends anything, the agent starts another turn, an earlier conversation
@@ -831,7 +939,11 @@ class ChatTranscript {
   void sent(String id) {
     final i = _turns.indexWhere((GraineChatTurn t) => t.id == id);
     if (i < 0) return;
-    _turns[i] = _turns[i].copyWith(delivery: GraineChatDelivery.sent);
+    var t = _turns[i].copyWith(delivery: GraineChatDelivery.sent);
+    // Carried by a connection whose session is already known: that session.
+    final s = _sessionId;
+    if (s != null && !t.restored && _unstamped.remove(t.id)) t = t.copyWith(session: s);
+    _turns[i] = t;
     _awaitingReply = true;
   }
 
@@ -867,6 +979,7 @@ class ChatTranscript {
   void turnStarted() {
     _turnOpen = true;
     _replies = const <GraineQuickReply>[];
+    _agentTurnArrived();
   }
 
   /// Words of the agent's turn. True when they open a turn nobody asked for
@@ -883,6 +996,7 @@ class ChatTranscript {
     final proactive = last == null || last.role != GraineChatRole.user;
     // A new turn: the replies suggested for the one before it are spent.
     _replies = const <GraineQuickReply>[];
+    _agentTurnArrived();
     _add(GraineChatTurn(id: 't${++_seq}', role: GraineChatRole.agent, text: words, at: at, live: true, proactive: proactive));
     return proactive;
   }
@@ -890,6 +1004,7 @@ class ChatTranscript {
   /// A component the agent drew: it belongs to the agent's turn in progress
   /// (or the last turn, when that is the agent's); else it is a turn of its own.
   void component(GraineComponent c, DateTime at) {
+    _agentTurnArrived();
     final last = _turns.isEmpty ? null : _turns.last;
     if (last != null && last.role == GraineChatRole.agent) {
       _turns[_turns.length - 1] = last.copyWith(component: c);
@@ -905,35 +1020,77 @@ class ChatTranscript {
     _awaitingReply = false;
   }
 
-  /// The socket closed: nothing is arriving any more, and nothing is owed.
-  void closed() => turnEnded();
+  /// The socket closed: nothing is arriving any more, and nothing is owed —
+  /// and its session ended with it.
+  void closed() {
+    turnEnded();
+    _sessionId = null;
+  }
 
-  /// Forget everything (a different user, or a new conversation on purpose).
-  void clear() {
-    _turns.clear();
+  /// WHO A CHAT BELONGS TO (contract/DESIGN.md): the identity changed, so the
+  /// turns carried here are another identity's. Every one goes — with what a
+  /// history or a new conversation had settled, the marker rows, the
+  /// suggested replies, the end and its rating — except the user's lines that
+  /// have not gone out (still sending, or failed), which stay, in order, for
+  /// the next connection to send.
+  void forgetAllButUnsent() {
+    _turns.retainWhere((GraineChatTurn t) =>
+        t.role == GraineChatRole.user &&
+        (t.delivery == GraineChatDelivery.sending || t.delivery == GraineChatDelivery.failed));
+    // The identity before's session is not the next one's: the lines kept join the next session.
+    _sessionId = null;
+    _unstamped.clear();
+    for (var i = 0; i < _turns.length; i++) {
+      _turns[i] = _turns[i].copyWith(session: null);
+      _unstamped.add(_turns[i].id);
+    }
     _awaitingReply = false;
     _turnOpen = false;
     _settledAtOpen = null;
+    _freshOpen = false;
+    _marks.clear();
+    _markNext = false;
+    _goingOn();
+  }
+
+  /// Forget everything (a new conversation on purpose, a forgotten memory)
+  /// — the markers with the lines.
+  void clear() {
+    _turns.clear();
+    _sessionId = null;
+    _unstamped.clear();
+    _awaitingReply = false;
+    _turnOpen = false;
+    _settledAtOpen = null;
+    _freshOpen = false;
+    _marks.clear();
+    _markNext = false;
     _goingOn();
   }
 
   /// The connection opened, before what was waiting goes out: what is settled
-  /// now is what the next history replaces. A turn still waiting goes out
-  /// right after this, and stays.
+  /// now is what the next history replaces — or, when an agent turn comes
+  /// before any history, what the conversation that went before holds. A
+  /// turn still waiting goes out right after this, and stays.
   void opened() {
+    // A new connection: its session is not known until its frame.
+    _sessionId = null;
     _settledAtOpen = <String>{
       for (final t in _turns)
         if (!t.live && t.delivery != GraineChatDelivery.sending && t.delivery != GraineChatDelivery.failed) t.id,
     };
+    _freshOpen = true;
   }
 
   /// An earlier conversation, restored: its turns, then every turn the history
   /// cannot hold yet — still sending or failed, or said since the connection
   /// opened — in order. A reconnect's history holds what the last one did and
-  /// what was said since, so it replaces both, and nothing shows twice. With
-  /// no open yet, only the turns still to go are kept. False when there was
-  /// nothing to restore.
+  /// what was said since, so it replaces both, and nothing shows twice; a
+  /// marker before a turn it replaced goes with it. With no open yet, only the
+  /// turns still to go are kept. False when there was nothing to restore —
+  /// which still says the conversation continued: no new one began.
   bool restore(List<GraineChatTurn> restored) {
+    _freshOpen = false;
     if (restored.isEmpty) return false;
     final settled = _settledAtOpen;
     final kept = <GraineChatTurn>[
@@ -948,12 +1105,62 @@ class ChatTranscript {
       ..clear()
       ..addAll(restored)
       ..addAll(kept);
-    while (_turns.length > max) {
-      _turns.removeAt(0);
-    }
+    // The conversation continued: no marker is owed to what comes next.
+    _markNext = false;
+    _marks.retainWhere((String id) => kept.any((GraineChatTurn t) => t.id == id));
+    _trim();
     // The replies belonged to the moment they were offered, not to the conversation restored.
     _replies = const <GraineQuickReply>[];
     return true;
+  }
+
+  /// THE FIRST AGENT TURN SINCE THE CONNECTION OPENED — its start, words or a
+  /// component — with no history before it (any history, even one that
+  /// restores nothing, means the conversation continued): Graine began a new
+  /// conversation instead (contract/DESIGN.md "A new conversation under
+  /// earlier lines"; sdk/contract/history.json → `fresh`). What decides is the
+  /// current conversation: the turns settled at that open after the last
+  /// marker (all of them when there is none). None — nothing. No line of the
+  /// customer's after the last marker, settled or still to go — an opening
+  /// nobody answered: it goes, and the new one
+  /// takes its place (a marker before it stays, before what comes next).
+  /// Otherwise a marker goes before the first turn after the last marker not
+  /// settled at that open: what went out once it opened belongs to the new
+  /// conversation.
+  void _agentTurnArrived() {
+    if (!_freshOpen) return;
+    _freshOpen = false;
+    final settled = _settledAtOpen;
+    if (settled == null) return;
+    var from = 0;
+    for (var i = _turns.length - 1; i >= 0; i--) {
+      if (_marks.contains(_turns[i].id)) {
+        from = i;
+        break;
+      }
+    }
+    final current = <String>{
+      for (var i = from; i < _turns.length; i++)
+        if (settled.contains(_turns[i].id)) _turns[i].id,
+    };
+    if (current.isEmpty) return;
+    var answered = false;
+    for (var i = from; i < _turns.length && !answered; i++) {
+      answered = _turns[i].role == GraineChatRole.user;
+    }
+    if (!answered) {
+      final marked = current.any(_marks.contains);
+      _marks.removeAll(current);
+      _turns.removeWhere((GraineChatTurn t) => current.contains(t.id));
+      if (!marked) return;
+    }
+    final next = _turns.indexWhere((GraineChatTurn t) => !settled.contains(t.id), from);
+    if (next < 0) {
+      // Nothing of the new conversation is here yet: the marker goes before its first turn.
+      _markNext = true;
+    } else {
+      _marks.add(_turns[next].id);
+    }
   }
 
   void _settleLive() {
@@ -963,9 +1170,126 @@ class ChatTranscript {
   }
 
   void _add(GraineChatTurn t) {
+    // A live turn is the current session's; one waiting to go, or said before the session is known, the next frame's.
+    final waiting = t.role == GraineChatRole.user && t.delivery != GraineChatDelivery.sent;
+    final id = _sessionId;
+    if (!t.restored && !waiting && id != null) {
+      t = t.copyWith(session: id);
+    } else if (!t.restored) {
+      _unstamped.add(t.id);
+    }
     _turns.add(t);
+    if (_markNext) {
+      _marks.add(t.id);
+      _markNext = false;
+    }
+    _trim();
+  }
+
+  /// The oldest turns go past [max], and a marker with its turn: nothing
+  /// earlier is left to set it under.
+  void _trim() {
     while (_turns.length > max) {
-      _turns.removeAt(0);
+      _marks.remove(_turns.removeAt(0).id);
     }
   }
+}
+
+/// ONE SESSION OF A CHAT (sdk/contract/history.json `sessions`): a run of its
+/// turns said in one session — for a "past conversations" list or session
+/// dividers of your own. [GraineChatSession.sessions] lists them.
+class GraineChatSessionInfo {
+  const GraineChatSessionInfo({
+    required this.id,
+    required this.startedAt,
+    required this.endedAt,
+    required this.channel,
+    required this.turns,
+    required this.current,
+  });
+
+  /// The session's id — a chat connection's, or a call's for a call; null for
+  /// turns kept before sessions were recorded, and from a server that sends none.
+  final String? id;
+
+  /// When its first turn was said.
+  final DateTime startedAt;
+
+  /// When its last turn was said.
+  final DateTime endedAt;
+
+  /// [GraineChatChannel.voice] when every turn of it was said on a call, else the chat.
+  final GraineChatChannel channel;
+
+  /// How many turns it holds.
+  final int turns;
+
+  /// It is the chat's current session: its [id] is not null and is the chat's session id.
+  final bool current;
+
+  @override
+  bool operator ==(Object other) =>
+      other is GraineChatSessionInfo &&
+      other.id == id &&
+      other.startedAt == startedAt &&
+      other.endedAt == endedAt &&
+      other.channel == channel &&
+      other.turns == turns &&
+      other.current == current;
+
+  @override
+  int get hashCode => Object.hash(id, startedAt, endedAt, channel, turns, current);
+
+  @override
+  String toString() =>
+      'GraineChatSessionInfo($id, ${startedAt.toIso8601String()} – ${endedAt.toIso8601String()}, ${channel.name}, $turns${current ? ', current' : ''})';
+}
+
+/// THE CHAT'S SESSIONS, as sdk/contract/history.json `sessions` derives them.
+abstract final class ChatSessions {
+  /// The sessions [turns] hold, oldest first: consecutive turns with the same
+  /// session (none included) make one; `current` when its id is [sessionId].
+  static List<GraineChatSessionInfo> of(List<GraineChatTurn> turns, String? sessionId) {
+    final out = <GraineChatSessionInfo>[];
+    var i = 0;
+    while (i < turns.length) {
+      final id = turns[i].session;
+      var j = i;
+      var voice = true;
+      while (j < turns.length && turns[j].session == id) {
+        voice = voice && turns[j].channel == GraineChatChannel.voice;
+        j++;
+      }
+      out.add(GraineChatSessionInfo(
+        id: id,
+        startedAt: turns[i].at,
+        endedAt: turns[j - 1].at,
+        channel: voice ? GraineChatChannel.voice : GraineChatChannel.chat,
+        turns: j - i,
+        current: id != null && id == sessionId,
+      ));
+      i = j;
+    }
+    return out;
+  }
+}
+
+/// THE NEW-CONVERSATION MARKERS (contract/DESIGN.md, "Chat window" → A new
+/// conversation under earlier lines; sdk/contract/history.json → `fresh`):
+/// where the SDK's own chat window draws "Disconnected · new conversation" —
+/// a centred row like a day separator, before the first turn of a
+/// conversation Graine began under earlier lines. The window's own rows,
+/// never turns: a chat drawn from `turns` sees exactly what it always did.
+/// Not exported: a chat of your own reads them as
+/// `GraineChatSession.newConversationBefore`, and lays them out with
+/// `ChatRows.build` (`ChatNewConversationRow`).
+abstract final class ChatMarks {
+  /// The row's words.
+  static const String label = 'Disconnected · new conversation';
+
+  /// What a screen reader says for it.
+  static const String spoken = 'Disconnected. A new conversation started.';
+
+  /// The ids of [transcript]'s turns a marker row is drawn before.
+  static Set<String> of(ChatTranscript transcript) => Set<String>.unmodifiable(transcript._marks);
 }

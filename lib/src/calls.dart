@@ -74,6 +74,250 @@ class GraineCallCaption {
   int get hashCode => Object.hash(role, text, live);
 }
 
+/// How a call's audio held up, in one word ([GraineCallAudio.quality]) — on
+/// the thresholds of the SDK's own connection indicator.
+enum GraineCallAudioQuality {
+  good('good'),
+  fair('fair'),
+  poor('poor');
+
+  const GraineCallAudioQuality(this.wire);
+
+  /// The word every Graine SDK uses.
+  final String wire;
+
+  /// From the engine's word; null for one this build does not know.
+  static GraineCallAudioQuality? fromWire(Object? s) {
+    for (final v in values) {
+      if (v.wire == s) return v;
+    }
+    return null;
+  }
+}
+
+/// THE CALL'S AUDIO, MEASURED — the network figures of
+/// [GraineCallConnection.audio], each null until the engine has measured it.
+class GraineCallAudio {
+  const GraineCallAudio({this.lossPct, this.jitterAvgMs, this.jitterPeakMs, this.rttMs, this.quality});
+
+  /// From the engine's `audio` map; null for anything that is not one.
+  static GraineCallAudio? fromMap(Object? raw) {
+    if (raw is! Map) return null;
+    return GraineCallAudio(
+      lossPct: _figure(raw['lossPct']),
+      jitterAvgMs: _figure(raw['jitterAvgMs']),
+      jitterPeakMs: _figure(raw['jitterPeakMs']),
+      rttMs: _figure(raw['rttMs']),
+      quality: GraineCallAudioQuality.fromWire(raw['quality']),
+    );
+  }
+
+  /// The packets lost, as a percentage (0–100).
+  final double? lossPct;
+
+  /// The jitter on average, in milliseconds.
+  final double? jitterAvgMs;
+
+  /// The worst jitter, in milliseconds.
+  final double? jitterPeakMs;
+
+  /// The round trip, in milliseconds.
+  final double? rttMs;
+
+  /// In one word: good, fair or poor.
+  final GraineCallAudioQuality? quality;
+
+  /// The figures by the engine's names, the unknown ones left out.
+  Map<String, Object?> toMap() => <String, Object?>{
+        if (lossPct != null) 'lossPct': lossPct,
+        if (jitterAvgMs != null) 'jitterAvgMs': jitterAvgMs,
+        if (jitterPeakMs != null) 'jitterPeakMs': jitterPeakMs,
+        if (rttMs != null) 'rttMs': rttMs,
+        if (quality != null) 'quality': quality!.wire,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is GraineCallAudio &&
+      other.lossPct == lossPct &&
+      other.jitterAvgMs == jitterAvgMs &&
+      other.jitterPeakMs == jitterPeakMs &&
+      other.rttMs == rttMs &&
+      other.quality == quality;
+
+  @override
+  int get hashCode => Object.hash(lossPct, jitterAvgMs, jitterPeakMs, rttMs, quality);
+
+  @override
+  String toString() => 'GraineCallAudio(${toMap()})';
+}
+
+/// THE CONNECTION REPORT — how a native call connected and how its audio held
+/// up: the facts of the call's Connection card in Execution Logs, live on
+/// [GraineCallSnapshot.connection] while the call lasts and final on its
+/// [GraineCallOutcome.connection]. Each fact is null until the engine knows
+/// it, and from an engine that does not report it. Timings and network
+/// figures only — nothing personal.
+class GraineCallConnection {
+  const GraineCallConnection({
+    this.transport,
+    this.prepared,
+    this.preparedAgeSeconds,
+    this.credential,
+    this.setupMs,
+    this.loginMs,
+    this.answerMs,
+    this.firstWordsMs,
+    this.tapToVoiceMs,
+    this.audio,
+    this.recoveries,
+  });
+
+  /// From the engine's `connection` map; null for anything that is not one.
+  static GraineCallConnection? fromMap(Object? raw) {
+    if (raw is! Map) return null;
+    final credential = raw['credential'];
+    final prepared = raw['prepared'];
+    return GraineCallConnection(
+      transport: GraineCallTransport.fromWire(raw['transport']),
+      prepared: prepared is bool ? prepared : null,
+      preparedAgeSeconds: _count(raw['preparedAgeSeconds']),
+      credential: credential == 'direct' || credential == 'web' ? credential as String : null,
+      setupMs: _count(raw['setupMs']),
+      loginMs: _count(raw['loginMs']),
+      answerMs: _count(raw['answerMs']),
+      firstWordsMs: _count(raw['firstWordsMs']),
+      tapToVoiceMs: _count(raw['tapToVoiceMs']),
+      audio: GraineCallAudio.fromMap(raw['audio']),
+      recoveries: _count(raw['recoveries']),
+    );
+  }
+
+  /// What the call's audio runs on: [GraineCallTransport.webrtc] or [GraineCallTransport.websocket].
+  final GraineCallTransport? transport;
+
+  /// The call was prepared before the tap ([GraineCalls.prepareCall]): true,
+  /// or false when it was set up after it.
+  final bool? prepared;
+
+  /// How long before the tap a prepared call was made ready, in seconds.
+  final int? preparedAgeSeconds;
+
+  /// Where the call's credential came from: `direct` (issued directly) or
+  /// `web` (issued through the web); a word this build does not know is null.
+  final String? credential;
+
+  /// From the tap to the call being placed — the credential, the microphone
+  /// and the network path — in milliseconds.
+  final int? setupMs;
+
+  /// The device signing in to the call server, in milliseconds.
+  final int? loginMs;
+
+  /// From the call being placed to the call being answered, in milliseconds.
+  final int? answerMs;
+
+  /// From the answer to the agent's voice reaching the device, in milliseconds.
+  final int? firstWordsMs;
+
+  /// From the customer's tap to the agent's voice — the one wait a customer
+  /// feels — in milliseconds.
+  final int? tapToVoiceMs;
+
+  /// The audio's network figures.
+  final GraineCallAudio? audio;
+
+  /// How many times the connection recovered on its own (a fresh dial, a
+  /// restarted audio path, a replaced connection).
+  final int? recoveries;
+
+  /// The facts by the engine's names, the unknown ones left out.
+  Map<String, Object?> toMap() => <String, Object?>{
+        if (transport != null) 'transport': transport!.wire,
+        if (prepared != null) 'prepared': prepared,
+        if (preparedAgeSeconds != null) 'preparedAgeSeconds': preparedAgeSeconds,
+        if (credential != null) 'credential': credential,
+        if (setupMs != null) 'setupMs': setupMs,
+        if (loginMs != null) 'loginMs': loginMs,
+        if (answerMs != null) 'answerMs': answerMs,
+        if (firstWordsMs != null) 'firstWordsMs': firstWordsMs,
+        if (tapToVoiceMs != null) 'tapToVoiceMs': tapToVoiceMs,
+        if (audio != null) 'audio': audio!.toMap(),
+        if (recoveries != null) 'recoveries': recoveries,
+      };
+
+  @override
+  bool operator ==(Object other) =>
+      other is GraineCallConnection &&
+      other.transport == transport &&
+      other.prepared == prepared &&
+      other.preparedAgeSeconds == preparedAgeSeconds &&
+      other.credential == credential &&
+      other.setupMs == setupMs &&
+      other.loginMs == loginMs &&
+      other.answerMs == answerMs &&
+      other.firstWordsMs == firstWordsMs &&
+      other.tapToVoiceMs == tapToVoiceMs &&
+      other.audio == audio &&
+      other.recoveries == recoveries;
+
+  @override
+  int get hashCode => Object.hash(transport, prepared, preparedAgeSeconds, credential, setupMs, loginMs, answerMs,
+      firstWordsMs, tapToVoiceMs, audio, recoveries);
+
+  @override
+  String toString() => 'GraineCallConnection(${toMap()})';
+}
+
+/// WHERE A NATIVE CALL IS, as a call screen shows it — the one word of
+/// [GraineCallSnapshot.phase] (contract/PUBLIC-STATE.md, "Calls").
+enum GraineCallPhase {
+  /// No call.
+  idle('idle'),
+
+  /// An agent's call is ringing on this device.
+  ringing('ringing'),
+
+  /// The customer's call, before the agent answers.
+  calling('calling'),
+
+  /// An answered ring, connecting.
+  connecting('connecting'),
+
+  /// On the call.
+  active('active'),
+
+  /// On the call, its connection being recovered: "Reconnecting…".
+  reconnecting('reconnecting'),
+
+  /// The call is over — its last moment on screen; [GraineCallSnapshot.endReason]
+  /// says how it ended once its outcome has arrived.
+  ended('ended'),
+
+  /// A ring nobody answered ([GraineCalls.missedCall]), kept until the
+  /// customer calls back ([GraineCalls.callBack]), it is dismissed
+  /// ([GraineCalls.dismissMissedCall]), or another call rings or is placed.
+  missed('missed');
+
+  const GraineCallPhase(this.wire);
+
+  /// The word every Graine SDK uses.
+  final String wire;
+
+  /// The phase of a call the engine reports as [status]: a customer's call
+  /// not yet answered is [calling]; a connected call recovering its
+  /// connection is [reconnecting]. Never [missed] — only [GraineCalls]
+  /// knows a ring went unanswered.
+  static GraineCallPhase of(GraineNativeCallStatus status, {GraineCallDirection? direction, bool reconnecting = false}) =>
+      switch (status) {
+        GraineNativeCallStatus.idle => idle,
+        GraineNativeCallStatus.ringing => ringing,
+        GraineNativeCallStatus.connecting => direction == GraineCallDirection.outgoing ? calling : connecting,
+        GraineNativeCallStatus.active => reconnecting ? GraineCallPhase.reconnecting : active,
+        GraineNativeCallStatus.ended => ended,
+      };
+}
+
 /// A native call, as a call screen draws it. Every field has its idle value
 /// when no call is live.
 class GraineCallSnapshot {
@@ -93,7 +337,13 @@ class GraineCallSnapshot {
     this.transport,
     this.transportFallbackReason,
     this.reconnecting = false,
-  });
+    this.connection,
+    this.captions = const <GraineCallCaption>[],
+    GraineCallPhase? phase,
+    this.endReason,
+    this.endCause,
+    this.agentLevel = 0,
+  }) : _phase = phase;
 
   /// No call.
   static const GraineCallSnapshot idle = GraineCallSnapshot();
@@ -132,6 +382,9 @@ class GraineCallSnapshot {
       transportFallbackReason: _string(m['transportFallbackReason']),
       // Only a true is a recovering call: an engine that predates it says nothing.
       reconnecting: m['reconnecting'] == true,
+      connection: GraineCallConnection.fromMap(m['connection']),
+      endCause: _cause(m),
+      agentLevel: _level(m['agentLevel']),
     );
   }
 
@@ -187,6 +440,80 @@ class GraineCallSnapshot {
   /// once the audio is back, and from an engine that predates it.
   final bool reconnecting;
 
+  /// THE CONNECTION REPORT, live: how this call connected and how its audio
+  /// is holding up, each fact null until the engine knows it. Null with no
+  /// call, and from an engine that does not report it. The final report is
+  /// on the call's [GraineCallOutcome.connection].
+  final GraineCallConnection? connection;
+
+  /// What has been said on this call, oldest first — the agent's words as
+  /// they are said, the customer's as they are heard, a live line replaced as
+  /// its words arrive, the last 12 turns: the transcript the SDK's call
+  /// screen draws. Empty with no call; a new call starts empty.
+  final List<GraineCallCaption> captions;
+
+  final GraineCallPhase? _phase;
+
+  /// WHERE THE CALL IS, in one word, as a call screen shows it: idle,
+  /// ringing, calling (the customer's call before the agent answers),
+  /// connecting, active, reconnecting, ended — or missed, a ring nobody
+  /// answered, while [GraineCalls] keeps it ([GraineCalls.missedCall]).
+  GraineCallPhase get phase => _phase ?? GraineCallPhase.of(status, direction: direction, reconnecting: reconnecting);
+
+  /// How an [GraineCallPhase.ended] call ended — `local` (this app hung up),
+  /// `remote` (the agent did) or `failed` (the connection broke) — once its
+  /// outcome has arrived; for one that never connected, [error] says why.
+  /// Null otherwise.
+  final String? endReason;
+
+  /// WHO OR WHAT ENDED an [GraineCallPhase.ended] call, finer than
+  /// [endReason] — `local_end` (this app or the customer hung up),
+  /// `remote_bye` (the agent's side hung up), `media_drop` (the audio path
+  /// dropped and did not come back), `audio_watch` (the call's audio never
+  /// arrived, or stopped arriving, and the SDK's own watch ended it),
+  /// `provider_reset` (iOS only: the system reset CallKit) or `failed`
+  /// (anything else); a word this build does not know comes as the
+  /// engine said it. What the call's state says, else — once it has arrived —
+  /// the [GraineCallOutcome.endCause] of its outcome. Null otherwise, and
+  /// from an engine that does not say.
+  final String? endCause;
+
+  /// How loud the agent is as it is heard, 0–1 — what a call screen's
+  /// visualiser follows. 0 with no call, while nothing is heard, and from an
+  /// engine that does not say.
+  final double agentLevel;
+
+  /// The engine's snapshot with what [GraineCalls] keeps beside it.
+  GraineCallSnapshot _with({
+    required List<GraineCallCaption> captions,
+    required GraineCallPhase phase,
+    required String? endReason,
+    required String? endCause,
+  }) =>
+      GraineCallSnapshot(
+        status: status,
+        callId: callId,
+        direction: direction,
+        reason: reason,
+        callerName: callerName,
+        muted: muted,
+        speakerOn: speakerOn,
+        agentSpeaking: agentSpeaking,
+        caption: caption,
+        connectedAt: connectedAt,
+        error: error,
+        agent: agent,
+        transport: transport,
+        transportFallbackReason: transportFallbackReason,
+        reconnecting: reconnecting,
+        connection: connection,
+        captions: captions,
+        phase: phase,
+        endReason: endReason,
+        endCause: endCause,
+        agentLevel: agentLevel,
+      );
+
   @override
   bool operator ==(Object other) =>
       other is GraineCallSnapshot &&
@@ -204,11 +531,18 @@ class GraineCallSnapshot {
       other.agent == agent &&
       other.transport == transport &&
       other.transportFallbackReason == transportFallbackReason &&
-      other.reconnecting == reconnecting;
+      other.reconnecting == reconnecting &&
+      other.connection == connection &&
+      listEquals(other.captions, captions) &&
+      other.phase == phase &&
+      other.endReason == endReason &&
+      other.endCause == endCause &&
+      other.agentLevel == agentLevel;
 
   @override
-  int get hashCode => Object.hash(status, callId, direction, reason, callerName, muted, speakerOn,
-      agentSpeaking, caption, connectedAt, error, agent, transport, transportFallbackReason, reconnecting);
+  int get hashCode => Object.hashAll(<Object?>[status, callId, direction, reason, callerName, muted, speakerOn,
+      agentSpeaking, caption, connectedAt, error, agent, transport, transportFallbackReason, reconnecting, connection,
+      Object.hashAll(captions), phase, endReason, endCause, agentLevel]);
 }
 
 /// What became of a call (WIRE.md: ringing · answered · declined · missed ·
@@ -220,7 +554,7 @@ enum GraineCallOutcomeKind { ringing, answered, declined, missed, ended, failed 
 /// about the others, with [callId].
 class GraineCallOutcome {
   const GraineCallOutcome(this.callId, this.outcome,
-      {this.reason, this.durationSeconds, this.hosted = false, this.agent});
+      {this.reason, this.durationSeconds, this.hosted = false, this.agent, this.connection, this.endCause});
 
   factory GraineCallOutcome.fromMap(Map<Object?, Object?> m) {
     final word = m['outcome'];
@@ -238,6 +572,8 @@ class GraineCallOutcome {
       durationSeconds: seconds is num && seconds.isFinite && seconds >= 0 ? seconds.round() : null,
       hosted: m['hosted'] == true || m['hosted'] == '1',
       agent: _string(m['agent']),
+      connection: GraineCallConnection.fromMap(m['connection']),
+      endCause: _cause(m),
     );
   }
 
@@ -260,6 +596,23 @@ class GraineCallOutcome {
   /// (`'default'` for the default agent); null when the engine does not know.
   final String? agent;
 
+  /// THE CONNECTION REPORT, final: how the call connected and how its audio
+  /// held up — the engine's own with the outcome, else the last the call's
+  /// state carried. Null for a call that never connected far enough to
+  /// measure anything, and from an engine that does not report it.
+  final GraineCallConnection? connection;
+
+  /// WHO OR WHAT ENDED THE CALL, on the `ended` or `failed` outcome that ends
+  /// it: `local_end` (this app or the customer hung up), `remote_bye` (the
+  /// agent's side hung up), `media_drop` (the audio path dropped and did not
+  /// come back), `audio_watch` (the SDK's own watch ended a call whose audio
+  /// never arrived, or stopped arriving), `provider_reset` (iOS only: the
+  /// system reset CallKit, which ends every call) or `failed` (anything else
+  /// that ended it). A word this build does not
+  /// know comes as the engine said it — switch with a default. Null on the
+  /// other outcomes, and from an engine that does not say.
+  final String? endCause;
+
   /// One word for your server: ringing · answered · declined · missed · ended · failed.
   String get wire => outcome.name;
 
@@ -274,6 +627,17 @@ class GraineCallOutcome {
   /// [reason] of a `failed` call, by its 0.6 name.
   @Deprecated('Use reason.')
   String? get error => outcome == GraineCallOutcomeKind.failed ? reason : null;
+
+  /// This outcome with [report] as its connection, when it carries none of its own.
+  GraineCallOutcome _withConnection(GraineCallConnection? report) => connection != null || report == null
+      ? this
+      : GraineCallOutcome(callId, outcome,
+          reason: reason,
+          durationSeconds: durationSeconds,
+          hosted: hosted,
+          agent: agent,
+          connection: report,
+          endCause: endCause);
 
   @override
   String toString() => 'GraineCallOutcome($callId, $wire${reason != null ? ', $reason' : ''})';
@@ -593,9 +957,81 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   /// The agent the last [startCall] named, while its call lasts.
   GraineInApp? _calling;
 
+  /// The engine's own snapshot, before what this keeps beside it (the
+  /// transcript, a missed ring, how the call ended) is added.
+  GraineCallSnapshot _raw = GraineCallSnapshot.idle;
+
+  /// What has been said on the call, as [GraineCallSnapshot.captions] has it.
+  List<GraineCallCaption> _captions = const <GraineCallCaption>[];
+
+  /// The last connection report each recent call's state carried, by call
+  /// id — an outcome that brings none of its own carries it.
+  final Map<String, GraineCallConnection> _connections = <String, GraineCallConnection>{};
+
+  /// How each recent call ended (`local`, `remote`, `failed`), by call id, from its outcome.
+  final Map<String, String> _endReasons = <String, String>{};
+
+  /// Who or what ended each recent call (`remote_bye`, `media_drop`, …), by call id, from its outcome.
+  final Map<String, String> _endCauses = <String, String>{};
+
+  /// The app's [speakerByDefault], once it set one; null: the engine's own default.
+  bool? _speakerByDefault;
+
+  /// The last ring seen, for what its missed call says.
+  GraineIncomingCall? _ring;
+
+  /// A ring nobody answered ([missedCall]).
+  GraineIncomingCall? _missed;
+
+  /// How many calls' reports are kept: a call's outcome arrives within moments of its end.
+  static const int _keptCalls = 8;
+
   /// The call, as it is now.
   @override
   GraineCallSnapshot get value => _snapshot;
+
+  /// THE RING NOBODY ANSWERED — what a call screen offers to call back while
+  /// [GraineCallSnapshot.phase] is [GraineCallPhase.missed]: its id, reason,
+  /// name and agent. Kept until the customer calls back ([callBack]), it is
+  /// dismissed ([dismissMissedCall]), or another call rings or is placed.
+  GraineIncomingCall? get missedCall => _missed;
+
+  /// RETURN THE MISSED CALL — what the SDK's call screen's "Call back" does:
+  /// the customer calls the agent that rang, with the missed ring's reason
+  /// (or `returning_missed_call`) as `call_reason`. Returns the new call's id,
+  /// or null when there is nothing to call back or a call is live.
+  Future<String?> callBack() async {
+    final missed = _missed;
+    if (missed == null || _snapshot.status.isLive) return null;
+    _missed = null;
+    _publish();
+    return startCall(reason: missed.reason ?? 'returning_missed_call', agent: missed.agent);
+  }
+
+  /// The customer has seen the missed call: [missedCall] goes, and
+  /// [GraineCallSnapshot.phase] is idle again.
+  void dismissMissedCall() {
+    if (_missed == null) return;
+    _missed = null;
+    _publish();
+  }
+
+  /// WHERE AN AGENT'S CALL STARTS ITS SOUND: on the loudspeaker (true, the
+  /// default) — unless a headset, a car or AirPlay is the route, which is
+  /// never taken from the customer — or on the earpiece (false), like a phone
+  /// call. Read as each call starts, so set it before one: a change reaches
+  /// the next call, and [setSpeaker] moves the call in progress. The engine
+  /// keeps it for a call that rings before any Dart has run, and [configure]
+  /// carries it; set before [configure], it is held until configure runs.
+  bool get speakerByDefault => _speakerByDefault ?? true;
+
+  set speakerByDefault(bool on) {
+    _speakerByDefault = on;
+    // Applied at once, and kept by the host with the options for a call that
+    // rings before any Dart has run; before configure, held until it runs. A
+    // native build from before it ignores it (MissingPluginException).
+    unawaited(_invokeOptional('setSpeakerByDefault', on));
+  }
 
   /// Native calls run on Android and iOS.
   bool get isSupported =>
@@ -956,10 +1392,13 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     };
   }
 
-  /// The configure arguments: the options, and the named agents when there are any.
-  static Map<String, Object?> _configureArgs(GraineCallsOptions options, Map<String, Object?> agents) =>
-      <String, Object?>{
+  /// The configure arguments: the options, the app's [speakerByDefault] once
+  /// it set one — the host keeps it with them, and a configure without it
+  /// would put calls back on the loudspeaker — and the named agents when
+  /// there are any.
+  Map<String, Object?> _configureArgs(GraineCallsOptions options, Map<String, Object?> agents) => <String, Object?>{
         ...options.toMap(),
+        if (_speakerByDefault != null) 'speakerByDefault': _speakerByDefault,
         if (agents.isNotEmpty) 'agents': agents,
       };
 
@@ -991,7 +1430,7 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     calls._sameAsDefault = engine.sameAsDefault;
     if (deepEquals(engine.agents, calls._agentsSent)) return;
     calls._agentsSent = engine.agents;
-    unawaited(calls._invokeOptional('configure', _configureArgs(options, engine.agents)));
+    unawaited(calls._invokeOptional('configure', calls._configureArgs(options, engine.agents)));
   }
 
   /// The app's name for an agent the engine names: the engine's default
@@ -1055,16 +1494,18 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
       case 'state':
         _apply(payload);
       case 'outcome':
-        _deliver(_outcomes, _heldOutcomes, GraineCallOutcome.fromMap(payload));
+        // The final report: the engine's own, else the last the call's state carried.
+        final outcome = GraineCallOutcome.fromMap(payload)._withConnection(_connections[_string(payload['callId'])]);
+        _noteOutcome(outcome);
+        _deliver(_outcomes, _heldOutcomes, outcome);
       case 'incoming':
-        _deliver(
-            _incoming,
-            _heldIncoming,
-            GraineIncomingCall(_string(payload['callId']) ?? '',
-                reason: _string(payload['reason']),
-                callerName: _string(payload['callerName']),
-                hosted: payload['hosted'] == true || payload['hosted'] == '1',
-                agent: _string(payload['agent'])));
+        final ring = GraineIncomingCall(_string(payload['callId']) ?? '',
+            reason: _string(payload['reason']),
+            callerName: _string(payload['callerName']),
+            hosted: payload['hosted'] == true || payload['hosted'] == '1',
+            agent: _string(payload['agent']));
+        _ring = ring;
+        _deliver(_incoming, _heldIncoming, ring);
       case 'voipToken':
         final token = _string(payload['token']);
         for (final w in List<void Function(String?)>.of(_tokenWatchers)) {
@@ -1092,7 +1533,79 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   }
 
   void _apply(Map<Object?, Object?>? m) {
-    final next = GraineCallSnapshot.fromMap(m == null ? null : _withAppAgent(m));
+    final raw = GraineCallSnapshot.fromMap(m == null ? null : _withAppAgent(m));
+    final before = _raw;
+    _raw = raw;
+    final id = raw.callId;
+    final report = raw.connection;
+    if (id != null && report != null) _keep(_connections, id, report);
+    if (raw.status == GraineNativeCallStatus.ringing && id != null) {
+      final heard = _ring?.callId == id ? _ring : null;
+      _ring = GraineIncomingCall(id,
+          reason: raw.reason ?? heard?.reason,
+          callerName: raw.callerName ?? heard?.callerName,
+          hosted: heard?.hosted ?? false,
+          agent: raw.agent ?? heard?.agent);
+    }
+    // Another call rings or is placed: the missed one is old news.
+    if (raw.status.isLive && !before.status.isLive) _missed = null;
+    _captions = _transcript(before, raw, _captions);
+    _publish();
+  }
+
+  /// [kept] after [now]: empty with no call, and for a new call; a caption
+  /// that changed folded in — a live line replaced as its words arrive.
+  static List<GraineCallCaption> _transcript(GraineCallSnapshot before, GraineCallSnapshot now, List<GraineCallCaption> kept) {
+    if (now.status == GraineNativeCallStatus.idle) return const <GraineCallCaption>[];
+    final sameCall = before.status != GraineNativeCallStatus.idle && before.callId == now.callId;
+    final lines = sameCall ? kept : const <GraineCallCaption>[];
+    final c = now.caption;
+    if (c == null || (sameCall && c == before.caption)) return lines;
+    final folded = Captions.fold(<Caption>[for (final l in lines) Caption(l.role, l.text, live: l.live)],
+        Caption(c.role, c.text, live: c.live));
+    return List<GraineCallCaption>.unmodifiable(<GraineCallCaption>[
+      for (final l in folded) GraineCallCaption(l.role, l.text, live: l.live),
+    ]);
+  }
+
+  /// What an outcome says beyond itself: the call's last report, how it
+  /// ended, and a ring nobody answered.
+  void _noteOutcome(GraineCallOutcome o) {
+    final report = o.connection;
+    if (report != null && o.callId.isNotEmpty) _keep(_connections, o.callId, report);
+    if (o.outcome == GraineCallOutcomeKind.ended && o.reason != null && o.callId.isNotEmpty) {
+      _keep(_endReasons, o.callId, o.reason!);
+    }
+    final cause = o.endCause;
+    if (cause != null && o.callId.isNotEmpty) _keep(_endCauses, o.callId, cause);
+    if (o.outcome == GraineCallOutcomeKind.missed) {
+      final ring = _ring?.callId == o.callId ? _ring : null;
+      _missed = GraineIncomingCall(o.callId,
+          reason: ring?.reason, callerName: ring?.callerName, hosted: o.hosted || (ring?.hosted ?? false), agent: o.agent ?? ring?.agent);
+    }
+    _publish();
+  }
+
+  static void _keep<T>(Map<String, T> kept, String id, T value) {
+    kept.remove(id);
+    kept[id] = value;
+    while (kept.length > _keptCalls) {
+      kept.remove(kept.keys.first);
+    }
+  }
+
+  /// The engine's snapshot with what is kept beside it, to the screens — when it changed.
+  void _publish() {
+    final raw = _raw;
+    final phase = raw.status == GraineNativeCallStatus.idle && _missed != null ? GraineCallPhase.missed : null;
+    final ended = raw.status == GraineNativeCallStatus.ended && raw.callId != null;
+    final next = raw._with(
+      captions: _captions,
+      phase: phase ?? GraineCallPhase.of(raw.status, direction: raw.direction, reconnecting: raw.reconnecting),
+      endReason: ended ? _endReasons[raw.callId] : null,
+      // What the call's state says, else — once it has arrived — its outcome's.
+      endCause: raw.endCause ?? (ended ? _endCauses[raw.callId] : null),
+    );
     if (next == _snapshot) return;
     final wasLive = _snapshot.status.isLive;
     _snapshot = next;
@@ -1194,6 +1707,14 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     _subscription?.cancel();
     _subscription = null;
     _snapshot = GraineCallSnapshot.idle;
+    _raw = GraineCallSnapshot.idle;
+    _captions = const <GraineCallCaption>[];
+    _connections.clear();
+    _endReasons.clear();
+    _endCauses.clear();
+    _speakerByDefault = null;
+    _ring = null;
+    _missed = null;
     _nativeLive = false;
     _tokenWatchers.clear();
     _heldOutcomes.clear();
@@ -1214,5 +1735,24 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
 }
 
 String? _string(Object? v) => v is String ? v : null;
+
+/// A measured figure: a finite number of at least 0; anything else was not measured.
+double? _figure(Object? v) => v is num && v.isFinite && v >= 0 ? v.toDouble() : null;
+
+/// A whole count or duration: a finite number of at least 0, rounded; anything else was not measured.
+int? _count(Object? v) => v is num && v.isFinite && v >= 0 ? v.round() : null;
+
+/// Who or what ended a call, as an engine's map says it: `endCause`, or the
+/// `cause` both engines send on an outcome — any non-empty word, as given.
+String? _cause(Map<Object?, Object?> m) {
+  for (final key in const <String>['endCause', 'cause']) {
+    final v = m[key];
+    if (v is String && v.isNotEmpty) return v;
+  }
+  return null;
+}
+
+/// A level within 0–1; anything that is not a finite number is 0.
+double _level(Object? v) => v is num && v.isFinite ? v.clamp(0, 1).toDouble() : 0;
 
 String _encode(Object? v) => v is Map || v is List ? jsonEncode(v) : '$v';
