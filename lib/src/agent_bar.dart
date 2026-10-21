@@ -148,8 +148,8 @@ class GraineAgentBar extends StatefulWidget {
   /// dashboard allows, draws the chat window above itself, and opens the chat
   /// while the customer is in it (ending the call first: one conversation at
   /// a time) and ends it when they switch back to the call; when the bar goes,
-  /// the SDK's own is kept until it has been idle for 5 minutes. An app that
-  /// runs the chat itself hands its own here, closed when they leave.
+  /// the SDK's own is kept for [GraineConfig.chatCloseDelaySeconds] more. An
+  /// app that runs the chat itself hands its own here, closed when they leave.
   final GraineChatState? chat;
 
   /// Use the SDK's own chat when [chat] is null. Off: without a [chat] the
@@ -405,7 +405,7 @@ class _GraineAgentBarState extends State<GraineAgentBar> with WidgetsBindingObse
 
   /// The chat this bar opened because the customer is in it. Back to the
   /// call, it ends at once; when it leaves the screen otherwise — the bar
-  /// goes — the SDK's own is kept until it has been idle for 5 minutes.
+  /// goes — the SDK's own is kept for [GraineConfig.chatCloseDelaySeconds].
   GraineChatConnection? _openedChat;
 
   /// The chat this bar has told it is on screen ([ChatWindows.shown]).

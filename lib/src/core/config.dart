@@ -54,6 +54,7 @@ class GraineConfig {
     this.fonts = const <String>[],
     this.captureTaps = true,
     this.chatSize,
+    this.chatCloseDelaySeconds = 15,
   });
 
   /// "https://www.graine.ai" unless self-hosted.
@@ -124,6 +125,33 @@ class GraineConfig {
   /// the whole screen. Null, the default, follows the dashboard; a size passed
   /// to `GraineChat.open` wins for that open.
   final GraineChatSize? chatSize;
+
+  /// HOW LONG A CHAT NO WINDOW SHOWS STAYS CONNECTED, in seconds (0.14.3):
+  /// the time after the last window stops showing the chat before its
+  /// connection closes — counted again from a message either way that comes
+  /// meanwhile. Shown again before that, the same conversation goes on; after
+  /// it, opening the chat connects again (an identified user's conversation
+  /// continues from Graine's history, with no new welcome). 15 by default; 0
+  /// closes it at once; held to 0–300 (a value that is not a number is 15).
+  final num chatCloseDelaySeconds;
+}
+
+/// [GraineConfig.chatCloseDelaySeconds], read: the default, the bounds, and
+/// the delay in milliseconds. Not exported.
+abstract final class ChatCloseDelay {
+  /// 15 seconds after the chat leaves the last screen.
+  static const int defaultSeconds = 15;
+
+  /// At most 5 minutes.
+  static const int maxSeconds = 300;
+
+  /// [seconds] held to 0–[maxSeconds], in milliseconds; [defaultSeconds] for
+  /// null or a value that is not a finite number.
+  static int ms(num? seconds) {
+    if (seconds == null || !seconds.isFinite) return defaultSeconds * 1000;
+    final held = seconds < 0 ? 0 : (seconds > maxSeconds ? maxSeconds : seconds);
+    return (held * 1000).round();
+  }
 }
 
 /// Whether the page that carries the call is actually there.

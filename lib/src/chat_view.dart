@@ -22,9 +22,10 @@ import 'widget_view.dart';
 ///     ));
 ///
 /// It opens the chat while it is on screen. When it goes, the conversation
-/// is kept — opening the chat again goes on with it, nothing on screen
-/// changing — until it has been idle for 5 minutes, no message either way,
-/// and then closes. It draws the components the agent shows above the
+/// is kept for [GraineConfig.chatCloseDelaySeconds] (15 s by default; a
+/// message either way meanwhile starts the wait again) — opening the chat
+/// again within it goes on with it, nothing on screen changing — and then
+/// closes. It draws the components the agent shows above the
 /// composer, keeps clear of the status bar, the home indicator and the
 /// keyboard, and says "Connecting…" while it connects.
 ///

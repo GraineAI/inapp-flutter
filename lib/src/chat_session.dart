@@ -4,8 +4,8 @@ part of 'graine.dart';
 /// [GraineChatState], as [GraineCallFault] is beside the call state, so a
 /// host's own chat keeps compiling. [GraineChatSession] implements it; the
 /// bar opens a chat that does when the customer is in the chat, and closes it
-/// when they leave (the SDK's own, once it has been idle for 5 minutes with
-/// no window showing it).
+/// when they leave (the SDK's own [GraineConfig.chatCloseDelaySeconds] after
+/// no window shows it).
 abstract interface class GraineChatConnection {
   /// A connection is being made, or remade after a drop.
   bool get connecting;
@@ -64,9 +64,10 @@ abstract final class ChatWindows {
     }
   }
 
-  /// A window with [chat] left the screen. The SDK's own chat is kept until
-  /// it has been idle for 5 minutes (contract/DESIGN.md "How long a
-  /// conversation lasts"); a host's own closes, as it always did.
+  /// A window with [chat] left the screen. The SDK's own chat is kept for
+  /// [GraineConfig.chatCloseDelaySeconds] more once no window shows it
+  /// (0.14.3; it was 5 idle minutes in 0.14.0–0.14.1); a host's own closes,
+  /// as it always did.
   static void left(GraineChatConnection chat) {
     if (chat is GraineChatSession) {
       chat._windowLeft();
@@ -95,11 +96,14 @@ abstract final class ChatWindows {
 /// on this socket; its in-app actions run through [GraineInApp.registerAction];
 /// the screen reaches it as it changes.
 ///
-/// How long it lasts (contract/DESIGN.md "How long a conversation lasts"):
-/// when the SDK's chat window closes, the conversation stays connected until
-/// it has been idle for 5 minutes — no message either way — so opening the
-/// chat again goes on with it. [close] ends it at once, and the app going to
-/// the background (`endOnBackground`) ends it as before. When Graine ends it
+/// How long it lasts (0.14.3): once no window shows the chat, the
+/// conversation stays connected for [GraineConfig.chatCloseDelaySeconds] (15
+/// by default; a message either way meanwhile starts the wait again), so
+/// opening the chat again within it goes on with it; then it closes, and the
+/// next open connects again — an identified user's conversation continuing
+/// from Graine's history, with no new welcome. (0.14.0–0.14.1 kept it for 5
+/// idle minutes.) [close] ends it at once, and the app going to the
+/// background (`endOnBackground`) ends it as before. When Graine ends it
 /// itself — idle, or at the session's time limit — nothing reconnects until
 /// the customer opens the chat or sends something; the window says
 /// "Disconnected".
@@ -177,17 +181,17 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   /// When a message last went either way, or the chat last connected.
   int? _lastActivity;
 
-  /// Set while no window shows the chat: closes it once it has been idle for [_idleMs].
+  /// Set while no window shows the chat: closes it
+  /// [GraineConfig.chatCloseDelaySeconds] after it left the last one, or
+  /// after the last message either way since.
   Timer? _idleClose;
+
+  /// When the last window stopped showing the chat; null while one shows it.
+  int? _leftAt;
 
   /// Graine ended the conversation itself: nothing reconnects until the
   /// customer opens the chat or sends something.
   bool _endedByGraine = false;
-
-  /// How long a chat no window shows stays connected with no message either
-  /// way: the window Graine's server applies (contract/DESIGN.md "How long a
-  /// conversation lasts").
-  static const int _idleMs = 5 * 60 * 1000;
 
   /// The embed gateway's close codes for a conversation it ended: idle
   /// (`idle_timeout`) and the session's time limit.
@@ -291,10 +295,12 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   /// so the conversation lives as the SDK's own windows' does
   /// (contract/DESIGN.md "How long a conversation lasts"). Shown, the chat
   /// opens ([open]): a conversation kept since a screen left goes on as it
-  /// was, with no new welcome. Gone from every screen, it stays connected
-  /// until it has been idle for 5 minutes — no message either way — and then
-  /// closes. Each `true` is paired with one `false`. A chat nobody reports
-  /// stays connected until Graine's own idle limit; [close] ends it at once.
+  /// was, with no new welcome. Gone from every screen, it stays connected for
+  /// [GraineConfig.chatCloseDelaySeconds] (15 s by default; a message either
+  /// way meanwhile starts the wait again) and then closes (0.14.3; it was 5
+  /// idle minutes in 0.14.0–0.14.1). Each `true` is paired with one `false`.
+  /// A chat nobody reports stays connected until Graine's own idle limit;
+  /// [close] ends it at once.
   void shown(bool visible) {
     if (_disposed) return;
     if (visible) {
@@ -466,6 +472,86 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     unawaited(refreshUpcoming());
   }
 
+  // ── past sessions (0.14.3; contract/PUBLIC-STATE.md "Past sessions") ─────
+
+  final ValueNotifier<GrainePastSessions> _past = ValueNotifier<GrainePastSessions>(GrainePastSessions.empty);
+
+  /// Where the next page starts; null before the first and after the last.
+  String? _pastCursor;
+
+  /// Bumped by every refresh and identity change: an answer from before is nobody's.
+  int _pastGeneration = 0;
+
+  /// THE USER'S PAST SESSIONS WITH THIS AGENT, newest first — chats, voice
+  /// conversations and calls, for the signed-in user themselves, read only
+  /// from a device that is one of theirs: for a "past conversations" screen
+  /// of your own. The conversation open now is never among them. Empty until [refreshPastSessions];
+  /// `loading` while a page is read, `hasMore` while there are older ones
+  /// ([loadMorePastSessions]), and `error` — Graine's code — when the last
+  /// read failed. Emptied when the identity changes.
+  ValueListenable<GrainePastSessions> get pastSessions => _past;
+
+  /// Read the first page of the user's past sessions again: it replaces what
+  /// was loaded (kept on screen while it is read). Never throws — a failure
+  /// is the state's `error`: `identity_required` with nobody identified
+  /// (nothing is asked), `device_limit` from a device that is not theirs,
+  /// `rate_limited`, `unavailable`, `network`. A refresh supersedes any read
+  /// still on its way.
+  Future<void> refreshPastSessions() => _readPastSessions(more: false);
+
+  /// Read the next page and add it after the sessions loaded — an id already
+  /// there is not added twice. Nothing happens while a page is being read or
+  /// when there is no next page ([GrainePastSessions.hasMore]). Never throws;
+  /// after a failure `hasMore` stays true, so it can be asked again.
+  Future<void> loadMorePastSessions() {
+    final now = _past.value;
+    if (_disposed || now.loading || !now.hasMore || _pastCursor == null) return Future<void>.value();
+    return _readPastSessions(more: true);
+  }
+
+  /// ONE PAST SESSION'S FULL TRANSCRIPT — [id] from [pastSessions] — oldest
+  /// first. Throws a [GraineException]: `invalidRequest` for an empty id and
+  /// `identityRequired` with nobody identified (neither asks Graine),
+  /// `notFound` for a session that is not the user's, `deviceLimit` from a
+  /// device that is not theirs, `network` when Graine cannot be reached.
+  Future<GrainePastSessionTranscript> sessionTranscript(String id) async {
+    final wanted = id.trim();
+    if (wanted.isEmpty) {
+      throw const GraineException("Pass the id of one of the user's past sessions.", code: GraineErrorCode.invalidRequest);
+    }
+    return PastSessionsWire.transcript(await _graine._sessionTranscript(wanted), id: wanted);
+  }
+
+  Future<void> _readPastSessions({required bool more}) async {
+    if (_disposed) return;
+    final generation = ++_pastGeneration;
+    final cursor = more ? _pastCursor : null;
+    final before = _past.value;
+    _setPast(GrainePastSessions(sessions: before.sessions, loading: true, hasMore: before.hasMore));
+    String? error;
+    try {
+      final page = PastSessionsWire.page(await _graine._pastSessionsPage(cursor));
+      if (_disposed || generation != _pastGeneration) return;
+      _pastCursor = page.next;
+      _setPast(PastSessionsWire.after(_past.value, page, more: more));
+      return;
+    } on GraineException catch (e) {
+      error = e.codeName ?? e.code.wire;
+    } catch (e) {
+      error = GraineErrorCode.network.wire;
+      if (_graine.config.debug) debugPrint('[Graine] chat: could not read the past sessions: $e');
+    }
+    if (_disposed || generation != _pastGeneration) return;
+    // What was loaded stays (nobody identified, nothing was: an identity change empties it), and can be asked again.
+    final now = _past.value;
+    _setPast(GrainePastSessions(sessions: now.sessions, hasMore: now.hasMore, error: error));
+  }
+
+  void _setPast(GrainePastSessions next) {
+    if (_disposed || next == _past.value) return;
+    _past.value = next;
+  }
+
   // ── what the customer does ───────────────────────────────────────────────
 
   @override
@@ -500,27 +586,38 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   /// connection, nothing on screen changing.
   void _windowShown() {
     _windows++;
+    _leftAt = null;
     _cancelIdleClose();
     open();
   }
 
   /// A chat window left the screen. When no window shows the chat any more
-  /// the conversation is kept, and closes once it has been idle for 5
-  /// minutes — no message either way: opening the chat within them goes on
-  /// with it (contract/DESIGN.md "How long a conversation lasts").
+  /// the conversation is kept for [GraineConfig.chatCloseDelaySeconds], and
+  /// then closes: opening the chat within it goes on with it.
   void _windowLeft() {
     if (_windows > 0) _windows--;
-    if (_windows == 0) _scheduleIdleClose();
+    if (_windows == 0) {
+      _leftAt = _graine._clock();
+      _scheduleIdleClose();
+    }
   }
 
-  /// The close of a chat no window shows: 5 minutes after the last message
-  /// either way (at once when that was longer ago).
+  /// The close of a chat no window shows: [GraineConfig.chatCloseDelaySeconds]
+  /// after it left the last window, or after the last message either way when
+  /// that came later — at once for 0.
   void _scheduleIdleClose() {
     _cancelIdleClose();
     if (!_wanted || _windows > 0 || _disposed) return;
     final now = _graine._clock();
-    final due = (_lastActivity ?? now) + _idleMs - now;
-    _idleClose = Timer(Duration(milliseconds: due > 0 ? due : 0), () {
+    final left = _leftAt ?? now;
+    final last = _lastActivity ?? now;
+    final due = (left > last ? left : last) + ChatCloseDelay.ms(_graine.config.chatCloseDelaySeconds) - now;
+    // 0: at once, as the last window goes.
+    if (due <= 0) {
+      close();
+      return;
+    }
+    _idleClose = Timer(Duration(milliseconds: due), () {
       _idleClose = null;
       close();
     });
@@ -539,7 +636,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   }
 
   /// A message went either way: the conversation is not idle. While no
-  /// window shows the chat, its 5 minutes start again.
+  /// window shows the chat, its wait to close starts again.
   void _activity() {
     _lastActivity = _graine._clock();
     if (_idleClose != null) _scheduleIdleClose();
@@ -884,9 +981,10 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   ///  1. the one connected, connecting or coming back after a drop closes
   ///     normally — no "Disconnected", no reconnect banner — and one still
   ///     being made is nobody's when it lands;
-  ///  2. the turns it carried go, with their history and marker rows, and the
+  ///  2. the turns it carried go, with their history and marker rows, the
   ///     booked calls shown for the identity before (read again for the new
-  ///     one as the chat connects);
+  ///     one as the chat connects) and the past sessions loaded for them
+  ///     ([pastSessions] is empty until the next refresh);
   ///  3. a line typed that has not gone out — still sending, or failed —
   ///     stays, and goes on the next connection;
   ///  4. a chat that was connected or connecting connects again at once, with
@@ -906,6 +1004,10 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _upcoming = const <GraineScheduledCall>[];
     _cancels.clear();
     _upcomingAt = null;
+    // Nor their past sessions — and a read still on its way lands nobody's.
+    _pastGeneration++;
+    _pastCursor = null;
+    _setPast(GrainePastSessions.empty);
     _endedByGraine = false;
     _remaking = false;
     _ladder.reset();

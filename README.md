@@ -19,7 +19,7 @@ Integration guide: https://www.graine.ai/docs/in-app/flutter
 
 ```yaml
 dependencies:
-  graine_inapp: ^0.14.1
+  graine_inapp: ^0.14.3
   permission_handler: ^11.0.0   # or whatever your app already uses for permissions
 ```
 
@@ -139,8 +139,11 @@ below). Your app passes nothing about how it looks:
   design, ends the call before it opens the chat (one conversation at a time)
   and ends the chat when the customer switches back to the call. A chat window
   that leaves the screen otherwise (`GraineChat` closed, the bar gone) keeps
-  the conversation: opening the chat again goes on with it, and it closes once
-  it has been idle for 5 minutes (no message either way). When Graine ends it
+  the conversation for `GraineConfig.chatCloseDelaySeconds` — 15 seconds by
+  default, a message either way meanwhile starting the wait again — so opening
+  the chat again within it goes on with it; then it closes, and opening the
+  chat connects again, an identified user's conversation continuing where it
+  was (0.14.3; it was 5 idle minutes in 0.14.0–0.14.1). When Graine ends it
   — idle, or at the session's time limit — the window says *Disconnected* and
   the customer's next message connects again; where a new conversation starts
   under earlier messages, a quiet *Disconnected · new conversation* line says
@@ -327,7 +330,11 @@ header's one word: idle, connecting, connected, reconnecting, offline,
 failed, or *disconnected* once Graine ended an idle conversation),
 `newConversationBefore` (where a "Disconnected · new conversation" row goes)
 and `shown(true)` / `shown(false)` from your screen, so the conversation lasts
-as the SDK's own windows keep it: 5 idle minutes once no screen shows it.
+as the SDK's own windows keep it: `chatCloseDelaySeconds` (15 s by default)
+once no screen shows it. From 0.14.3, `pastSessions` (a `ValueListenable` of
+the user's earlier sessions with the agent), `refreshPastSessions()`,
+`loadMorePastSessions()` and `sessionTranscript(id)` draw a "past
+conversations" screen of your own.
 
 ### Conversations continue
 

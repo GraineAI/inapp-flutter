@@ -652,7 +652,8 @@ enum GraineChatChannel { chat, voice }
 /// your own: `GraineChatSession.status`.
 enum GraineChatStatus {
   /// Not in the chat: never opened, closed, put away in the background, or
-  /// closed after 5 idle minutes with no screen showing it — and after the
+  /// closed once no screen had shown it for `GraineConfig.chatCloseDelaySeconds`
+  /// (15 s by default) — and after the
   /// agent ended the conversation (`ended`): the customer's next message
   /// starts over.
   idle('idle'),

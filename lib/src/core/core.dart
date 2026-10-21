@@ -25,6 +25,7 @@ export 'loading.dart';
 export 'logo.dart';
 export 'masking.dart';
 export 'memory.dart';
+export 'past_sessions.dart';
 export 'placement.dart';
 export 'protocol.dart';
 export 'scheduling.dart';

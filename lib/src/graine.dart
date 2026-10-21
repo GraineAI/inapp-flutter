@@ -321,7 +321,8 @@ class GraineInApp with WidgetsBindingObserver {
   /// THE TEXT CHAT — the conversation in writing, on its own connection.
   /// [GraineAgentBar] and [GraineChat] draw it and open it when the customer
   /// is in the chat — and when their window closes, keep the conversation
-  /// until it has been idle for 5 minutes; a host drawing its own calls
+  /// for [GraineConfig.chatCloseDelaySeconds] (15 s by default) more; a host
+  /// drawing its own calls
   /// [GraineChatSession.open] and [GraineChatSession.close] itself. One
   /// conversation at a time: the bar ends the call before it opens the chat
   /// (and the chat when it goes back to the call), and opening it ends any
@@ -487,6 +488,34 @@ class GraineInApp with WidgetsBindingObserver {
           code: GraineErrorCode.identityRequired);
     }
     return GraineMemory.listFrom(await _embed(_Routes.memories, const <String, Object?>{}));
+  }
+
+  /// One page of the current user's past sessions with this agent, as Graine
+  /// answers it ([GraineChatSession.pastSessions] keeps them): the first, or
+  /// the one after [cursor]. Throws a [GraineException] — `identityRequired`
+  /// when nobody is identified (nothing is asked), `deviceLimit` from a
+  /// device that is not theirs.
+  Future<Map<String, Object?>> _pastSessionsPage(String? cursor) async {
+    await _sessionOrThrow();
+    if (_identityValueFor(_traits) == null) {
+      throw const GraineException(
+          'Nobody is identified. Call identify() with the trait that identifies the user before reading past sessions.',
+          code: GraineErrorCode.identityRequired);
+    }
+    return _embed(_Routes.pastSessions, <String, Object?>{if (cursor != null) 'cursor': cursor});
+  }
+
+  /// One past session's transcript, as Graine answers it
+  /// ([GraineChatSession.sessionTranscript]). Throws as [_pastSessionsPage]
+  /// does, and `notFound` for a session that is not the user's.
+  Future<Map<String, Object?>> _sessionTranscript(String id) async {
+    await _sessionOrThrow();
+    if (_identityValueFor(_traits) == null) {
+      throw const GraineException(
+          'Nobody is identified. Call identify() with the trait that identifies the user before reading a transcript.',
+          code: GraineErrorCode.identityRequired);
+    }
+    return _embed(_Routes.sessionTranscript, <String, Object?>{'id': id});
   }
 
   /// THIS INSTALL'S ID: a UUID made on the app's first launch and kept by the
@@ -1409,4 +1438,6 @@ abstract final class _Routes {
   static const String schedule = '/api/embed/calls/schedule';
   static const String list = '/api/embed/calls/list';
   static const String cancel = '/api/embed/calls/cancel';
+  static const String pastSessions = '/api/embed/sessions/list';
+  static const String sessionTranscript = '/api/embed/sessions/transcript';
 }
