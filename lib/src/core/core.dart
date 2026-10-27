@@ -4,6 +4,7 @@
 /// the widgets) is a thin shell around these.
 library;
 
+export 'app_identity.dart';
 export 'appearance.dart';
 export 'bar.dart';
 export 'booking.dart';
@@ -12,6 +13,7 @@ export 'chat.dart';
 export 'chat_format.dart';
 export 'chat_rows.dart';
 export 'chat_size.dart';
+export 'client_tokens.dart';
 export 'config.dart';
 export 'context.dart';
 export 'design.dart';
@@ -37,3 +39,4 @@ export 'version.dart';
 export 'widget_flow.dart';
 export 'widgets.dart';
 export 'window_chrome.dart';
+export 'workflows.dart';

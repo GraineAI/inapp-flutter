@@ -15,6 +15,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:graine_inapp/graine_inapp.dart';
 import 'package:graine_inapp/src/chat_window.dart';
 import 'package:graine_inapp/src/graine.dart' show ChatSocketCloseCode;
+import 'package:graine_inapp/src/core/workflows.dart' show Workflows;
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 
@@ -70,11 +71,21 @@ class Server {
   final Map<String, Future<http.Response> Function(Map<String, Object?> body)> slowRoutes =
       <String, Future<http.Response> Function(Map<String, Object?> body)>{};
 
+  /// The session's answer when a test says — one still on its way, a
+  /// refusal; null: [session], at once.
+  Future<http.Response> Function()? sessionAnswer;
+
+  /// How many times the session was asked for.
+  int get sessionRequests => requests.where((http.Request r) => r.url.path == '/api/embed/session').length;
+
   late final http.Client client = MockClient((http.Request req) async {
     requests.add(req);
     final path = req.url.path;
     final body = req.body.isEmpty ? <String, Object?>{} : jsonDecode(req.body) as Map<String, Object?>;
-    if (path == '/api/embed/session') return jsonResponse(session);
+    if (path == '/api/embed/session') {
+      final answer = sessionAnswer;
+      return answer == null ? jsonResponse(session) : await answer();
+    }
     final slow = slowRoutes[path];
     if (slow != null) return slow(body);
     final route = routes[path];
@@ -380,6 +391,23 @@ void main() {
       await finish(tester, g);
     });
 
+    testWidgets('the same user written another way is no switch: nobody is signed out, and the chat stays theirs',
+        (WidgetTester tester) async {
+      final server = Server(session: sessionBody(field: 'phone'));
+      final c = Connector();
+      final g = makeApp(tester, server, connector: c);
+      g.identify(<String, Object?>{'phone': '+91 98765 43210'});
+      final socket = await connected(tester, g, c);
+      // The profile API spells the number its own way: Graine keys both as one user (the last ten digits).
+      g.identify(<String, Object?>{'phone': '9876543210'});
+      await tester.pump();
+      await tester.pump();
+      expect(server.bodies('/api/embed/identity/signout'), isEmpty,
+          reason: "a sign-out would unlink this phone from the user who is still on it — and stop it ringing for them");
+      expect(socket.closed, isFalse, reason: 'the chat already reads them as one user');
+      await finish(tester, g);
+    });
+
     // 0.14.0 — contract/DESIGN.md "Who a chat belongs to": the reverse of what this used to pin.
     testWidgets('anonymous to identified: the open chat was nobody\'s — it closes and connects again at once as the user',
         (WidgetTester tester) async {
@@ -468,6 +496,483 @@ void main() {
     expect(Identity.normaliseInstallId(id), id);
     expect(await g.installId, id, reason: 'one per run');
     g.dispose();
+  });
+
+  // 0.14.4 — what a request answers is the true reason: identity_required
+  // names the trait this agent identifies users by; a session still on its
+  // way is waited for; one that failed is its own refusal, never "nobody is
+  // identified"; and a getter read before the session is told when it lands.
+  group('identity_required, and the session it depends on (0.14.4)', () {
+    const String memoryList = '/api/embed/memory/list';
+    const String memoryForget = '/api/embed/memory/forget';
+    const String usableMemberId = 'identify() was given no usable "member_id" — the trait this agent identifies customers '
+        "by (Who is the user? in the agent's memory settings). Until it is, conversations are anonymous and nothing is "
+        'remembered.';
+
+    Matcher identityRequired(String message) => throwsA(isA<GraineException>()
+        .having((GraineException e) => e.code, 'code', GraineErrorCode.identityRequired)
+        .having((GraineException e) => e.message, 'message', message));
+
+    testWidgets("traits without the agent's trait: identity_required names it, and nothing is asked", (WidgetTester tester) async {
+      final server = Server(session: sessionBody(field: 'member_id'));
+      server.routes[memoryList] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{'memories': <Object?>[]});
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'user_id': 'P-1', 'name': 'Asha'});
+      await expectLater(g.memories(), identityRequired(usableMemberId));
+      await expectLater(g.forgetMemory(), identityRequired(usableMemberId));
+      await expectLater(g.chat.sessionTranscript('ex-1'), identityRequired(usableMemberId));
+      g.identify(<String, Object?>{'member_id': 'guest'});
+      await expectLater(g.memories(), identityRequired(usableMemberId), reason: 'a placeholder is no usable value either');
+      expect(server.bodies(memoryList), isEmpty, reason: 'nothing asked that would be refused');
+      expect(server.bodies(memoryForget), isEmpty);
+      g.identify(<String, Object?>{'member_id': 'M-000981'});
+      expect(await g.memories(), isEmpty);
+      expect(server.bodies(memoryList).single['identity'], <String, Object?>{'value': 'M-000981'});
+      await finish(tester, g);
+    });
+
+    testWidgets("nobody identified: identity_required asks for the agent's trait by name — after a sign-out too",
+        (WidgetTester tester) async {
+      final g = makeApp(tester, Server(session: sessionBody(field: 'customer_id')));
+      final nobody = identityRequired('Nobody is identified. Call identify() with the customer\'s "customer_id" first.');
+      await expectLater(g.forgetMemory(), nobody);
+      await expectLater(g.memories(), nobody);
+      await expectLater(g.chat.sessionTranscript('ex-1'), nobody);
+      g.identify(<String, Object?>{'customer_id': 'C-42'});
+      g.identify(null);
+      await tester.pump();
+      await expectLater(g.memories(), nobody, reason: 'signed out: nobody again');
+      await g.chat.refreshPastSessions();
+      expect(g.chat.pastSessions.value.error, 'identity_required');
+      await finish(tester, g);
+    });
+
+    testWidgets("one log line says so when the traits lack the agent's trait — as the session lands, and as identify() does",
+        (WidgetTester tester) async {
+      final g = makeApp(tester, Server(session: sessionBody(field: 'member_id')));
+      final printed = <String>[];
+      final before = debugPrint;
+      debugPrint = (String? m, {int? wrapWidth}) => printed.add(m ?? '');
+      try {
+        List<String> said() => <String>[
+              for (final m in printed)
+                if (m.contains('given no usable')) m,
+            ];
+        g.identify(<String, Object?>{'user_id': 'P-1', 'name': 'Asha'});
+        expect(said(), isEmpty, reason: 'which trait the agent wants is not known before the session');
+        await g.loadSession();
+        expect(said(), <String>['[Graine] $usableMemberId']);
+        g.identify(<String, Object?>{'user_id': 'P-1', 'name': 'Asha'});
+        expect(said(), hasLength(1), reason: 'the same traits again: said once');
+        g.identify(<String, Object?>{'member_id': 'M-000981'});
+        expect(said(), hasLength(1), reason: 'the trait is there');
+        g.identify(<String, Object?>{'userId': 'P-2'});
+        expect(said(), hasLength(2), reason: 'identify() landed without it');
+        g.identify(null);
+        expect(said(), hasLength(2), reason: 'a sign-out is no mistake');
+        await tester.pump();
+      } finally {
+        debugPrint = before;
+      }
+      await finish(tester, g);
+    });
+
+    testWidgets("a session that could not load is the refusal — its code, the server's sentence — never \"nobody is "
+        'identified"; 502 and 504 are unavailable; the next call asks again', (WidgetTester tester) async {
+      final server = Server();
+      server.routes[memoryList] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{
+            'memories': <Object?>[
+              <String, Object?>{'id': 'm1', 'text': 'Prefers mornings'},
+            ],
+          });
+      final answers = <Future<http.Response> Function()>[
+        () async => jsonResponse(<String, Object?>{'error': 'Graine is busy right now.', 'code': 'unavailable'}, 503),
+        () async => http.Response('<html><body>502 Bad Gateway</body></html>', 502,
+            headers: const <String, String>{'content-type': 'text/html'}),
+        () async => http.Response('', 504),
+        () async => throw http.ClientException('no route to host'),
+        () async => jsonResponse(<String, Object?>{'error': 'Unknown key', 'code': 'invalid_key'}, 401),
+      ];
+      server.sessionAnswer = () => answers.isEmpty ? Future<http.Response>.value(jsonResponse(server.session)) : answers.removeAt(0)();
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      Matcher refused(GraineErrorCode code, {Object? message, int? status}) => throwsA(isA<GraineException>()
+          .having((GraineException e) => e.code, 'code', code)
+          .having((GraineException e) => e.message, 'message', message ?? anything)
+          .having((GraineException e) => e.statusCode, 'statusCode', status));
+      await expectLater(g.memories(), refused(GraineErrorCode.unavailable, message: 'Graine is busy right now.', status: 503));
+      await expectLater(g.forgetMemory(), refused(GraineErrorCode.unavailable, status: 502),
+          reason: 'a gateway that failed, no code: an outage, as the docs say');
+      await expectLater(g.memories(), refused(GraineErrorCode.unavailable, status: 504), reason: 'and one that timed out');
+      await expectLater(g.forgetMemory(), refused(GraineErrorCode.network, message: contains('no route to host')));
+      await expectLater(g.memories(), refused(GraineErrorCode.invalidKey, status: 401));
+      expect(server.sessionRequests, 5, reason: 'each call asked for the session again');
+      expect(server.bodies(memoryList), isEmpty);
+      expect(server.bodies(memoryForget), isEmpty);
+      expect((await g.memories()).single.id, 'm1');
+      expect(server.sessionRequests, 6);
+      await finish(tester, g);
+    });
+
+    // A one-shot request belongs to whoever was identified when it was made — the native SDKs' rule
+    // (iOS customerAfterSession, Android afterSession(forWhoAsked)), in the same words.
+    group('a request made while the settings load is carried out only for the customer who asked', () {
+      const String someoneElse = "Someone else was identified while the agent's settings were loading, so nothing was "
+          'asked for the customer identified before. Ask again for the customer identified now.';
+      const List<String> routes = <String>[
+        '/api/embed/memory/list',
+        '/api/embed/memory/forget',
+        '/api/embed/sessions/transcript',
+        '/api/embed/calls/schedule',
+        '/api/embed/conversation/new',
+        '/api/embed/workflows/start',
+      ];
+
+      /// A server whose session waits for [gate], answering every route the requests below use.
+      Server gated(Completer<void> gate) {
+        final server = Server(session: sessionBody(field: 'customer_id'));
+        server.sessionAnswer = () async {
+          await gate.future;
+          return jsonResponse(server.session);
+        };
+        server.routes['/api/embed/memory/list'] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{
+              'memories': <Object?>[
+                <String, Object?>{'id': 'm1', 'text': 'Prefers mornings'},
+              ],
+            });
+        server.routes['/api/embed/memory/forget'] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{'deleted': 3});
+        server.routes['/api/embed/sessions/transcript'] = (Map<String, Object?> body) => jsonResponse(<String, Object?>{
+              'id': body['id'],
+              'turns': <Object?>[
+                <String, Object?>{'role': 'user', 'text': 'Hi', 'at': '2026-10-21T10:00:05Z'},
+              ],
+            });
+        server.routes['/api/embed/calls/schedule'] = (Map<String, Object?> body) => jsonResponse(<String, Object?>{
+              'call': <String, Object?>{'id': 'sc_1', 'at': body['at'], 'status': 'scheduled', 'source': 'sdk'},
+            }, 201);
+        server.routes['/api/embed/workflows/start'] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{
+              'runId': 'oex_2c9e8f1a7b3d4c5e6f7a8b9c',
+              'workflowId': 'owf_8a1d4e7c2b90f1a2b3c4d5e6',
+              'alreadyRunning': false,
+            }, 201);
+        return server;
+      }
+
+      /// Every one-shot request, asked now: what each came to — its value, or what it threw.
+      Future<Map<String, Object?>> ask(WidgetTester tester, GraineInApp g, void Function() meanwhile, Completer<void> gate) async {
+        final later = tester.binding.clock.now().toUtc().add(const Duration(hours: 3));
+        final at = DateTime.utc(later.year, later.month, later.day, later.hour, later.minute, later.second);
+        final asked = <String, Future<Object?>>{
+          'memories': g.memories(),
+          'forgetMemory': g.forgetMemory(),
+          'sessionTranscript': g.chat.sessionTranscript('ex-1'),
+          'scheduleCall': g.scheduleCall(at: at, reason: 'Renewal'),
+          'newConversation': g.chat.newConversation().then((void _) => 'done'),
+          'startWorkflow': g.startWorkflow('Welcome call', data: <String, Object?>{'plan': 'gold'}),
+        };
+        meanwhile();
+        gate.complete();
+        return <String, Object?>{
+          for (final e in asked.entries) e.key: await e.value.then((Object? v) => v, onError: (Object e) => e),
+        };
+      }
+
+      Matcher refused(String message) => isA<GraineException>()
+          .having((GraineException e) => e.code, 'code', GraineErrorCode.identityRequired)
+          .having((GraineException e) => e.message, 'message', message);
+
+      testWidgets('someone else identified before the settings land: nothing is asked for either of them',
+          (WidgetTester tester) async {
+        final gate = Completer<void>();
+        final server = gated(gate);
+        final g = makeApp(tester, server);
+        g.identify(<String, Object?>{'customer_id': 'C-42', 'name': 'Asha'});
+        final came = await ask(tester, g, () => g.identify(<String, Object?>{'customer_id': 'C-77', 'name': 'Ravi'}), gate);
+        for (final e in came.entries) {
+          expect(e.value, refused(someoneElse), reason: "${e.key}: Asha's request is never Ravi's");
+        }
+        for (final route in routes) {
+          expect(server.bodies(route), isEmpty, reason: '$route: nothing asked');
+        }
+        await finish(tester, g);
+      });
+
+      testWidgets('signed out before the settings land: refused, in the words that name the trait', (WidgetTester tester) async {
+        final gate = Completer<void>();
+        final server = gated(gate);
+        final g = makeApp(tester, server);
+        g.identify(<String, Object?>{'customer_id': 'C-42'});
+        final came = await ask(tester, g, () => g.identify(null), gate);
+        for (final e in came.entries) {
+          expect(e.value, refused('Nobody is identified. Call identify() with the customer\'s "customer_id" first.'),
+              reason: e.key);
+        }
+        for (final route in routes) {
+          expect(server.bodies(route), isEmpty, reason: route);
+        }
+        await finish(tester, g);
+      });
+
+      testWidgets('the same customer again — other traits, another spelling — is still them; one asked for by nobody is '
+          'for whoever is identified when the settings land', (WidgetTester tester) async {
+        final gate = Completer<void>();
+        final server = gated(gate);
+        final g = makeApp(tester, server);
+        g.identify(<String, Object?>{'customer_id': 'C-42'});
+        final came = await ask(tester, g, () => g.identify(<String, Object?>{'customer_id': ' C-42 ', 'plan': 'gold'}), gate);
+        expect(came['memories'], isA<List<GraineMemory>>());
+        expect(came['forgetMemory'], 3);
+        expect(came['sessionTranscript'], isA<GrainePastSessionTranscript>());
+        expect(came['scheduleCall'], isA<GraineScheduledCall>());
+        expect(came['newConversation'], 'done');
+        expect(came['startWorkflow'], isA<GraineWorkflowRun>());
+        for (final route in routes) {
+          expect(server.bodies(route).single['identity'], <String, Object?>{'value': ' C-42 '}, reason: route);
+        }
+        await finish(tester, g);
+
+        final gate2 = Completer<void>();
+        final server2 = gated(gate2);
+        final h = makeApp(tester, server2);
+        final booked = await ask(tester, h, () => h.identify(<String, Object?>{'customer_id': 'C-77'}), gate2);
+        expect(booked['scheduleCall'], isA<GraineScheduledCall>(), reason: 'asked for nobody in particular: no one was replaced');
+        expect(server2.bodies('/api/embed/calls/schedule').single['identity'], <String, Object?>{'value': 'C-77'});
+        await finish(tester, h);
+      });
+    });
+
+    testWidgets('a session that never answers: memories() gives up at its timeout, as network — and the next call asks again',
+        (WidgetTester tester) async {
+      final server = Server();
+      final never = Completer<http.Response>();
+      server.sessionAnswer = () => never.future;
+      server.routes[memoryList] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{'memories': <Object?>[]});
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      Object? failure;
+      unawaited(g.memories().then((List<GraineMemory> _) {}, onError: (Object e) {
+        failure = e;
+      }));
+      await tester.pump(const Duration(seconds: 24));
+      expect(failure, isNull, reason: 'still waiting for the session');
+      await tester.pump(const Duration(seconds: 2));
+      expect(failure, isA<GraineException>().having((GraineException e) => e.code, 'code', GraineErrorCode.network));
+      server.sessionAnswer = null;
+      expect(await g.memories(), isEmpty);
+      expect(server.sessionRequests, 2);
+      await finish(tester, g);
+    });
+
+    testWidgets('asked as the app starts — memories, forget, past sessions, a transcript, bookings — everything waits for the '
+        'session, then decides: nothing is "not identified" for a session on its way', (WidgetTester tester) async {
+      final server = Server(session: sessionBody(field: 'customer_id'));
+      final gate = Completer<void>();
+      server.sessionAnswer = () async {
+        await gate.future;
+        return jsonResponse(server.session);
+      };
+      server.routes[memoryList] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{
+            'memories': <Object?>[
+              <String, Object?>{'id': 'm1', 'text': 'Prefers mornings'},
+            ],
+          });
+      server.routes[memoryForget] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{'deleted': 1});
+      server.routes['/api/embed/sessions/list'] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{
+            'sessions': <Object?>[
+              <String, Object?>{'id': 'ex-1', 'startedAt': '2026-10-21T10:00:00Z', 'channel': 'chat', 'turns': 2, 'preview': 'Hi'},
+            ],
+            'next': null,
+          });
+      server.routes['/api/embed/sessions/transcript'] = (Map<String, Object?> body) => jsonResponse(<String, Object?>{
+            'id': body['id'],
+            'turns': <Object?>[
+              <String, Object?>{'role': 'user', 'text': 'Hi', 'at': '2026-10-21T10:00:05Z'},
+            ],
+          });
+      server.routes['/api/embed/calls/list'] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{'calls': <Object?>[]});
+      server.routes['/api/embed/calls/schedule'] = (Map<String, Object?> body) => jsonResponse(<String, Object?>{
+            'call': <String, Object?>{'id': 'sc_1', 'at': body['at'], 'status': 'scheduled', 'source': 'sdk'},
+          }, 201);
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'customer_id': 'C-42', 'name': 'Asha'});
+      final later = tester.binding.clock.now().toUtc().add(const Duration(hours: 3));
+      final at = DateTime.utc(later.year, later.month, later.day, later.hour, later.minute, later.second);
+      final asked = <String, Future<Object?>>{
+        'memories': g.memories(),
+        'forgetMemory': g.forgetMemory(),
+        'sessionTranscript': g.chat.sessionTranscript('ex-1'),
+        'pastSessions': g.chat.refreshPastSessions().then((void _) => null),
+        'scheduledCalls': g.scheduledCalls(),
+        'scheduleCall': g.scheduleCall(at: at, reason: 'Renewal'),
+        'memoryEnabled': g.memoryEnabled(),
+      };
+      final answered = <String>{};
+      final failed = <String, Object>{};
+      asked.forEach((String name, Future<Object?> f) => unawaited(f.then((Object? _) {
+            answered.add(name);
+          }, onError: (Object e) {
+            failed[name] = e;
+          })));
+      // While it loads the getters say "not yet" — never a reason that is wrong a moment later.
+      expect(g.bookingUnavailableReason, GraineBookingUnavailableReason.notLoaded);
+      expect(g.bookingAvailable, isFalse);
+      expect(g.bookingBlocker, isNot(GraineErrorCode.identityRequired));
+      await tester.pump(const Duration(seconds: 5));
+      expect(answered, isEmpty, reason: 'nothing decides before the session says who the user is');
+      expect(failed, isEmpty);
+      expect(g.chat.pastSessions.value.loading, isTrue);
+      expect(g.chat.pastSessions.value.error, isNull);
+      gate.complete();
+      await Future.wait<Object?>(<Future<Object?>>[for (final f in asked.values) f.catchError((Object _) => null)]);
+      expect(failed, isEmpty);
+      expect(answered, asked.keys.toSet());
+      expect(await asked['forgetMemory'], 1);
+      expect(g.chat.pastSessions.value.sessions.single.id, 'ex-1');
+      expect(server.sessionRequests, 1, reason: 'all of them shared the one request');
+      for (final route in <String>[
+        memoryList, memoryForget, '/api/embed/sessions/list', '/api/embed/sessions/transcript', '/api/embed/calls/list',
+        '/api/embed/calls/schedule',
+      ]) {
+        expect(server.bodies(route).single['identity'], <String, Object?>{'value': 'C-42'}, reason: route);
+      }
+      expect(g.bookingUnavailableReason, isNull);
+      await finish(tester, g);
+    });
+
+    testWidgets('someone else signing in before the session arrives: once it names the trait, the last user is signed out',
+        (WidgetTester tester) async {
+      const String signout = '/api/embed/identity/signout';
+      final server = Server();
+      final gate = Completer<void>();
+      server.sessionAnswer = () async {
+        await gate.future;
+        return jsonResponse(server.session);
+      };
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      g.identify(<String, Object?>{'email': 'asha@example.com', 'name': 'Asha'});
+      g.identify(<String, Object?>{'email': 'ravi@example.com', 'name': 'Ravi'});
+      await tester.pump(const Duration(seconds: 1));
+      expect(server.bodies(signout), isEmpty, reason: 'whether that was someone else is not known before the session');
+      gate.complete();
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      expect(server.bodies(signout).single['identity'], <String, Object?>{'value': 'asha@example.com'},
+          reason: 'Asha, once — her other traits were no switch');
+      await finish(tester, g);
+    });
+
+    testWidgets('a user who is the user again by the time the session arrives is not signed out — away and back, or out '
+        'and in again', (WidgetTester tester) async {
+      const String signout = '/api/embed/identity/signout';
+      final server = Server();
+      final gate = Completer<void>();
+      server.sessionAnswer = () async {
+        await gate.future;
+        return jsonResponse(server.session);
+      };
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      g.identify(<String, Object?>{'email': 'ravi@example.com'});
+      g.identify(<String, Object?>{'email': 'Asha@Example.com'}); // Asha again — spelt as her profile spells it
+      g.identify(null);
+      g.identify(<String, Object?>{'email': 'asha@example.com', 'name': 'Asha'});
+      gate.complete();
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      // A sign-out unlinks the device from that user: signing Asha out now would stop her phone ringing for her —
+      // under any spelling of her address, which Graine reads as one user.
+      expect(<Object?>[for (final b in server.bodies(signout)) b['identity']], <Object?>[
+        <String, Object?>{'value': 'ravi@example.com'},
+      ], reason: 'Ravi left; Asha is the user again');
+      await finish(tester, g);
+    });
+
+    testWidgets('whoever left before the session is signed out once one arrives — after a load that failed, too',
+        (WidgetTester tester) async {
+      const String signout = '/api/embed/identity/signout';
+      final server = Server();
+      final answers = <Future<http.Response> Function()>[
+        () async => jsonResponse(<String, Object?>{'error': 'Graine is busy right now.', 'code': 'unavailable'}, 503),
+      ];
+      server.sessionAnswer =
+          () => answers.isEmpty ? Future<http.Response>.value(jsonResponse(server.session)) : answers.removeAt(0)();
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      g.identify(<String, Object?>{'email': 'ravi@example.com'}); // someone else, before the session
+      g.identify(null); // and a sign-out
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      expect(server.sessionRequests, 1);
+      expect(g.session, isNull, reason: 'the first load failed');
+      expect(server.bodies(signout), isEmpty);
+      expect(await g.loadSession(), isNotNull);
+      for (var i = 0; i < 5; i++) {
+        await tester.pump(const Duration(milliseconds: 20));
+      }
+      expect(<Object?>[for (final b in server.bodies(signout)) (b['identity']! as Map<String, Object?>)['value']],
+          unorderedEquals(<String>['asha@example.com', 'ravi@example.com']),
+          reason: 'neither device binding may outlive a session load that failed: their calls would ring here');
+      await finish(tester, g);
+    });
+
+    testWidgets('bookingListenable tells the app when the session arrives — even when booking stays unavailable — so the '
+        'reason is read again', (WidgetTester tester) async {
+      final g = makeApp(tester, Server());
+      final reasons = <GraineBookingUnavailableReason?>[];
+      g.bookingListenable.addListener(() => reasons.add(g.bookingUnavailableReason));
+      expect(g.bookingUnavailableReason, GraineBookingUnavailableReason.notLoaded);
+      await g.loadSession();
+      expect(reasons, <GraineBookingUnavailableReason?>[GraineBookingUnavailableReason.notIdentified],
+          reason: 'bookingAvailable stayed false, but the reason a widget shows changed: it is told, once');
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      expect(reasons.last, isNull);
+      expect(g.bookingListenable.value, isTrue);
+      g.identify(<String, Object?>{'email': 'asha@example.com', 'name': 'Asha'});
+      expect(reasons, hasLength(2), reason: 'nothing changed: nothing said');
+      g.identify(null);
+      expect(reasons.last, GraineBookingUnavailableReason.notIdentified);
+      expect(g.bookingListenable.value, isFalse);
+      await tester.pump();
+      await finish(tester, g);
+
+      final h = makeApp(tester, Server(session: sessionBody(usersCanBook: false)));
+      final heard = <GraineBookingUnavailableReason?>[];
+      h.bookingListenable.addListener(() => heard.add(h.bookingUnavailableReason));
+      h.identify(<String, Object?>{'email': 'asha@example.com'});
+      expect(heard, isEmpty, reason: 'still loading: nothing to read again yet');
+      await h.loadSession();
+      expect(heard, <GraineBookingUnavailableReason?>[GraineBookingUnavailableReason.schedulingOff]);
+      await finish(tester, h);
+    });
+
+    testWidgets("bookingSlots offers no time on a guess: empty until the session brings the agent's rules",
+        (WidgetTester tester) async {
+      final g = makeApp(tester, Server());
+      final now = DateTime(2026, 10, 14, 17, 58, 37);
+      expect(g.bookingSlots(DateTime(2026, 10, 15, 9), now: now), isEmpty);
+      await g.loadSession();
+      expect(g.bookingSlots(DateTime(2026, 10, 15, 9), now: now), hasLength(288));
+      await finish(tester, g);
+    });
+
+    testWidgets("a chat that cannot connect for want of the session says the session's own reason", (WidgetTester tester) async {
+      final server = Server();
+      server.sessionAnswer = () async => jsonResponse(<String, Object?>{'error': 'Unknown key', 'code': 'invalid_key'}, 401);
+      final c = Connector();
+      final g = makeApp(tester, server, connector: c);
+      g.chat.open();
+      await tester.pump();
+      await tester.pump();
+      expect(g.chat.connected, isFalse);
+      expect(g.chat.error, 'Publishable key was rejected. Check it against Embed & Widgets in the dashboard.');
+      expect(c.sockets, isEmpty);
+      g.chat.close();
+      await finish(tester, g);
+    });
   });
 
   group('the calls a user books', () {
@@ -617,6 +1122,149 @@ void main() {
       await expectLater(g.scheduledCalls(),
           throwsA(isA<GraineException>().having((GraineException e) => e.code, 'code', GraineErrorCode.invalidKey)));
       expect(server.bodies('/api/embed/calls/list'), isEmpty);
+      await finish(tester, g);
+    });
+  });
+
+  group('workflows the app starts (0.14.4)', () {
+    const route = '/api/embed/workflows/start';
+    final run = <String, Object?>{
+      'runId': 'oex_2c9e8f1a7b3d4c5e6f7a8b9c',
+      'workflowId': 'owf_8a1d4e7c2b90f1a2b3c4d5e6',
+      'alreadyRunning': false,
+    };
+    Matcher refused(GraineErrorCode code) =>
+        throwsA(isA<GraineException>().having((GraineException e) => e.code, 'code', code));
+
+    testWidgets('the run is started for the identified user — nobody identified is refused, nothing asked',
+        (WidgetTester tester) async {
+      final server = Server();
+      server.routes[route] = (Map<String, Object?> _) => jsonResponse(run, 201);
+      final g = makeApp(tester, server);
+      await expectLater(g.startWorkflow('Welcome call'), refused(GraineErrorCode.identityRequired));
+      g.identify(<String, Object?>{'user_id': 'P-1'});
+      await expectLater(g.startWorkflow('Welcome call'), refused(GraineErrorCode.identityRequired),
+          reason: 'another trait is nobody for this agent');
+      expect(server.bodies(route), isEmpty);
+      g.identify(<String, Object?>{'email': 'asha@example.com', 'name': 'Asha'});
+      final started = await g.startWorkflow('  Welcome call ', data: <String, Object?>{'plan': 'gold', 'seats': 3, 'trial': true});
+      expect(started, const GraineWorkflowRun(runId: 'oex_2c9e8f1a7b3d4c5e6f7a8b9c', workflowId: 'owf_8a1d4e7c2b90f1a2b3c4d5e6'));
+      final body = server.bodies(route).single;
+      expect(body['identity'], <String, Object?>{'value': 'asha@example.com'});
+      expect(body['installId'], testInstallId);
+      expect(body['publishableKey'], 'pk_test_1');
+      expect(body['workflow'], 'Welcome call');
+      expect(body['data'], <String, Object?>{'plan': 'gold', 'seats': 3, 'trial': true});
+      expect(Workflows.isIdempotencyKey(body['idempotencyKey']! as String), isTrue, reason: 'every call carries a key');
+      await finish(tester, g);
+    });
+
+    testWidgets('a forged id never leaves the device; what could never be kept is left out; twelve at most',
+        (WidgetTester tester) async {
+      final server = Server();
+      server.routes[route] = (Map<String, Object?> _) => jsonResponse(run, 201);
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      await g.startWorkflow('Welcome call', data: <String, Object?>{
+        'user_id': 'someone-else', 'user_field': 'email', 'reference_id': 'ref-forged', 'graine_user_key': 'u1_x',
+        'mobile_number': '+15550000002', 'email': 'x@evil.example', 'fields': 'x',
+        'plan': 'gold', 'long': 'x' * 201, 'emoji': '🙂' * 200, 'list': <int>[1], 'nested': <String, int>{'a': 1},
+        'nothing': null, 'nan': double.nan, 'bad name': 'x',
+      });
+      final body = server.bodies(route).single;
+      expect(body['identity'], <String, Object?>{'value': 'asha@example.com'}, reason: 'the identity, untouched by data');
+      expect((body['data']! as Map<String, Object?>).keys.toSet(), <String>{'plan', 'emoji'},
+          reason: 'an emoji is one character, as Graine counts');
+      final many = <String, Object?>{'list': <int>[1], for (var i = 0; i < 15; i++) 'f$i': i};
+      expect(Workflows.data(many).keys.toList(), <String>[for (var i = 0; i < 12; i++) 'f$i']);
+      await finish(tester, g);
+    });
+
+    testWidgets('a workflow name is needed and a key must be one — refused before anything is asked',
+        (WidgetTester tester) async {
+      final server = Server();
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      for (final bad in <String>['', '   ', 'w' * 121]) {
+        await expectLater(g.startWorkflow(bad), refused(GraineErrorCode.invalidRequest));
+      }
+      for (final bad in <String>['short', 'has a space', 'k' * 129]) {
+        await expectLater(g.startWorkflow('Welcome call', idempotencyKey: bad), refused(GraineErrorCode.invalidRequest));
+      }
+      expect(server.bodies(route), isEmpty);
+      expect(Workflows.name('w' * 120), isNotNull);
+      await finish(tester, g);
+    });
+
+    testWidgets('no answer is asked once more with the same key; a refusal never', (WidgetTester tester) async {
+      final server = Server();
+      var asked = 0;
+      server.routes[route] = (Map<String, Object?> _) {
+        asked++;
+        if (asked == 1) throw http.ClientException('connection reset');
+        return jsonResponse(run);
+      };
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      final starting = g.startWorkflow('Welcome call');
+      await tester.pump();
+      expect(server.bodies(route), hasLength(1), reason: 'the first ask went, and got no answer');
+      await tester.pump(const Duration(seconds: 1));
+      final started = await starting;
+      expect(started.runId, 'oex_2c9e8f1a7b3d4c5e6f7a8b9c');
+      final keys = server.bodies(route).map((Map<String, Object?> b) => b['idempotencyKey']).toList();
+      expect(keys, hasLength(2));
+      expect(keys.first, keys.last, reason: 'the same key: Graine answers the start it made');
+
+      server.routes[route] = (Map<String, Object?> _) => throw http.ClientException('connection reset');
+      final before = server.bodies(route).length;
+      final failing = expectLater(g.startWorkflow('Welcome call', idempotencyKey: 'order-1042:welcome'),
+          refused(GraineErrorCode.network));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 1));
+      await failing;
+      expect(server.bodies(route).skip(before).map((Map<String, Object?> b) => b['idempotencyKey']),
+          <String>['order-1042:welcome', 'order-1042:welcome'], reason: 'once more, and no more');
+
+      server.routes[route] = (Map<String, Object?> _) =>
+          jsonResponse(<String, Object?>{'error': "This workspace can't start workflows right now.", 'code': 'unavailable'}, 503);
+      final beforeRefusal = server.bodies(route).length;
+      await expectLater(g.startWorkflow('Welcome call'), refused(GraineErrorCode.unavailable));
+      expect(server.bodies(route).length - beforeRefusal, 1, reason: 'Graine answered: not asked again');
+      await finish(tester, g);
+    });
+
+    testWidgets("Graine's refusals arrive as their codes, with the sentence and Retry-After", (WidgetTester tester) async {
+      final server = Server();
+      final g = makeApp(tester, server);
+      g.identify(<String, Object?>{'email': 'asha@example.com'});
+      for (final (status, word, code) in <(int, String, GraineErrorCode)>[
+        (403, 'not_allowed', GraineErrorCode.notAllowed),
+        (403, 'not_verified', GraineErrorCode.notVerified),
+        (400, 'invalid_request', GraineErrorCode.invalidRequest),
+        (503, 'unavailable', GraineErrorCode.unavailable),
+      ]) {
+        server.routes[route] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{'error': 'said $word', 'code': word}, status);
+        await expectLater(
+            g.startWorkflow('Welcome call'),
+            throwsA(isA<GraineException>()
+                .having((GraineException e) => e.code, 'code', code)
+                .having((GraineException e) => e.message, 'message', 'said $word')));
+      }
+      server.routes[route] = (Map<String, Object?> _) => http.Response(
+          jsonEncode(<String, Object?>{'error': 'Too many workflows started from this device in the last hour.', 'code': 'rate_limited'}),
+          429,
+          headers: const <String, String>{'retry-after': '600'});
+      await expectLater(
+          g.startWorkflow('Welcome call'),
+          throwsA(isA<GraineException>()
+              .having((GraineException e) => e.code, 'code', GraineErrorCode.rateLimited)
+              .having((GraineException e) => e.retryAfterSeconds, 'retryAfterSeconds', 600)));
+      server.routes[route] = (Map<String, Object?> _) => jsonResponse(<String, Object?>{'workflowId': 'owf_1'}, 201);
+      await expectLater(g.startWorkflow('Welcome call'), refused(GraineErrorCode.unknown));
+      expect(Workflows.runFrom(<String, Object?>{'run_id': 'oex_1', 'workflow_id': 'owf_1', 'already_running': true}),
+          const GraineWorkflowRun(runId: 'oex_1', workflowId: 'owf_1', alreadyRunning: true));
+      expect(GraineErrorCode.fromWire('not_verified'), GraineErrorCode.notVerified);
       await finish(tester, g);
     });
   });
@@ -867,6 +1515,35 @@ void main() {
       expect((event['event']! as Map<String, Object?>)['name'], 'component_dismissed');
       expect((event['event']! as Map<String, Object?>)['quiet'], isTrue);
       expect(s.sent[s.sent.length - 2]['type'], 'app_context', reason: 'the screen goes first: the event is about it');
+      await finish(tester, g);
+    });
+
+    testWidgets('reportEvent reaches the live chat, its pacing keys at the event\'s own level (0.14.4)',
+        (WidgetTester tester) async {
+      final c = Connector();
+      final g = makeApp(tester, Server(), connector: c);
+      final s = await connected(tester, g, c);
+      g.reportEvent('  ');
+      expect(s.sent.where((Map<String, Object?> m) => m['type'] == 'app_event'), isEmpty, reason: 'an empty name is ignored');
+      g.reportEvent(' reminder_opened ',
+          detail: 'The customer came from the breakfast reminder',
+          data: const <String, Object?>{'cooldown_seconds': 0, 'max_per_session': 5, 'quiet': false});
+      final event = s.sent.last['event']! as Map<String, Object?>;
+      expect(s.sent.last['type'], 'app_event');
+      expect(event['name'], 'reminder_opened');
+      expect(event['detail'], 'The customer came from the breakfast reminder');
+      expect(event['cooldown_seconds'], 0);
+      expect(event['max_per_session'], 5);
+      expect(event['quiet'], isFalse);
+      expect(event.containsKey('data'), isFalse, reason: 'nothing else was said');
+      // A data key is data: it never renames the event, nor replaces its detail.
+      g.reportEvent('medication_due',
+          detail: 'The 8 pm dose is due.', data: const <String, Object?>{'name': 'Metformin', 'detail': 'x', 'dose_mg': 500});
+      expect(s.sent.last['event'], <String, Object?>{
+        'name': 'medication_due',
+        'detail': 'The 8 pm dose is due.',
+        'data': <String, Object?>{'name': 'Metformin', 'detail': 'x', 'dose_mg': 500},
+      });
       await finish(tester, g);
     });
 

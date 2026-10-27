@@ -263,10 +263,56 @@ void main() {
       expect(EmbedRefusal.of(204, const <String, Object?>{}), isNull);
     });
 
+    // 0.14.4 — the docs' table: a gateway in front of Graine that failed or timed out is an outage.
+    test('502 and 504 with no code are unavailable, like 503; 500 stays unknown; a code said is the code', () {
+      for (final status in <int>[502, 503, 504]) {
+        final r = EmbedRefusal.of(status, const <String, Object?>{})!;
+        expect(r.code, GraineErrorCode.unavailable, reason: '$status');
+        expect(r.codeName, isNull, reason: 'Graine said none');
+        expect(r.statusCode, status);
+      }
+      expect(EmbedRefusal.of(500, const <String, Object?>{})!.code, GraineErrorCode.unknown);
+      expect(EmbedRefusal.of(504, const <String, Object?>{'error': 'Took too long.'})!.message, 'Took too long.');
+      expect(EmbedRefusal.of(502, const <String, Object?>{'error': 'Slow down.', 'code': 'rate_limited'})!.code,
+          GraineErrorCode.rateLimited);
+    });
+
+    // 0.14.4 review — one rule for a refusal's code on every SDK (inapp-platform-contract.md, "A refusal's code"),
+    // held to the vectors every SDK's suite runs.
+    test("a refusal's code: every vector in contract/http-status.json", () async {
+      final vectors = ((await contractJson('contract/http-status.json'))['vectors']! as List<Object?>).cast<Map<String, Object?>>();
+      expect(vectors, isNotEmpty);
+      for (final v in vectors) {
+        final status = (v['status']! as num).toInt();
+        // The body as the SDK reads an answer's bytes: JSON, and an object or nothing.
+        final body = Js.asMap(jsonDecode(jsonEncode(v['body']))) ?? <String, Object?>{};
+        final r = EmbedRefusal.of(status, body)!;
+        final word = r.code == GraineErrorCode.unknown ? (r.codeName ?? GraineErrorCode.unknown.wire) : r.code.wire;
+        expect(word, v['code'], reason: '${v['name']} ($status)');
+        expect(r.statusCode, status, reason: '${v['name']}');
+        if (v['raw'] != null) {
+          expect(r.codeName, isNull, reason: "${v['name']}: Graine said no code — Flutter's unknown carries no word");
+        }
+      }
+    });
+
+    test("a code that is not a string is no code: the status decides, as the contract's rule says", () {
+      expect(EmbedRefusal.of(503, const <String, Object?>{'code': 42})!.code, GraineErrorCode.unavailable);
+      expect(EmbedRefusal.of(503, const <String, Object?>{'code': 42})!.codeName, isNull);
+      expect(EmbedRefusal.of(401, const <String, Object?>{'code': true})!.code, GraineErrorCode.invalidKey);
+      expect(EmbedRefusal.of(404, const <String, Object?>{'code': <Object?>['not_found']})!.codeName, isNull);
+    });
+
     test('every code on the wire, and network and unknown', () {
       expect(<String>[for (final c in GraineErrorCode.values) c.wire], <String>[
         'invalid_key', 'origin_refused', 'rate_limited', 'invalid_request', 'identity_required', 'device_limit',
         'scheduling_off', 'too_soon', 'too_far', 'outside_window', 'too_many_pending', 'not_found', 'unavailable',
+        // startWorkflow (0.14.4).
+        'not_allowed', 'not_verified',
+        // 0.14.4 — your app and your users (APP-IDENTITY.md §2.3; app_identity_test.dart reads them from the contract).
+        'app_not_allowed', 'app_not_verified', 'identity_unverified',
+        // Server tokens, keys and the website bot check (0.14.4, sdk/contract/client-tokens.json).
+        'token_required', 'token_invalid', 'token_expired', 'token_scope', 'key_revoked', 'bot_check_failed',
         'network', 'unknown',
       ]);
       expect(GraineErrorCode.fromWire(' TOO_SOON '), GraineErrorCode.tooSoon);
@@ -449,6 +495,64 @@ void main() {
           'type': 'app_event',
           'event': <String, Object?>{'name': 'component_dismissed', 'detail': 'Closed.', 'quiet': true},
         },
+      );
+    });
+
+    // 0.14.4 review — the event's shape on every SDK (iOS ChatWire.appEventFrame; RN's AppEvent):
+    // {name, detail?, cooldown_seconds?, max_per_session?, quiet?, data?}.
+    test("an app event's name and detail are the call's own: a data key never replaces them; the pacing at the "
+        "event's level, everything else under data", () {
+      expect(
+        ChatWire.appEvent('medication_due', detail: 'The 8 pm dose is due.', data: const <String, Object?>{
+          'name': 'Metformin',
+          'detail': 'not the detail',
+          'dose_mg': 500,
+          'cooldown_seconds': 0,
+          'max_per_session': 5,
+          'quiet': false,
+        }),
+        <String, Object?>{
+          'type': 'app_event',
+          'event': <String, Object?>{
+            'name': 'medication_due',
+            'detail': 'The 8 pm dose is due.',
+            'cooldown_seconds': 0,
+            'max_per_session': 5,
+            'quiet': false,
+            'data': <String, Object?>{'name': 'Metformin', 'detail': 'not the detail', 'dose_mg': 500},
+          },
+        },
+      );
+      expect(
+        ChatWire.appEvent('reminder_opened', data: const <String, Object?>{'detail': 'from data'})['event'],
+        <String, Object?>{
+          'name': 'reminder_opened',
+          'data': <String, Object?>{'detail': 'from data'},
+        },
+        reason: 'no detail given: a data key is data, never the detail',
+      );
+      expect(
+        ChatWire.appEvent('component_dismissed', detail: 'Closed.', data: <String, Object?>{
+          'quiet': true,
+          'data': <String, Object?>{'widget_id': 'w1', 'kind': 'cards'},
+          'kind': 'not this',
+          'screen': 'plans',
+        })['event'],
+        <String, Object?>{
+          'name': 'component_dismissed',
+          'detail': 'Closed.',
+          'quiet': true,
+          'data': <String, Object?>{'widget_id': 'w1', 'kind': 'cards', 'screen': 'plans'},
+        },
+        reason: "a data map of its own is the event's data; other keys join it, never over it",
+      );
+      expect(
+        ChatWire.appEvent('x', data: <String, Object?>{'data': 'plain', 'at': DateTime.utc(2026, 10, 26), 'ratio': double.nan})['event'],
+        <String, Object?>{
+          'name': 'x',
+          'data': <String, Object?>{'data': 'plain', 'at': '2026-10-26 00:00:00.000Z', 'ratio': null},
+        },
+        reason: 'a data that is not a map is kept, under data; what JSON cannot carry is made so',
       );
     });
 

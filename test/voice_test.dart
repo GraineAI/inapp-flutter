@@ -264,6 +264,36 @@ void main() {
     await finish(tester, g);
   });
 
+  // 0.14.4 review — the event the page hears on a call is the one the chat sends: the page passes an
+  // `event` on as it is (`{name, ...rest}`, the website loader's form), so a data key never renames it.
+  testWidgets("reportEvent on a call: the event's own name and detail, the pacing at its level, the app's data under data",
+      (WidgetTester tester) async {
+    final g = app(tester);
+    final page = FakePage();
+    g.voice.attach(page);
+    await tester.pump();
+    page.say(<String, Object?>{'type': 'graine:ready'});
+    await g.voice.start();
+    page.say(<String, Object?>{'type': 'graine:call', 'connected': true, 'connecting': false});
+    g.setScreen(const GraineScreen('pharmacy'));
+    page.clear();
+    g.reportEvent('medication_due',
+        detail: 'The 8 pm dose is due.',
+        data: const <String, Object?>{'name': 'Metformin', 'detail': 'x', 'quiet': true, 'dose_mg': 500});
+    final sent = page.posted.where((Map<String, Object?> m) => m['type'] == 'graine:app-event').single;
+    expect(sent['event'], <String, Object?>{
+      'name': 'medication_due',
+      'detail': 'The 8 pm dose is due.',
+      'quiet': true,
+      'data': <String, Object?>{'name': 'Metformin', 'detail': 'x', 'dose_mg': 500},
+    });
+    expect(sent.keys.toSet(), <String>{'type', 'event'}, reason: 'nothing beside it a page could spread over the name');
+    expect(page.types.indexOf('graine:app-context'), lessThan(page.types.indexOf('graine:app-event')),
+        reason: 'the screen first: the event is about it');
+    page.say(<String, Object?>{'type': 'graine:ended'});
+    await finish(tester, g);
+  });
+
   // 0.14.1 — the page's levels (`graine:levels`), for a meter of your own.
   testWidgets('the levels follow the page while a call is live, the microphone 0 while muted, both 0 once it is over',
       (WidgetTester tester) async {

@@ -1,4 +1,6 @@
+import 'app_identity.dart';
 import 'chat_size.dart';
+import 'client_tokens.dart';
 import 'design.dart';
 import 'friction.dart';
 import 'identity.dart';
@@ -55,6 +57,8 @@ class GraineConfig {
     this.captureTaps = true,
     this.chatSize,
     this.chatCloseDelaySeconds = 15,
+    this.debugTokenMode = GraineDebugTokenMode.automatic,
+    this.tokenProvider,
   });
 
   /// "https://www.graine.ai" unless self-hosted.
@@ -134,6 +138,40 @@ class GraineConfig {
   /// continues from Graine's history, with no new welcome). 15 by default; 0
   /// closes it at once; held to 0–300 (a value that is not a number is 15).
   final num chatCloseDelaySeconds;
+
+  /// DEVELOPMENT MODE (0.14.4): whether this build sends a debug token
+  /// instead of proving it is your app with App Attest or Play Integrity —
+  /// which a simulator, an emulator or a sideloaded build cannot pass.
+  /// [GraineDebugTokenMode.automatic] (the default): a debug build
+  /// (`kDebugMode`) does, and logs the token once per install so you can
+  /// register it under Agent → Embed & Widgets → Install → Development →
+  /// Debug tokens; a release build never creates, logs or sends one.
+  /// [GraineDebugTokenMode.always] opts a release build in (an internal QA
+  /// build); [GraineDebugTokenMode.never] makes a debug build prove itself
+  /// like a release one. Read the token with `GraineInApp.debugToken`.
+  final GraineDebugTokenMode debugTokenMode;
+
+  /// SERVER TOKENS (optional — the strongest mode): fetches a fresh token from
+  /// YOUR server, which mints it for the signed-in user with
+  /// `POST /v2/client-tokens` and your secret API key:
+  ///
+  ///     tokenProvider: () => backend.graineToken(),   // your server's token for the signed-in user, or null
+  ///
+  /// Asked at start, again shortly before the token expires (in the
+  /// background, with a little jitter, and with backoff after a failure),
+  /// when a call rings, when `identify()` names another user or nobody (the
+  /// token held is let go of at once — it named the user before — and the
+  /// sign-out still carries theirs) and when Graine refuses a token — one
+  /// question at a time, however many requests wait for it. It is never given anything:
+  /// your server knows the user from its own session. Answer null when no
+  /// token can be had right now; a throw, or no answer within 15 seconds,
+  /// counts as null. Every request to Graine then carries the newest token,
+  /// and so do the requests the engine page and the native call engine make.
+  /// A token that expires never ends a live chat or call — only a new
+  /// conversation waits (at most 10 seconds) for a fresh one. Needed once the
+  /// agent's "Require server tokens" is enforced; null, the default, sends
+  /// none and changes nothing. New in 0.14.4.
+  final Future<String?> Function()? tokenProvider;
 }
 
 /// [GraineConfig.chatCloseDelaySeconds], read: the default, the bounds, and
@@ -338,6 +376,54 @@ enum GraineErrorCode {
   tooManyPending('too_many_pending'),
   notFound('not_found'),
   unavailable('unavailable'),
+
+  /// `startWorkflow`: no such workflow, "Your app can start this" is off for it, or it isn't published.
+  notAllowed('not_allowed'),
+
+  /// `startWorkflow`: this device isn't one of the user's signed-in devices, or the agent requires a verified user.
+  notVerified('not_verified'),
+
+  /// "Only my apps" is on and this app is not one of the agent's apps (its
+  /// bundle ID and Team ID, or package and signing certificate, are not
+  /// listed). Never retried.
+  appNotAllowed('app_not_allowed'),
+
+  /// "Require a verified app" is enforced and this install holds no valid
+  /// proof ([GraineException.reason] says why). The SDK proves the app and
+  /// retries once before it reports this.
+  appNotVerified('app_not_verified'),
+
+  /// "Require verified users" is enforced and the identity sent is not proven
+  /// by an identity token. The SDK asks `identityTokenRefresher` and retries
+  /// once before it reports this.
+  identityUnverified('identity_unverified'),
+
+  /// The agent requires a server token and none came with the request: set
+  /// [GraineConfig.tokenProvider]. The SDK has already asked the provider
+  /// again and sent the request once more. New in 0.14.4.
+  tokenRequired('token_required'),
+
+  /// The server token could not be checked — `GraineException.reason` says
+  /// why: `malformed`, `signature`, `unknown_key`, `issuer` or
+  /// `not_yet_valid`. Already asked for again and retried once. New in 0.14.4.
+  tokenInvalid('token_invalid'),
+
+  /// The server token expired, and a fresh one did not come in time (already
+  /// asked for again and retried once). New in 0.14.4.
+  tokenExpired('token_expired'),
+
+  /// The server token does not allow this — `GraineException.reason`: `agent`
+  /// (it is another agent's), `user` (another user's) or `scope` (it lacks the
+  /// scope this needs). Never retried. New in 0.14.4.
+  tokenScope('token_scope'),
+
+  /// This publishable key was revoked: ship the agent's new key (Agent →
+  /// Embed & Widgets → Keys). Never retried. New in 0.14.4.
+  keyRevoked('key_revoked'),
+
+  /// A website's bot check did not pass. Apps never see it: it applies only
+  /// to websites. New in 0.14.4.
+  botCheckFailed('bot_check_failed'),
   network('network'),
   unknown('unknown');
 
@@ -358,7 +444,8 @@ enum GraineErrorCode {
 /// A refusal from one of the SDK's routes: `{ error, code }`, with the
 /// sentence written for whoever has to act on it.
 class EmbedRefusal {
-  const EmbedRefusal(this.message, {required this.code, this.codeName, this.statusCode, this.retryAfterSeconds});
+  const EmbedRefusal(this.message,
+      {required this.code, this.codeName, this.statusCode, this.retryAfterSeconds, this.reason});
 
   final String message;
 
@@ -373,20 +460,37 @@ class EmbedRefusal {
   /// How long to wait before asking again, from `Retry-After`.
   final int? retryAfterSeconds;
 
+  /// The finer reason some refusals carry (`reason`), when Graine gave one:
+  /// with [GraineErrorCode.appNotVerified] `missing`, `expired`, `invalid`,
+  /// `debug_token_unknown` or `debug_token_expired`; with the server-token
+  /// codes, which part failed (`scope`, `user`, `agent`, `signature`,
+  /// `unknown_key`, …). Null when none was given.
+  final String? reason;
+
   /// Null for a 2xx. [retryAfter] is the response's `Retry-After` header.
+  ///
+  /// A REFUSAL'S CODE — one rule on every Graine SDK (inapp-platform-contract.md,
+  /// "A refusal's code"; the vectors in contract/http-status.json): a body's
+  /// non-blank string `code` wins, trimmed — one this build does not know is
+  /// [GraineErrorCode.unknown] with its word in [codeName]. Otherwise the
+  /// status decides: 400 and 422 invalidRequest, 401 invalidKey, 403
+  /// originRefused, 404 notFound, 429 rateLimited, 502, 503, 504 and 520–524
+  /// unavailable (a gateway or the CDN in front of Graine that could not reach
+  /// it or gave up waiting, or Graine itself down), anything else unknown.
   static EmbedRefusal? of(int status, Map<String, Object?> body, {String? retryAfter}) {
     if (status >= 200 && status <= 299) return null;
     final said = Js.strOrEmpty(body['error']).trim();
-    final rawCode = Js.strOrEmpty(body['code']).trim();
+    final sent = body['code'];
+    final rawCode = sent is String ? sent.trim() : '';
     final code = rawCode.isNotEmpty
         ? GraineErrorCode.fromWire(rawCode)
         : switch (status) {
-            400 => GraineErrorCode.invalidRequest,
+            400 || 422 => GraineErrorCode.invalidRequest,
             401 => GraineErrorCode.invalidKey,
             403 => GraineErrorCode.originRefused,
             404 => GraineErrorCode.notFound,
             429 => GraineErrorCode.rateLimited,
-            503 => GraineErrorCode.unavailable,
+            502 || 503 || 504 || (>= 520 && <= 524) => GraineErrorCode.unavailable,
             _ => GraineErrorCode.unknown,
           };
     final wait = int.tryParse((retryAfter ?? '').trim());
@@ -395,13 +499,29 @@ class EmbedRefusal {
       GraineErrorCode.originRefused => 'This agent does not accept connections from a mobile app yet. Add "app://" to '
           'its Allowed domains in the dashboard, under Embed & Widgets.',
       GraineErrorCode.rateLimited => said.isEmpty ? 'Too many requests. Try again in a moment.' : said,
+      GraineErrorCode.appNotAllowed => said.isNotEmpty
+          ? said
+          : 'This app is not one of the apps this agent accepts ("Only my apps" is on). Add its bundle ID and '
+              'Team ID, or its package name and signing certificate, under Agent → Embed & Widgets → Install.',
+      GraineErrorCode.appNotVerified => said.isNotEmpty
+          ? said
+          : 'This build could not prove it is your app ("Require a verified app" is on). A debug build sends a '
+              'debug token instead: register it under Agent → Embed & Widgets → Install → Development.',
+      GraineErrorCode.identityUnverified => said.isNotEmpty
+          ? said
+          : 'This user is not verified ("Require verified users" is on). Pass an identity token to identify() '
+              'and set identityTokenRefresher so the SDK can renew it.',
+      // Refused for the server token or the key: Graine's sentence, else the SDK's own.
+      _ when ClientTokenRules.refusals.contains(code.wire) => said.isEmpty ? ClientTokenRules.sentence(code.wire) : said,
       _ => said.isEmpty ? 'Request refused ($status)' : said,
     };
+    final reason = Js.strOrEmpty(body['reason']).trim();
     return EmbedRefusal(message,
         code: code,
         codeName: rawCode.isEmpty ? null : rawCode,
         statusCode: status,
-        retryAfterSeconds: wait == null || wait < 0 ? null : wait);
+        retryAfterSeconds: wait == null || wait < 0 ? null : wait,
+        reason: reason.isEmpty ? null : reason);
   }
 }
 
@@ -421,6 +541,7 @@ class SessionConfig {
     this.identity,
     this.memory,
     this.calls,
+    this.security,
   });
 
   final String agentId;
@@ -461,6 +582,14 @@ class SessionConfig {
 
   /// Hosted ringing and what users may book; null from an older server.
   final CallsSetting? calls;
+
+  /// The agent's two checks — "Require a verified app" and "Require verified
+  /// users" (APP-IDENTITY.md §2.1); null from an older server, which checks
+  /// neither ([securitySetting]).
+  final SecuritySetting? security;
+
+  /// [security], or what a server that does not say means: nothing checked.
+  SecuritySetting get securitySetting => security ?? SecuritySetting.none;
 
   /// [identity], or what a server that does not say means.
   IdentitySetting get identitySetting => identity ?? IdentitySetting.standard;
@@ -504,6 +633,7 @@ class SessionConfig {
       identity: IdentitySetting.fromJson(data['identity']),
       memory: MemorySetting.fromJson(data['memory']),
       calls: CallsSetting.fromJson(data['calls']),
+      security: SecuritySetting.fromJson(data['security']),
     );
   }
 
@@ -512,6 +642,19 @@ class SessionConfig {
   static String? errorFor(int status, Map<String, Object?> body) {
     if (status >= 200 && status <= 299) return null;
     final said = body['error'];
+    // Refused for the server token or the publishable key: Graine's own
+    // sentence (else the SDK's), never the allowed-domains or key one.
+    final tokenCode = ClientTokenRules.codeOf(body);
+    if (tokenCode != null && ClientTokenRules.refusals.contains(tokenCode)) {
+      final text = said == null ? '' : Js.str(said).trim();
+      return text.isEmpty ? ClientTokenRules.sentence(tokenCode) : text;
+    }
+    final code = Js.strOrEmpty(body['code']).trim();
+    if (code == GraineErrorCode.appNotAllowed.wire ||
+        code == GraineErrorCode.appNotVerified.wire ||
+        code == GraineErrorCode.identityUnverified.wire) {
+      return EmbedRefusal.of(status, body)!.message;
+    }
     if (status == 403) {
       return 'This agent does not accept connections from a mobile app yet. Add "app://" to its '
           'Allowed domains in the dashboard, under Embed & Widgets. '

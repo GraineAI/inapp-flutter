@@ -8,6 +8,20 @@ import 'package:flutter_test/flutter_test.dart';
 
 const MethodChannel deviceChannel = MethodChannel('ai.graine.inapp/device');
 
+/// The plugin's app channel (which app this is, its proofs, development mode's token).
+const MethodChannel appPlatformChannel = MethodChannel('ai.graine.inapp/app');
+
+/// The app channel as a platform without the plugin answers it: at once, with
+/// MissingPluginException — no declaration, so no `app` on any request, and no
+/// debug token. Every test file starts so (flutter_test_config.dart): under
+/// fake time a channel nobody answers would never reply, and a session would
+/// wait on it for ever.
+void noAppPlatform() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+      .setMockMethodCallHandler(appPlatformChannel, (MethodCall call) async => throw MissingPluginException());
+}
+
 /// The install id every mocked device reports.
 const String testInstallId = '3f2504e0-4f89-11d3-9a0c-0305e82c3301';
 

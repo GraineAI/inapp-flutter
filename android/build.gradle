@@ -4,7 +4,7 @@
 // with its manifest (the call screen, the microphone service, the receiver, the
 // Firebase messaging service and their permissions merge into the app from there).
 group = "ai.graine.inapp.flutter"
-version = "0.14.3"
+version = "0.14.4"
 
 buildscript {
     repositories {
@@ -89,6 +89,11 @@ dependencies {
     // com.google.firebase:firebase-messaging in android/app/build.gradle(.kts), or firebase_messaging.
     // An app without Firebase never starts the service and loads nothing of it.
     compileOnly("com.google.firebase:firebase-messaging:24.1.0")
+    // "Require a verified app": the plugin's Play Integrity request (GraineFlutterPlayIntegrity.kt) and
+    // the SDK's own (PlayIntegrity.kt, carried with the engine) are compiled against Play Integrity and need it
+    // only at run time, from the app: implementation("com.google.android.play:integrity:1.4.0") in
+    // android/app/build.gradle(.kts). An app without it is never asked to load either — both check first.
+    compileOnly("com.google.android.play:integrity:1.4.0")
     if (graineWebRtc) {
         // A prebuilt build of Google's libwebrtc whose classes live in their own package, so it never
         // collides with another copy of WebRTC in the app. Pinned exactly as the Android SDK pins it.

@@ -12,6 +12,7 @@ library;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io' show Directory, WebSocket;
+import 'dart:math' as math;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
@@ -27,6 +28,7 @@ part 'components.dart';
 part 'calls.dart';
 part 'chat_session.dart';
 part 'device.dart';
+part 'verification.dart';
 
 /// Everything the SDK reports. Every method is optional; override what you
 /// draw. Use it with `extends` or `with`.
@@ -75,7 +77,7 @@ abstract mixin class GraineListener {
 /// long to wait ([retryAfterSeconds]).
 class GraineException implements Exception {
   const GraineException(this.message,
-      {this.code = GraineErrorCode.unknown, this.codeName, this.statusCode, this.retryAfterSeconds});
+      {this.code = GraineErrorCode.unknown, this.codeName, this.statusCode, this.retryAfterSeconds, this.reason});
 
   /// The sentence Graine (or the SDK) gave — client-facing, never internal.
   final String message;
@@ -93,6 +95,15 @@ class GraineException implements Exception {
 
   /// With [GraineErrorCode.rateLimited]: how long Graine asked to be left alone.
   final int? retryAfterSeconds;
+
+  /// The finer reason some refusals carry, when Graine gave one: with
+  /// [GraineErrorCode.appNotVerified] `missing`, `expired`, `invalid`,
+  /// `debug_token_unknown` (development mode: the debug token is not
+  /// registered on the agent) or `debug_token_expired`; which part of a server
+  /// token failed — `scope`, `user` or `agent` with [GraineErrorCode.tokenScope];
+  /// `malformed`, `signature`, `unknown_key`, `issuer` or `not_yet_valid` with
+  /// [GraineErrorCode.tokenInvalid]. Null otherwise.
+  final String? reason;
 
   @override
   String toString() => message;
@@ -153,6 +164,12 @@ class GraineInApp with WidgetsBindingObserver {
     unawaited(_device.installId());
     unawaited(_device.prefs());
     unawaited(_device.timezone());
+    // Which app this is, for the declaration every request carries — and, in
+    // development mode only, this install's debug token (logged once).
+    unawaited(_group.platform.declaration());
+    if (_verifier.usesDebugToken) unawaited(_group.platform.debugToken(_device));
+    // Server tokens: nothing is asked while the app is in the background; back in front, one close to its expiry is.
+    _foregroundWatchers.add(_clientTokens.setForeground);
   }
 
   static int _wallClock() => DateTime.now().millisecondsSinceEpoch;
@@ -188,6 +205,8 @@ class GraineInApp with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(g);
     g._observing = true;
     g._adoptShared();
+    // The first server token is asked for now, before the session — a new connection, which waits for it.
+    g._clientTokens.start();
     g.loadSession();
     GraineCalls._agentsChanged();
     return g;
@@ -214,6 +233,17 @@ class GraineInApp with WidgetsBindingObserver {
   /// The agent [name] names, or null — for a name the native engine sent.
   static GraineInApp? _agentNamed(String? name) => name == null ? null : named(name);
 
+  /// The native call engine's verification for one publishable key (the calls
+  /// plugin's `verification` event): every client of that key folds it in —
+  /// what proves more than it knows, never less ([_Verifier.noteNative]).
+  static void _nativeVerification(Map<Object?, Object?> event) {
+    final key = event['publishableKey'];
+    if (key is! String || key.isEmpty) return;
+    for (final g in _process.byName.values) {
+      if (g.config.publishableKey == key) g._verifier.noteNative(event);
+    }
+  }
+
   /// Every configured agent, and [extra] if it is not one of them.
   static List<GraineInApp> _everyAgent([GraineInApp? extra]) {
     final every = _process.byName.values.toList();
@@ -227,7 +257,9 @@ class GraineInApp with WidgetsBindingObserver {
   /// agents share; without, it shares nothing and is no agent of the app's.
   /// Design faces go through [httpClient] too, are kept on disk only in
   /// [fontCacheDir] (none by default), and are registered by [fontRegistrar]
-  /// (default: Flutter's FontLoader).
+  /// (default: Flutter's FontLoader). [debugBuild] stands in for `kDebugMode`
+  /// — what development mode's automatic setting goes by — for this agent and
+  /// what it shares.
   @visibleForTesting
   static GraineInApp forTesting(GraineConfig config,
       {http.Client? httpClient,
@@ -236,8 +268,10 @@ class GraineInApp with WidgetsBindingObserver {
       String name = defaultName,
       Directory? fontCacheDir,
       Future<void> Function(String name, Uint8List bytes)? fontRegistrar,
-      GraineChatConnector? chatConnector}) {
+      GraineChatConnector? chatConnector,
+      bool? debugBuild}) {
     final group = install ? _process : _Agents();
+    if (debugBuild != null) group.debugBuild = debugBuild;
     final g = GraineInApp._(config,
         group: group,
         name: _normaliseName(name),
@@ -251,6 +285,7 @@ class GraineInApp with WidgetsBindingObserver {
       g._adoptShared();
       GraineCalls._agentsChanged();
     }
+    g._clientTokens.start();
     return g;
   }
 
@@ -380,9 +415,23 @@ class GraineInApp with WidgetsBindingObserver {
   /// One user for the whole app: every agent the app configured hears it —
   /// each keeps the trait its own Identity setting names, and a sign-out
   /// releases the device from every agent's workspace.
-  void identify(Map<String, Object?>? traits, {bool? memory}) {
+  ///
+  /// [identityToken] (0.14.4) PROVES the identity, for an agent with "Require
+  /// verified users" on: an HMAC of the identity value your server computes
+  /// with the agent's user secret, or the ID token (JWT) of your own sign-in.
+  /// It travels only inside the request's identity — never in variables,
+  /// metadata, logs or a URL — and only with the value it was given for; it
+  /// is held in memory only. Without one, the token already held is kept
+  /// while the identity is the same user, and dropped — with the pass Graine
+  /// issued for it — when another user signs in or nobody does
+  /// (`identify(null)`). [setIdentityToken] replaces it for the same user;
+  /// [identityTokenRefresher] renews it. A token over 4096 characters is not
+  /// kept.
+  void identify(Map<String, Object?>? traits, {bool? memory, String? identityToken}) {
     final group = _group;
     final next = traits == null ? null : Map<String, Object?>.of(traits);
+    // The token changes in the same step as the identity: never sent with another value.
+    _takeIdentityToken(next, identityToken);
     if (memory != null) {
       group.memory = memory;
     } else if (!deepEquals(group.traits, next)) {
@@ -398,6 +447,8 @@ class GraineInApp with WidgetsBindingObserver {
   /// [identify], for this agent alone.
   void _applyIdentify(Map<String, Object?>? traits, {bool? memory}) {
     final before = _traits;
+    // The server token of whoever was identified: their sign-out carries it, before it is let go of (below).
+    final tokenBefore = _clientTokens.newest;
     final beforeValue = _identityValueFor(before);
     _traits = traits == null ? null : Map<String, Object?>.of(traits);
     _applyTraits();
@@ -409,16 +460,33 @@ class GraineInApp with WidgetsBindingObserver {
       _memoryNow = null; // this user's own last choice applies
     }
     // Signed out — or someone else signed in without a sign-out first: the
-    // device is no longer the last user's.
-    if (before != null && (traits == null || (beforeValue != null && afterValue != null && beforeValue != afterValue))) {
-      unawaited(_signOut(before));
+    // device is no longer the last user's. Before the session names the trait
+    // that identifies users, whether other traits are someone else is not
+    // known: that is decided once it does — against who the user is THEN.
+    if (before != null && session == null) {
+      if (!deepEquals(before, _traits)) {
+        // Kept until a session arrives, however many loads that takes: one that fails must not lose it.
+        _leftBeforeSession.add((previous: before, to: _traits, token: tokenBefore));
+        unawaited(loadSession());
+      }
+    } else if (before != null && (traits == null || _anotherUser(beforeValue, afterValue))) {
+      unawaited(_signOut(before, tokenBefore));
     }
     // A chat belongs to whoever was identified when it connected — nobody to a
     // user included: their conversation is not the next identity's.
-    if (_identityKey(beforeValue) != _identityKey(afterValue)) _chat?._identityChanged();
+    if (_identityKey(beforeValue) != _identityKey(afterValue)) {
+      // The server token held was minted for the identity before: let go of, and a fresh one asked for — before a
+      // chat connects again for whoever is identified now, so its ticket waits for that one (ClientTokens.renew).
+      _clientTokens.renew();
+      _chat?._identityChanged();
+    }
+    // The user pass was issued for the last identity, not this one.
+    if (!deepEquals(before, _traits) && (session == null || beforeValue != afterValue)) _verifier.dropUserPass();
+    _verifier.resetUser();
     _announceVariables();
     _scheduleContext();
     _announceIdentity();
+    if (!deepEquals(before, _traits)) _warnIfTraitsLackIdentity();
   }
 
   /// The traits as prompt variables and `context.user` — masked, and without
@@ -427,6 +495,162 @@ class GraineInApp with WidgetsBindingObserver {
   /// arrives.
   void _applyTraits() =>
       _variables.setIdentity(Identity.withoutIdentity(_traits, session?.identitySetting.field));
+
+  // ── your app and your users (0.14.4) ───────────────────────────────────
+
+  /// The verdicts for this app and user, and what goes with them.
+  late final _Verifier _verifier = _Verifier(this);
+
+  /// REPLACE THE IDENTITY TOKEN for the user [identify] named, without
+  /// changing who they are: no sign-out, and an open chat stays open. Null
+  /// (or empty) clears it. The new token rides with the next request — and
+  /// reaches the voice page at once. For every agent the app configured.
+  void setIdentityToken(String? token) {
+    final group = _group;
+    final kept = AppIdentity.identityToken(token);
+    if (token != null && token.isNotEmpty && kept == null) _warnTokenTooLong();
+    group.identityToken = kept;
+    group.tokenTraits = kept == null || group.traits == null ? null : Map<String, Object?>.of(group.traits!);
+    for (final g in _peers) {
+      g._identityTokenChanged();
+    }
+  }
+
+  /// HOW THE SDK GETS A FRESH IDENTITY TOKEN — your function, asked (at most
+  /// once every 30 seconds, never twice at once) when Graine says the token
+  /// expired or refuses an unverified user (the request is then sent once
+  /// more with the new token), and before a conversation starts when the
+  /// token is a JWT with less than a minute left. Return the new token, or
+  /// null to keep the one held; a function that throws keeps it too. One for
+  /// the app: set on any agent, every agent uses it.
+  ///
+  ///     graine.identityTokenRefresher = () => myBackend.graineIdentityToken();
+  Future<String?> Function()? get identityTokenRefresher => _group.refresher;
+  set identityTokenRefresher(Future<String?> Function()? refresher) => _group.refresher = refresher;
+
+  /// THE VERDICTS ON THIS APP AND THIS USER, for this agent — `off` for each
+  /// check until its session says the agent makes it; then whether this app
+  /// is proven (App Attest / Play Integrity, a debug token in development
+  /// mode) and this user verified, as Graine last said, with why not.
+  ValueListenable<GraineVerification> get verification => _verifier.state;
+
+  /// PROVE THIS APP NOW — App Attest on iOS, Play Integrity on Android —
+  /// rather than as the first conversation starts: call it once the app has
+  /// launched, so a conversation under "Require a verified app" never waits
+  /// for a proof. Completes with the app's verdict ([verification]'s `app`):
+  /// at once with the pass already held when it has six hours or more left;
+  /// `off` when the agent does not check apps; in development mode, the
+  /// verdict as it stands (a debug token is not proven, it is registered).
+  Future<GraineAppVerdict> prepareAppVerification() async {
+    final s = await loadSession();
+    if (s == null) return _verifier.state.value.app;
+    return _verifier.prove(ignoreBackoff: true);
+  }
+
+  /// THIS INSTALL'S DEBUG TOKEN while development mode is on for this agent
+  /// ([GraineConfig.debugTokenMode]: a debug build by default) — the token
+  /// its requests carry instead of a proof, and the one the SDK logs once
+  /// per install for you to register under Agent → Embed & Widgets → Install
+  /// → Development → Debug tokens. Null in a release build that did not opt
+  /// in, and until it has been read from the device.
+  String? get debugToken => _verifier.debugToken;
+
+  /// The token changes in the same step as the identity (APP-IDENTITY.md
+  /// §1.3): a new one is taken with [next]; without one, the token held is
+  /// kept only while [next] is the same user, and dropped otherwise.
+  void _takeIdentityToken(Map<String, Object?>? next, String? given) {
+    final group = _group;
+    if (given != null) {
+      final kept = AppIdentity.identityToken(given);
+      if (given.isNotEmpty && kept == null) _warnTokenTooLong();
+      group.identityToken = next == null ? null : kept;
+      group.tokenTraits = next == null || kept == null ? null : next;
+    } else if (group.identityToken != null && (next == null || !_sameUser(group.tokenTraits, next))) {
+      group.identityToken = null;
+      group.tokenTraits = null;
+    }
+  }
+
+  /// Whether [a] and [b] name the same user for every agent: the same value of
+  /// each agent's identity trait — or, before every session has said which
+  /// trait that is, exactly the same traits.
+  bool _sameUser(Map<String, Object?>? a, Map<String, Object?>? b) {
+    if (deepEquals(a, b)) return true;
+    final peers = _peers;
+    if (peers.any((GraineInApp g) => g.session == null)) return false;
+    return peers.every((GraineInApp g) {
+      final field = g.session!.identitySetting.field;
+      final value = Identity.pick(a, field);
+      return value != null && value == Identity.pick(b, field);
+    });
+  }
+
+  void _warnTokenTooLong() => debugPrint('[Graine] The identity token was not kept: an identity token is at most '
+      '${AppIdentity.maxIdentityTokenLength} characters.');
+
+  /// The token changed for the same user: nothing is proven about it yet, and
+  /// the voice page hears it for the tickets it mints.
+  void _identityTokenChanged() {
+    _verifier.resetUser();
+    for (final w in List<void Function()>.of(_identityWatchers)) {
+      w();
+    }
+    // The native call engine, for the calls it places and answers.
+    GraineCalls._identityTokenChanged(this);
+  }
+
+  /// ASK THE APP FOR A FRESH IDENTITY TOKEN ([identityTokenRefresher]) — at
+  /// most once every 30 seconds, never twice at once (a caller meanwhile shares
+  /// the one asked). Completes true when a NEW token was taken. One that
+  /// throws, returns null or empty, or arrives after another user signed in
+  /// changes nothing.
+  Future<bool> _refreshIdentityToken() {
+    final group = _group;
+    final pending = group.refreshing;
+    if (pending != null) return pending;
+    final refresher = group.refresher;
+    if (refresher == null) return Future<bool>.value(false);
+    final now = _clock();
+    final last = group.refreshStartedAt;
+    if (last != null && now - last < AppIdentity.refresherIntervalMs) return Future<bool>.value(false);
+    group.refreshStartedAt = now;
+    final asked = group.traits;
+    final before = group.identityToken;
+    Future<bool> run() async {
+      String? fresh;
+      try {
+        fresh = await refresher();
+      } catch (e) {
+        debugPrint('[Graine] identityTokenRefresher failed (${e.runtimeType}); the identity token is kept as it was.');
+        return false;
+      }
+      final token = AppIdentity.identityToken(fresh);
+      final traits = group.traits;
+      if (token == null || traits == null || !deepEquals(traits, asked)) return false;
+      if (token == before) return false;
+      group.identityToken = token;
+      group.tokenTraits = Map<String, Object?>.of(traits);
+      for (final g in _peers) {
+        g._identityTokenChanged();
+      }
+      return true;
+    }
+
+    final running = run();
+    group.refreshing = running;
+    unawaited(running.whenComplete(() {
+      if (identical(group.refreshing, running)) group.refreshing = null;
+    }));
+    return running;
+  }
+
+  /// A RING ARRIVED for the agent the app calls [agentName] (APP-IDENTITY.md
+  /// §6): before the person answers, its proof is refreshed and the app is
+  /// asked for a fresh token, in the background.
+  static void _ringArrived(String? agentName) {
+    final g = _agentNamed(agentName) ?? maybeInstance;
+    g?._verifier.ring();
+  }
 
   /// Whether the current user's conversations are remembered — the same as
   /// `identify(currentTraits, memory: enabled)`. Kept on the device for them.
@@ -451,16 +675,24 @@ class GraineInApp with WidgetsBindingObserver {
   /// FORGET EVERYTHING THE AGENT REMEMBERS about the current user, for this
   /// agent's memory. Allowed only from a device that is theirs. Completes
   /// with how many memories were deleted; throws a [GraineException] —
-  /// `identityRequired` when nobody is identified, `deviceLimit` from a
-  /// device that is not theirs.
+  /// `identityRequired` when nobody is identified by the trait this agent
+  /// identifies users by (the message names it), `deviceLimit` from a device
+  /// that is not theirs, and the agent's settings' own refusal when they
+  /// could not load — `unavailable`, `network`, `invalidKey`… with Graine's
+  /// sentence (the next call asks for them again).
+  ///
+  /// Asked before the agent's settings have arrived (a screen opened at
+  /// launch), it waits for them — bounded by their request's timeout — and
+  /// only then decides: never `identityRequired` for settings on their way.
+  /// It is for the user identified when it was asked: when someone else was
+  /// identified while the settings loaded, nothing is forgotten for anyone
+  /// (`identityRequired`).
   Future<int> forgetMemory() async {
-    await _sessionOrThrow();
-    if (_identityValueFor(_traits) == null) {
-      throw const GraineException(
-          'Nobody is identified. Call identify() with the trait that identifies the user before forgetMemory().',
-          code: GraineErrorCode.identityRequired);
-    }
-    final deleted = (await _embed(_Routes.forget, const <String, Object?>{}))['deleted'];
+    final who = await _userAfterSession();
+    final value = who.value;
+    if (value == null) throw _identityRequired(who.session);
+    final deleted =
+        (await _embed(_Routes.forget, const <String, Object?>{}, identity: value, overrideIdentity: true))['deleted'];
     // The conversation is part of what was forgotten: off the screen too — only once it is gone.
     _chat?.clear();
     return deleted is num && deleted.isFinite && deleted >= 0 ? deleted.round() : 0;
@@ -468,54 +700,90 @@ class GraineInApp with WidgetsBindingObserver {
 
   /// Graine lets go of the conversation it kept for this agent and the current
   /// user, so the next chat starts fresh ([GraineChatSession.newConversation]).
-  /// Nobody identified: nothing was kept, nothing to ask.
+  /// Nobody identified: nothing was kept, nothing to ask. For the user
+  /// identified when it was asked, as [forgetMemory].
   Future<void> _letGoOfConversation() async {
-    await _sessionOrThrow();
-    if (_identityValueFor(_traits) == null) return;
-    await _embed(_Routes.newConversation, const <String, Object?>{});
+    final value = (await _userAfterSession()).value;
+    if (value == null) return;
+    await _embed(_Routes.newConversation, const <String, Object?>{}, identity: value, overrideIdentity: true);
   }
 
   /// WHAT THE AGENT REMEMBERS about the current user, newest first (at most
   /// 100), already redacted — for a "what you remember about me" screen.
   /// Only from a device that is theirs. Throws a [GraineException]:
-  /// `identityRequired` when nobody is identified, `deviceLimit` from a
-  /// device that is not theirs.
+  /// `identityRequired` when nobody is identified by the trait this agent
+  /// identifies users by (the message names it), `deviceLimit` from a device
+  /// that is not theirs, and the agent's settings' own refusal when they
+  /// could not load — `unavailable`, `network`, `invalidKey`… with Graine's
+  /// sentence (the next call asks for them again). Whether the agent
+  /// remembers anyone at all is no error: `session?.memory?.enabled`.
+  ///
+  /// Asked before the agent's settings have arrived (a screen opened at
+  /// launch), it waits for them — bounded by their request's timeout — and
+  /// only then decides: never `identityRequired` for settings on their way.
+  /// It answers only about the user identified when it was asked: when
+  /// someone else was identified while the settings loaded, it refuses
+  /// (`identityRequired`) — never another user's memories.
   Future<List<GraineMemory>> memories() async {
-    await _sessionOrThrow();
-    if (_identityValueFor(_traits) == null) {
-      throw const GraineException(
-          'Nobody is identified. Call identify() with the trait that identifies the user before memories().',
-          code: GraineErrorCode.identityRequired);
-    }
-    return GraineMemory.listFrom(await _embed(_Routes.memories, const <String, Object?>{}));
+    final who = await _userAfterSession();
+    final value = who.value;
+    if (value == null) throw _identityRequired(who.session);
+    return GraineMemory.listFrom(
+        await _embed(_Routes.memories, const <String, Object?>{}, identity: value, overrideIdentity: true));
   }
 
   /// One page of the current user's past sessions with this agent, as Graine
   /// answers it ([GraineChatSession.pastSessions] keeps them): the first, or
-  /// the one after [cursor]. Throws a [GraineException] — `identityRequired`
-  /// when nobody is identified (nothing is asked), `deviceLimit` from a
-  /// device that is not theirs.
+  /// the one after [cursor]. Waits for the session first. Throws a
+  /// [GraineException] — `identityRequired` when nobody is identified
+  /// (nothing is asked), `deviceLimit` from a device that is not theirs, the
+  /// session's own refusal when it could not load.
   Future<Map<String, Object?>> _pastSessionsPage(String? cursor) async {
-    await _sessionOrThrow();
-    if (_identityValueFor(_traits) == null) {
-      throw const GraineException(
-          'Nobody is identified. Call identify() with the trait that identifies the user before reading past sessions.',
-          code: GraineErrorCode.identityRequired);
-    }
+    final s = await _sessionOrThrow();
+    if (_identityValueFor(_traits) == null) throw _identityRequired(s);
     return _embed(_Routes.pastSessions, <String, Object?>{if (cursor != null) 'cursor': cursor});
   }
 
   /// One past session's transcript, as Graine answers it
   /// ([GraineChatSession.sessionTranscript]). Throws as [_pastSessionsPage]
-  /// does, and `notFound` for a session that is not the user's.
+  /// does, and `notFound` for a session that is not the user's. For the user
+  /// identified when it was asked, as [memories].
   Future<Map<String, Object?>> _sessionTranscript(String id) async {
-    await _sessionOrThrow();
-    if (_identityValueFor(_traits) == null) {
-      throw const GraineException(
-          'Nobody is identified. Call identify() with the trait that identifies the user before reading a transcript.',
-          code: GraineErrorCode.identityRequired);
+    final who = await _userAfterSession();
+    final value = who.value;
+    if (value == null) throw _identityRequired(who.session);
+    return _embed(_Routes.sessionTranscript, <String, Object?>{'id': id}, identity: value, overrideIdentity: true);
+  }
+
+  /// `identityRequired`'s sentence for a request whose user was replaced while
+  /// the session loaded — the same words on every Graine SDK.
+  static const String _someoneElseIdentified = "Someone else was identified while the agent's settings were loading, "
+      'so nothing was asked for the customer identified before. Ask again for the customer identified now.';
+
+  /// WHO A ONE-SHOT REQUEST IS FOR, once the session is here (it names the
+  /// trait that identifies users): the identity value of the user identified
+  /// when the request was made, read once — what the request then sends. A
+  /// request belongs to whoever was identified when it was made: when the app
+  /// identified someone else, or nobody, while the session was on its way,
+  /// nothing is asked — `identityRequired`, never an answer about the next
+  /// user, a booking in their name, or their memories forgotten. The same
+  /// user identified again (other traits, another spelling) is still them,
+  /// compared as Graine keys users; a request made with nobody identified is
+  /// for whoever is identified when it arrives. Throws the session's own
+  /// refusal when it could not load. Not for what follows whoever is
+  /// identified (the past sessions list, the upcoming calls).
+  Future<({SessionConfig session, String? value})> _userAfterSession() async {
+    final asked = _traits;
+    final s = await _sessionOrThrow();
+    final field = s.identitySetting.field;
+    final now = Identity.pick(_traits, field);
+    final wanted = Identity.pick(asked, field);
+    if (wanted != null && _userKey(field, wanted) != _userKey(field, now)) {
+      throw now == null
+          ? _identityRequired(s)
+          : const GraineException(_someoneElseIdentified, code: GraineErrorCode.identityRequired);
     }
-    return _embed(_Routes.sessionTranscript, <String, Object?>{'id': id});
+    return (session: s, value: now);
   }
 
   /// THIS INSTALL'S ID: a UUID made on the app's first launch and kept by the
@@ -544,6 +812,33 @@ class GraineInApp with WidgetsBindingObserver {
   String? _identityValueFor(Map<String, Object?>? traits) {
     final s = session;
     return s == null ? null : Identity.pick(traits, s.identitySetting.field);
+  }
+
+  /// WHY A REQUEST THAT NEEDS THE USER HAS NONE, naming the trait this agent
+  /// identifies users by — the session's Who is the user? setting, so only
+  /// once [s] has arrived: nobody identified, or traits without a usable
+  /// value of it (the usual wiring mistake: `user_id` sent to an agent that
+  /// identifies people by `customer_id`).
+  String _missingIdentity(SessionConfig s) {
+    final field = s.identitySetting.field;
+    if (_traits == null) return 'Nobody is identified. Call identify() with the customer\'s "$field" first.';
+    return 'identify() was given no usable "$field" — the trait this agent identifies customers by '
+        "(Who is the user? in the agent's memory settings). Until it is, conversations are anonymous and nothing is "
+        'remembered.';
+  }
+
+  /// `identityRequired`, in [_missingIdentity]'s words.
+  GraineException _identityRequired(SessionConfig s) =>
+      GraineException(_missingIdentity(s), code: GraineErrorCode.identityRequired);
+
+  /// ONE LINE FOR THE DEVELOPER when identify() was given traits without a
+  /// usable value of the trait this agent identifies users by — as the
+  /// session lands (only it names the trait), and as identify() does with
+  /// other traits. A sign-out is no mistake.
+  void _warnIfTraitsLackIdentity() {
+    final s = session;
+    if (s == null || _traits == null || _identityValueFor(_traits) != null) return;
+    debugPrint('[Graine] ${name == defaultName ? '' : '$name: '}${_missingIdentity(s)}');
   }
 
   /// THE IDENTITY FIELDS AS THEY STAND — for a ticket, a request, the engine
@@ -579,13 +874,69 @@ class GraineInApp with WidgetsBindingObserver {
 
   /// `identify(null)` after a user: the device is no longer theirs. Graine
   /// releases it and stops ringing it for them.
-  Future<void> _signOut(Map<String, Object?> previous) async {
+  Future<void> _signOut(Map<String, Object?> previous, [String? token]) async {
     try {
       final s = await loadSession();
       if (s == null) return;
       final value = Identity.pick(previous, s.identitySetting.field);
-      if (value == null) return;
-      await _embed(_Routes.signout, const <String, Object?>{}, identity: value, overrideIdentity: true);
+      if (value != null) await _sendSignOut(value, token: token);
+    } catch (e) {
+      debugPrint('[Graine] Sign-out could not reach Graine ($e); the device is released after 30 days unused.');
+    }
+  }
+
+  /// The users who left before the session named the trait that identifies
+  /// users — each with the traits they left for (null: a sign-out) — until a
+  /// session arrives ([_signOutWhoLeft]).
+  final List<_Left> _leftBeforeSession = <_Left>[];
+
+  /// THE USERS WHO LEFT BEFORE THE SESSION NAMED THE TRAIT that identifies
+  /// users, signed out now that [s] has — as a switch after it is: other
+  /// traits of the same user are no switch. Never the user the app has
+  /// identified by now (away and back, out and in again): the device is still
+  /// theirs, and a sign-out would stop it ringing for them. Each user once;
+  /// users compared as Graine keys them (an address in any case, a phone
+  /// number however it is written, is one user).
+  void _signOutWhoLeft(SessionConfig s) {
+    if (_leftBeforeSession.isEmpty) return;
+    final left = List<_Left>.of(_leftBeforeSession);
+    _leftBeforeSession.clear();
+    final field = s.identitySetting.field;
+    final now = _userKey(field, Identity.pick(_traits, field));
+    final signedOut = <String>{};
+    for (final l in left) {
+      final value = Identity.pick(l.previous, field);
+      final was = _userKey(field, value);
+      if (value == null || was == null || was == now) continue;
+      final to = l.to;
+      if (to != null) {
+        final next = _userKey(field, Identity.pick(to, field));
+        if (next == null || next == was) continue;
+      }
+      if (signedOut.add(was)) unawaited(_sendSignOut(value, token: l.token));
+    }
+  }
+
+  /// A raw identity value as Graine keys the user — normalised for [field]
+  /// (the value itself when it cannot be); null for none.
+  static String? _userKey(String field, String? value) =>
+      value == null ? null : (Identity.normaliseValue(field, value) ?? value);
+
+  /// Both values name a user, and not the same one as Graine keys them: an
+  /// address in any case, a phone number however it is written, is one user
+  /// — signing them out would unlink the device from the user still on it.
+  bool _anotherUser(String? a, String? b) {
+    final s = session;
+    if (s == null || a == null || b == null) return false;
+    final field = s.identitySetting.field;
+    return _userKey(field, a) != _userKey(field, b);
+  }
+
+  /// Graine releases this device from the user [value] names. Best effort.
+  Future<void> _sendSignOut(String value, {String? token}) async {
+    try {
+      await _embed(_Routes.signout, const <String, Object?>{},
+          identity: value, overrideIdentity: true, leaving: true, leaverToken: token);
     } catch (e) {
       debugPrint('[Graine] Sign-out could not reach Graine ($e); the device is released after 30 days unused.');
     }
@@ -614,13 +965,19 @@ class GraineInApp with WidgetsBindingObserver {
     return id == null ? null : _identityMessageOf(id);
   }
 
-  static Map<String, Object?> _identityMessageOf(_IdentityState id) => <String, Object?>{
-        'type': ProtocolOut.identity,
-        'value': id.value,
-        'installId': id.installId,
-        'memory': id.memory,
-        if (id.timezone != null) 'timezone': id.timezone,
-      };
+  /// The page's ticket requests carry the identity token too (APP-IDENTITY.md
+  /// §1.3): only in this message, only with the value it was given for.
+  Map<String, Object?> _identityMessageOf(_IdentityState id) {
+    final token = _verifier.tokenFor(id.value);
+    return <String, Object?>{
+      'type': ProtocolOut.identity,
+      'value': id.value,
+      'installId': id.installId,
+      'memory': id.memory,
+      if (id.timezone != null) 'timezone': id.timezone,
+      if (token != null) 'token': token,
+    };
+  }
 
   // ── requests to Graine ──────────────────────────────────────────────────
 
@@ -628,48 +985,134 @@ class GraineInApp with WidgetsBindingObserver {
 
   Uri _embedUrl(String route) => Uri.parse('${Protocol.trimTrailingSlashes(config.baseUrl)}$route');
 
-  /// ONE REQUEST TO AN SDK ROUTE ([_Routes]): the key, [body], and the identity fields
-  /// (contract §1.3) — the current user's, or [identity] with
-  /// [overrideIdentity] (a sign-out names the user who left). Throws a
-  /// [GraineException] with the contract's code on a refusal.
-  Future<Map<String, Object?>> _embed(String path, Map<String, Object?> body,
-      {String? identity, bool overrideIdentity = false}) async {
-    await _sessionOrThrow();
-    final id = await _identityState(waitForSession: false);
-    final payload = <String, Object?>{
-      'publishableKey': config.publishableKey,
-      ...body,
-      ...Identity.requestFields(
-        value: overrideIdentity ? identity : id.value,
-        installId: id.installId,
-        memory: id.memory,
-        timezone: id.timezone,
-      ),
-    };
-    final http.Response res;
+  /// THIS AGENT'S SERVER TOKENS (CLIENT-TOKENS.md §2.3): from
+  /// [GraineConfig.tokenProvider], on this agent's clock. Without a provider
+  /// none are in play and no request carries one. Every request the Dart side
+  /// makes to Graine asks it for the token it carries; the engine page and the
+  /// native call engine are handed each new one.
+  late final ClientTokens _clientTokens = ClientTokens(config.tokenProvider, clock: _clock);
+
+  /// ONE POST TO AN SDK ROUTE, as JSON — with the server token when tokens are
+  /// in play (CLIENT-TOKENS.md §2.2): a new connection (the session, a
+  /// ticket) waits for a usable token first, and a refusal a fresh token can
+  /// lift goes once more with a different one. Without a provider the body
+  /// goes exactly as it is. A network error or a timeout is thrown as it is.
+  Future<http.Response> _postEmbed(String route, Map<String, Object?> payload,
+          {required bool newConnection, required Duration timeout, bool pinned = false, String? pinnedToken}) =>
+      ClientTokenWire.post<http.Response>(
+        _clientTokens,
+        payload,
+        newConnection: newConnection,
+        pinned: pinned,
+        pinnedToken: pinnedToken,
+        send: (Map<String, Object?> body) =>
+            _http.post(_embedUrl(route), headers: _json, body: jsonEncode(body)).timeout(timeout),
+        refreshable: (http.Response res) =>
+            (res.statusCode < 200 || res.statusCode > 299) && ClientTokenRules.isRefreshable(res.statusCode, _bodyOf(res)),
+      );
+
+  /// An answer's body as JSON — UTF-8 whatever the header says (a Devanagari
+  /// variable must survive); empty when it is not a JSON object.
+  static Map<String, Object?> _bodyOf(http.Response res) {
     try {
-      res = await _http
-          .post(_embedUrl(path), headers: _json, body: jsonEncode(payload))
-          .timeout(const Duration(seconds: 20));
-    } catch (e) {
-      throw GraineException('Could not reach Graine: $e', code: GraineErrorCode.network);
-    }
-    Map<String, Object?> data;
-    try {
-      data = Js.asMap(jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true))) ?? <String, Object?>{};
+      return Js.asMap(jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true))) ?? <String, Object?>{};
     } catch (_) {
-      data = <String, Object?>{};
+      return <String, Object?>{};
     }
-    final refusal = EmbedRefusal.of(res.statusCode, data, retryAfter: res.headers['retry-after']);
-    if (refusal != null) throw _refused(refusal);
-    return data;
+  }
+
+  /// ONE REQUEST TO AN SDK ROUTE ([_Routes]): the key, [body], and the identity fields
+  /// (contract §1.3) — the current user's, or [identity] with [overrideIdentity]: the user a
+  /// request was asked for (memories, forget, a booking, a transcript — still the current user,
+  /// [_userAfterSession] checked) or, with [leaving], the user a sign-out names: the user who
+  /// left, so nothing of theirs rides with it — no token, no user pass, no refresh. A token and a
+  /// pass only ever ride with the value they were issued for (_Verifier.tokenFor, userPassFor). Throws a
+  /// [GraineException] with the contract's code on a refusal.
+  ///
+  /// Every request also carries the app's declaration (APP-IDENTITY.md §1.1)
+  /// and, inside the identity, its token and user pass. Refused for want of a
+  /// proof (`app_not_verified`), the app proves itself and the request is
+  /// sent once more; refused for an unverified user (`identity_unverified`),
+  /// [identityTokenRefresher] is asked for a new token and the request is
+  /// sent once more with it.
+  ///
+  /// Inside that door, the server token, with tokens in play
+  /// (CLIENT-TOKENS.md §2.2; [_postEmbed]).
+  Future<Map<String, Object?>> _embed(String path, Map<String, Object?> body,
+      {String? identity, bool overrideIdentity = false, bool leaving = false, String? leaverToken}) async {
+    await _sessionOrThrow();
+    var proved = false;
+    var refreshed = false;
+    while (true) {
+      final id = await _identityState(waitForSession: false);
+      final value = overrideIdentity ? identity : id.value;
+      final payload = <String, Object?>{
+        'publishableKey': config.publishableKey,
+        ...body,
+        ...Identity.requestFields(
+          value: value,
+          // A sign-out names the user who left: nothing of theirs rides with it.
+          token: leaving ? null : _verifier.tokenFor(value),
+          pass: leaving ? null : _verifier.userPassFor(value),
+          installId: id.installId,
+          memory: id.memory,
+          timezone: id.timezone,
+        ),
+        ...await _verifier.appEntry(),
+      };
+      final http.Response res;
+      try {
+        // Inside the door: the server token, with tokens in play (refused for it, once more with a fresh one).
+        // A sign-out carries the server token of the user who left ([leaverToken]), never the next one's.
+        res = await _postEmbed(path, payload,
+            newConnection: false, timeout: const Duration(seconds: 20), pinned: leaving, pinnedToken: leaverToken);
+      } catch (e) {
+        throw GraineException('Could not reach Graine: $e', code: GraineErrorCode.network);
+      }
+      final data = _bodyOf(res);
+      final refusal = EmbedRefusal.of(res.statusCode, data, retryAfter: res.headers['retry-after']);
+      if (refusal == null) return data;
+      if (await _answerRefusal(refusal, proved: proved, refreshed: refreshed, mayRefresh: !leaving)) {
+        if (refusal.code == GraineErrorCode.appNotVerified) proved = true;
+        if (refusal.code == GraineErrorCode.identityUnverified) refreshed = true;
+        continue;
+      }
+      throw _refused(refusal);
+    }
+  }
+
+  /// WHETHER A REFUSED REQUEST IS SENT ONCE MORE (APP-IDENTITY.md §2.3):
+  /// `app_not_verified` — after the app proved itself, when that earned a new
+  /// pass (never in development mode, which has no proof to make);
+  /// `identity_unverified` — when [identityTokenRefresher] gave a new token
+  /// (waited for at most 10 s). `app_not_allowed` and everything else: no.
+  Future<bool> _answerRefusal(EmbedRefusal r,
+      {required bool proved, required bool refreshed, required bool mayRefresh}) async {
+    _verifier.noteRefusal(r);
+    if (r.code == GraineErrorCode.appNotVerified && !proved && await _verifier.canProve()) {
+      final before = _verifier.livePass;
+      await _verifier.prove(ignorePass: true, ignoreBackoff: true);
+      final after = _verifier.livePass;
+      return after != null && after != before;
+    }
+    if (r.code == GraineErrorCode.identityUnverified && !refreshed && mayRefresh) {
+      return _refreshIdentityToken()
+          .timeout(const Duration(milliseconds: AppIdentity.waitMs), onTimeout: () => false);
+    }
+    return false;
   }
 
   static GraineException _refused(EmbedRefusal r) => GraineException(r.message,
-      code: r.code, codeName: r.codeName, statusCode: r.statusCode, retryAfterSeconds: r.retryAfterSeconds);
+      code: r.code,
+      codeName: r.codeName,
+      statusCode: r.statusCode,
+      retryAfterSeconds: r.retryAfterSeconds,
+      reason: r.reason);
 
   /// The session, or the reason there is none: the session's own refusal
-  /// (a key Graine rejected, say), else Graine out of reach.
+  /// (a key Graine rejected, say), else Graine out of reach. Waits for one on
+  /// its way (its request's timeout bounds the wait); after one that failed,
+  /// asks again.
   Future<SessionConfig> _sessionOrThrow() async {
     final s = await loadSession();
     if (s != null) return s;
@@ -683,37 +1126,79 @@ class GraineInApp with WidgetsBindingObserver {
 
   /// A ticket for a socket: `{ticket, wsUrl}`, or null — no gateway on this
   /// deployment (503), or no answer — and the socket goes direct.
+  ///
+  /// A conversation starts here (APP-IDENTITY.md): a JWT identity token about
+  /// to expire is renewed first, and under "Require a verified app" a proof on
+  /// its way is waited for (each at most 10 s). The answer's `verification`
+  /// updates [verification] and keeps the passes it carries. A refusal for the
+  /// app or the user is answered as [_embed] answers it — and when it stands,
+  /// it is thrown: the direct socket never goes round the agent's own rule.
+  /// A new connection: with tokens in play it carries a usable server token,
+  /// waiting for one first; refused for the token or the publishable key
+  /// ([ClientTokenRules.refusals]) it throws that refusal — final for the
+  /// conversation, like a refusal for the app or the user.
   Future<({String ticket, String wsUrl})?> _ticket(String mode, Map<String, String> variables, _IdentityState id,
       {String? callId}) async {
-    try {
-      final metadata = Protocol.ticketMetadata(variables);
-      final res = await _http
-          .post(_embedUrl(_Routes.ticket),
-              headers: _json,
-              body: jsonEncode(<String, Object?>{
-                'publishableKey': config.publishableKey,
-                'mode': mode,
-                if (metadata != null) 'metadata': metadata,
-                ...Identity.requestFields(
-                  value: id.value,
-                  installId: id.installId,
-                  memory: id.memory,
-                  timezone: id.timezone,
-                  callId: callId,
-                ),
-              }))
-          .timeout(const Duration(seconds: 15));
-      if (res.statusCode < 200 || res.statusCode > 299) return null;
-      final data = Js.asMap(jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true)));
-      final ticket = data?['ticket'];
-      final url = data?['wsUrl'];
-      if (ticket is String && ticket.isNotEmpty && url is String && url.isNotEmpty) {
-        return (ticket: ticket, wsUrl: url);
+    await _verifier.beforeConversation();
+    var proved = false;
+    var refreshed = false;
+    var who = id;
+    while (true) {
+      final http.Response res;
+      try {
+        final metadata = Protocol.ticketMetadata(variables);
+        // Inside the door: a new connection's server token (a usable one, waited for first).
+        res = await _postEmbed(
+            _Routes.ticket,
+            <String, Object?>{
+              'publishableKey': config.publishableKey,
+              'mode': mode,
+              if (metadata != null) 'metadata': metadata,
+              ...Identity.requestFields(
+                value: who.value,
+                token: _verifier.tokenFor(who.value),
+                pass: _verifier.userPassFor(who.value),
+                installId: who.installId,
+                memory: who.memory,
+                timezone: who.timezone,
+                callId: callId,
+              ),
+              ...await _verifier.appEntry(),
+            },
+            newConnection: true,
+            timeout: const Duration(seconds: 15));
+      } catch (_) {
+        // No ticket is not an error: the direct socket carries the chat.
+        return null;
       }
-    } catch (_) {
-      // No ticket is not an error: the direct socket carries the chat.
+      final data = _bodyOf(res);
+      if (res.statusCode >= 200 && res.statusCode <= 299) {
+        _verifier.noteVerification(data['verification'], value: who.value);
+        final ticket = data['ticket'];
+        final url = data['wsUrl'];
+        if (ticket is String && ticket.isNotEmpty && url is String && url.isNotEmpty) {
+          return (ticket: ticket, wsUrl: url);
+        }
+        return null;
+      }
+      final refusal = EmbedRefusal.of(res.statusCode, data, retryAfter: res.headers['retry-after']);
+      // Refused for the server token or the key: final for the conversation — the direct socket is no other way past it.
+      if (refusal != null && ClientTokenRules.refusals.contains(refusal.code.wire)) throw _refused(refusal);
+      final code = refusal?.code;
+      if (refusal == null ||
+          (code != GraineErrorCode.appNotAllowed &&
+              code != GraineErrorCode.appNotVerified &&
+              code != GraineErrorCode.identityUnverified)) {
+        return null;
+      }
+      if (await _answerRefusal(refusal, proved: proved, refreshed: refreshed, mayRefresh: true)) {
+        if (code == GraineErrorCode.appNotVerified) proved = true;
+        if (code == GraineErrorCode.identityUnverified) refreshed = true;
+        who = await _identityState(waitForSession: false);
+        continue;
+      }
+      throw _refused(refusal);
     }
-    return null;
   }
 
   // ── calls the user books ────────────────────────────────────────────────
@@ -728,24 +1213,31 @@ class GraineInApp with WidgetsBindingObserver {
   /// "Call me" button of the app's own: the agent lets users book, Graine
   /// rings this phone (the workspace set up in-app calling for this
   /// platform), and the user is identified ([identify] with the agent's
-  /// identity trait). False until the session has arrived.
-  /// [bookingListenable] redraws a widget when it changes;
-  /// `GraineBooking.show` opens the SDK's own booking sheet.
+  /// identity trait). False until the session has arrived — read it where
+  /// [bookingListenable] redraws, not once at launch: it fires when the
+  /// session arrives and when the user changes. `GraineBooking.show` opens
+  /// the SDK's own booking sheet.
   bool get bookingAvailable => bookingBlocker == null;
 
   /// Why [bookingAvailable] is false, as the booking sheet says it:
   /// [GraineErrorCode.schedulingOff] (the agent takes no bookings, or Graine
   /// cannot ring this phone) or [GraineErrorCode.identityRequired] (nobody
-  /// identified); null when it is true.
+  /// identified); null when it is true. Never `identityRequired` before the
+  /// session has arrived: until then it is `schedulingOff`, meaning only
+  /// "not yet" — [bookingUnavailableReason] tells the two apart (`notLoaded`).
   GraineErrorCode? get bookingBlocker =>
       Booking.blocker(session?.calls, platform: _bookingPlatform, identified: _identityValueFor(_traits) != null);
 
   /// WHY [bookingAvailable] IS FALSE, in words an app can act on (the same
   /// rule as [bookingBlocker], finer), checked in this order: `not_loaded`
-  /// (the session has not arrived), `rings_not_set_up` (Graine cannot ring
-  /// this phone), `scheduling_off` (the agent takes no bookings) and
-  /// `not_identified` (nobody is identified); null when booking is available.
-  /// [bookingListenable] redraws a widget when it may have changed.
+  /// (the session has not arrived — nothing to tell the customer yet; after
+  /// one that could not load, [loadSession] asks again, as the next request
+  /// does), `rings_not_set_up` (Graine cannot ring this phone),
+  /// `scheduling_off` (the agent takes no bookings) and `not_identified`
+  /// (nobody is identified); null when booking is available.
+  /// [bookingListenable] fires whenever it may have changed — the session
+  /// arriving included, even while booking stays unavailable — so read it
+  /// again there.
   GraineBookingUnavailableReason? get bookingUnavailableReason => Booking.unavailableReason(session?.calls,
       platform: _bookingPlatform, identified: _identityValueFor(_traits) != null, loaded: session != null);
 
@@ -756,23 +1248,30 @@ class GraineInApp with WidgetsBindingObserver {
   /// in the device's time zone — and, when the agent has a calling window
   /// ([GraineSchedulingRules.callingWindow]), only the times inside it: its
   /// days, from its start up to, not including, its end, on the device's
-  /// clock. Empty for a day outside them. Whether the customer can book at
-  /// all is [bookingAvailable] ([bookingUnavailableReason] says why not);
-  /// Graine checks the window again when the call is booked ([scheduleCall] —
-  /// `outsideWindow`).
-  List<DateTime> bookingSlots(DateTime day, {DateTime? now}) =>
-      BookingClock.device.slotsOn(schedulingRules, day, now ?? DateTime.fromMillisecondsSinceEpoch(_clock()));
+  /// clock. Empty for a day outside them — and empty until the session has
+  /// arrived, since only it says what the agent allows (no time is offered
+  /// on a guess; read it again when [bookingListenable] fires). Whether the
+  /// customer can book at all is [bookingAvailable] ([bookingUnavailableReason]
+  /// says why not); Graine checks the window again when the call is booked
+  /// ([scheduleCall] — `outsideWindow`).
+  List<DateTime> bookingSlots(DateTime day, {DateTime? now}) => session == null
+      ? const <DateTime>[]
+      : BookingClock.device.slotsOn(schedulingRules, day, now ?? DateTime.fromMillisecondsSinceEpoch(_clock()));
 
   /// The device's time zone (IANA, "Asia/Kolkata"), once the SDK has read it —
   /// the booking sheet names it beside the time chosen. Null before then.
   String? get deviceTimezone => _device.timezoneNow;
 
-  /// [bookingAvailable], for a widget that redraws when it changes.
+  /// [bookingAvailable], for a widget that redraws when it changes — and
+  /// whenever [bookingUnavailableReason] changes while it stays false: the
+  /// session arriving (`notLoaded` gives way to the real reason), the user
+  /// signing in or out. A widget that shows the reason, or offers
+  /// [bookingSlots], reads them again in its builder.
   ValueListenable<bool> get bookingListenable => _bookable;
-  final ValueNotifier<bool> _bookable = ValueNotifier<bool>(false);
+  final _BookingNotifier _bookable = _BookingNotifier();
 
-  /// The session arrived, or the user changed: whether they can book, again.
-  void _bookingChanged() => _bookable.value = bookingAvailable;
+  /// The session arrived, or the user changed: whether they can book, and why not, again.
+  void _bookingChanged() => _bookable.update(bookingAvailable, bookingUnavailableReason);
 
   /// Where Graine can ring this app: the plugin's platforms, iOS and Android.
   static String? get _bookingPlatform => switch (defaultTargetPlatform) {
@@ -791,14 +1290,17 @@ class GraineInApp with WidgetsBindingObserver {
   /// does not let users book), `tooSoon` (before [GraineSchedulingRules.earliest]),
   /// `tooFar` (after [GraineSchedulingRules.latest]), `invalidRequest` (a reason
   /// over 120 characters). Then Graine's own: `outsideWindow`, `tooManyPending`,
-  /// `identityRequired`, `rateLimited`… — all a [GraineException].
+  /// `identityRequired`, `rateLimited`… — all a [GraineException]. It waits
+  /// for the agent's settings first; `identityRequired` too when someone else
+  /// (or nobody) was identified while they loaded — a call is never booked
+  /// for a user who did not ask for it.
   Future<GraineScheduledCall> scheduleCall({required DateTime at, String? reason}) async {
     final why = reason?.trim();
     if (why != null && why.length > ScheduledCalls.maxReasonLength) {
       throw const GraineException('A booking\'s reason is at most ${ScheduledCalls.maxReasonLength} characters.',
           code: GraineErrorCode.invalidRequest);
     }
-    await _sessionOrThrow();
+    final who = await _userAfterSession();
     final rules = schedulingRules;
     // Refused in the booking sheet's words (Booking.errorLine), the same on every SDK.
     GraineException refused(GraineErrorCode code) => GraineException(Booking.errorLine(code, rules), code: code);
@@ -806,10 +1308,14 @@ class GraineInApp with WidgetsBindingObserver {
     final now = DateTime.fromMillisecondsSinceEpoch(_clock());
     if (at.isBefore(rules.earliest(now))) throw refused(GraineErrorCode.tooSoon);
     if (at.isAfter(rules.latest(now))) throw refused(GraineErrorCode.tooFar);
-    final data = await _embed(_Routes.schedule, <String, Object?>{
-      'at': ScheduledCalls.atWire(at),
-      if (why != null && why.isNotEmpty) 'reason': why,
-    });
+    final data = await _embed(
+        _Routes.schedule,
+        <String, Object?>{
+          'at': ScheduledCalls.atWire(at),
+          if (why != null && why.isNotEmpty) 'reason': why,
+        },
+        identity: who.value,
+        overrideIdentity: true);
     final call = ScheduledCalls.oneFrom(data);
     if (call == null) {
       throw const GraineException('The booking was not confirmed. Read scheduledCalls() before booking again.',
@@ -833,6 +1339,66 @@ class GraineInApp with WidgetsBindingObserver {
     final status = ScheduledCalls.statusAfterCancel(await _embed(_Routes.cancel, <String, Object?>{'callId': callId}));
     _chat?._cancelled(callId);
     return status;
+  }
+
+  // ── workflows the app starts (0.14.4) ───────────────────────────────────
+
+  /// START ONE OF YOUR OUTREACH WORKFLOWS FOR THE USER THIS APP SIGNED IN — a
+  /// welcome call after sign-up, a follow-up after an order — with no server
+  /// of your own. The workflow must have "Your app can start this" on (its
+  /// Connect tab); [workflow] is its exact name or its id (`owf_…`).
+  ///
+  /// The run is for the identified user — [identify] with the agent's
+  /// identity trait first — never for anyone [data] names. [data]: the
+  /// contact fields the workflow allows — text (200 characters), numbers,
+  /// yes/no; at most 12, the first 12 in the map's order. Anything else is
+  /// left out, never refused.
+  ///
+  /// [idempotencyKey]: two calls with the same key start one run. Without
+  /// one the SDK makes one for the call, and asks once more with it when a
+  /// request got no answer.
+  ///
+  /// Completes with the run — [GraineWorkflowRun.alreadyRunning] when the
+  /// user already had one of this workflow under way (that run, never a
+  /// second). Throws a [GraineException]: `invalidRequest` (no workflow, a
+  /// key that is not one) and `identityRequired` (nobody identified, or
+  /// someone else identified while the agent's settings loaded: nothing is
+  /// asked) on the device; from Graine `notAllowed`, `notVerified`,
+  /// `rateLimited` ([GraineException.retryAfterSeconds]), `unavailable`,
+  /// `invalidRequest` (a field the workflow needs that your app may not
+  /// send); `network` when no answer came twice; the session's own refusal
+  /// when it could not be loaded.
+  Future<GraineWorkflowRun> startWorkflow(String workflow,
+      {Map<String, Object?> data = const <String, Object?>{}, String? idempotencyKey}) async {
+    final name = Workflows.name(workflow);
+    if (name == null) throw const GraineException(Workflows.nameMessage, code: GraineErrorCode.invalidRequest);
+    if (idempotencyKey != null && !Workflows.isIdempotencyKey(idempotencyKey)) {
+      throw const GraineException(Workflows.keyMessage, code: GraineErrorCode.invalidRequest);
+    }
+    final key = idempotencyKey ?? Workflows.newKey();
+    // Read once, now: a map the app changes afterwards changes nothing that is sent.
+    final fields = Workflows.data(data);
+    // For the user identified when it was asked: one replaced while the session loaded never has a run started for
+    // them (_userAfterSession refuses with identityRequired), and both tries name that same user — with their proof.
+    final who = await _userAfterSession();
+    if (who.value == null) throw _identityRequired(who.session);
+    final body = <String, Object?>{'workflow': name, 'data': fields, 'idempotencyKey': key};
+    Map<String, Object?> answer;
+    try {
+      answer = await _embed(_Routes.startWorkflow, body, identity: who.value, overrideIdentity: true);
+    } on GraineException catch (e) {
+      // No answer: the start may have been made or not. The same key again is answered with the run
+      // it made, or makes it now — never two. A refusal is Graine's answer: never asked again.
+      if (e.code != GraineErrorCode.network) rethrow;
+      await Future<void>.delayed(Workflows.retryDelay);
+      answer = await _embed(_Routes.startWorkflow, body, identity: who.value, overrideIdentity: true);
+    }
+    final run = Workflows.runFrom(answer);
+    if (run == null) {
+      throw const GraineException('The workflow was started, but its run id did not come back.',
+          code: GraineErrorCode.unknown, codeName: 'bad_response');
+    }
+    return run;
   }
 
   /// Prompt variables from the app's own data, while it runs. Merged, not
@@ -921,6 +1487,24 @@ class GraineInApp with WidgetsBindingObserver {
     if (s == null) return;
     if (screenId != null && s.screen != screenId) return;
     setScreen(null);
+  }
+
+  /// SOMETHING WORTH SPEAKING UP ABOUT: the agent may speak first — the
+  /// customer tapped a reminder, the app opened the chat, and the agent opens
+  /// with its check-in question. Told to this agent's live call or chat; with
+  /// neither live it is dropped, so open the chat and wait for it to connect
+  /// first. Paced by the agent: 20 s apart and 3 per conversation by default;
+  /// [data] may carry `cooldown_seconds`, `max_per_session`, or `quiet: true`
+  /// to record it without speaking (they travel at the event's own level);
+  /// anything else travels under the event's `data` — a `name` or `detail`
+  /// there never replaces [name] or [detail] ([ChatWire.appEvent], the same
+  /// event on the call and in the chat). [track] informs without speaking.
+  /// New in 0.14.4.
+  void reportEvent(String name, {String? detail, Map<String, Object?> data = const <String, Object?>{}}) {
+    final n = name.trim();
+    if (n.isEmpty) return;
+    final d = detail?.trim();
+    _reportEvent(n, detail: d == null || d.isEmpty ? null : d, data: data);
   }
 
   /// A product event that informs without interrupting. Rides the next
@@ -1138,8 +1722,10 @@ class GraineInApp with WidgetsBindingObserver {
     };
   }
 
-  /// Which registered actions the agent can call, and which it cannot. Log
-  /// this once at startup.
+  /// Which registered actions the agent can call, and which it cannot — by
+  /// what the session declares. Log this once the session has arrived
+  /// ([GraineListener.onSessionReady], [sessionListenable]): before it,
+  /// nothing is declared yet and every registered action reads `undeclared`.
   Map<String, List<String>> checkActions() {
     final registered = _actions.names;
     final declared = session?.declaredActions ?? const <String>{};
@@ -1229,6 +1815,8 @@ class GraineInApp with WidgetsBindingObserver {
       _armStall();
       _report((GraineListener l) => l.onSessionReady(s));
       voice._sessionChanged();
+      // What the agent checks: the verdicts start from it, and the app proves itself if asked.
+      unawaited(_verifier.sessionArrived(s));
       // The setting names the trait that identifies the user: only now is
       // the identity known — it leaves the variables, and the native engine
       // and the page hear it.
@@ -1236,7 +1824,10 @@ class GraineInApp with WidgetsBindingObserver {
         _applyTraits();
         _announceVariables();
         _announceIdentity();
+        _warnIfTraitsLackIdentity();
       }
+      // Whoever left before the trait was known — this load's wait or an earlier one that failed — signed out now.
+      _signOutWhoLeft(s);
       final unhandled = checkActions()['unhandled']!;
       if (unhandled.isNotEmpty) {
         debugPrint('[Graine] The agent declares actions this build does not implement: $unhandled. '
@@ -1257,19 +1848,13 @@ class GraineInApp with WidgetsBindingObserver {
   }
 
   Future<SessionConfig> _fetchSession() async {
-    final url = Uri.parse('${Protocol.trimTrailingSlashes(config.baseUrl)}/api/embed/session');
-    final res = await _http
-        .post(url,
-            headers: const <String, String>{'Content-Type': 'application/json'},
-            body: jsonEncode(<String, Object?>{'publishableKey': config.publishableKey}))
-        .timeout(const Duration(seconds: 25));
-    Map<String, Object?> data;
-    try {
-      // UTF-8 whatever the header says: a Devanagari variable must survive.
-      data = Js.asMap(jsonDecode(utf8.decode(res.bodyBytes, allowMalformed: true))) ?? <String, Object?>{};
-    } catch (_) {
-      data = <String, Object?>{};
-    }
+    // Which app is asking (APP-IDENTITY.md §1.1), on this request too — and inside the door the server token: a new
+    // connection, so it goes with a usable one or waits at most 10 s; refused for it, a fresh one and once more.
+    final app = await _verifier.appEntry();
+    final res = await _postEmbed(_Routes.session, <String, Object?>{'publishableKey': config.publishableKey, ...app},
+        newConnection: true, timeout: const Duration(seconds: 25));
+    // UTF-8 whatever the header says: a Devanagari variable must survive.
+    final data = _bodyOf(res);
     final err = SessionConfig.errorFor(res.statusCode, data);
     if (err != null) {
       final r = EmbedRefusal.of(res.statusCode, data, retryAfter: res.headers['retry-after']);
@@ -1277,7 +1862,8 @@ class GraineInApp with WidgetsBindingObserver {
           code: r?.code ?? GraineErrorCode.unknown,
           codeName: r?.codeName,
           statusCode: res.statusCode,
-          retryAfterSeconds: r?.retryAfterSeconds);
+          retryAfterSeconds: r?.retryAfterSeconds,
+          reason: r?.reason);
     }
     _sessionError = null;
     return SessionConfig.fromJson(data);
@@ -1366,6 +1952,8 @@ class GraineInApp with WidgetsBindingObserver {
     for (final w in List<void Function(bool)>.of(_foregroundWatchers)) {
       w(foreground);
     }
+    // An app pass running low is refreshed as the app comes back (APP-IDENTITY.md §3.3).
+    if (foreground) _verifier.foreground();
   }
 
   /// Stop every timer and detach the engine (tests; an app keeps its
@@ -1375,9 +1963,11 @@ class GraineInApp with WidgetsBindingObserver {
     if (identical(_group.byName[name], this)) _group.byName.remove(name);
     _contextTimer?.cancel();
     _stallTimer?.cancel();
+    _clientTokens.dispose();
     voice.detach();
     _chat?._dispose();
     components._cancel();
+    _verifier.dispose();
     if (_observing) {
       WidgetsBinding.instance.removeObserver(this);
       _observing = false;
@@ -1387,6 +1977,10 @@ class GraineInApp with WidgetsBindingObserver {
 
 /// The identity fields of one request (contract §1.3).
 typedef _IdentityState = ({String? value, String installId, bool memory, String? timezone});
+
+/// A user who left before the session named the trait that identifies users: their traits, and the
+/// traits identify() was given instead (null: a sign-out).
+typedef _Left = ({Map<String, Object?> previous, Map<String, Object?>? to, String? token});
 
 /// WHAT EVERY AGENT IN THE APP SHARES (MULTI-AGENT.md) — one app, one user,
 /// one device: the agents themselves, by name, in the order they were
@@ -1418,6 +2012,22 @@ class _Agents {
   GraineScreen? screen;
   int? screenSince;
 
+  /// The identity token (APP-IDENTITY.md §1.3) — memory only — and the traits
+  /// it was given with: it is sent only with the identity value they carry.
+  String? identityToken;
+  Map<String, Object?>? tokenTraits;
+
+  /// The app's way to a fresh token, and the one refresh at a time it runs.
+  Future<String?> Function()? refresher;
+  Future<bool>? refreshing;
+  int? refreshStartedAt;
+
+  /// A debug build (`kDebugMode`): development mode's automatic setting sends a debug token.
+  bool debugBuild = kDebugMode;
+
+  /// What the plugin reads and proves for the app declaration.
+  final _AppPlatform platform = _AppPlatform(const MethodChannel('ai.graine.inapp/app'));
+
   int tapWindowAt = 0;
   int tapsInWindow = 0;
 
@@ -1428,8 +2038,30 @@ class _Agents {
   void join(GraineInApp g) => byName[g.name] = g;
 }
 
+/// [GraineInApp.bookingListenable]: whether booking is available — and a
+/// notification, too, when only the reason it is not changed (the session
+/// arriving while nobody is identified, say), so a widget showing
+/// [GraineInApp.bookingUnavailableReason] never keeps `notLoaded`.
+class _BookingNotifier extends ValueNotifier<bool> {
+  _BookingNotifier() : super(false);
+
+  /// The reason last said: before the session, none has arrived.
+  GraineBookingUnavailableReason? _reason = GraineBookingUnavailableReason.notLoaded;
+
+  void update(bool available, GraineBookingUnavailableReason? reason) {
+    final reasonChanged = reason != _reason;
+    _reason = reason;
+    if (available != value) {
+      value = available; // notifies
+    } else if (reasonChanged) {
+      notifyListeners();
+    }
+  }
+}
+
 /// The SDK's routes (contract §5.1), whole — what the requests go to.
 abstract final class _Routes {
+  static const String session = '/api/embed/session';
   static const String ticket = '/api/embed/ticket';
   static const String signout = '/api/embed/identity/signout';
   static const String forget = '/api/embed/memory/forget';
@@ -1440,4 +2072,7 @@ abstract final class _Routes {
   static const String cancel = '/api/embed/calls/cancel';
   static const String pastSessions = '/api/embed/sessions/list';
   static const String sessionTranscript = '/api/embed/sessions/transcript';
+  static const String startWorkflow = '/api/embed/workflows/start';
+  static const String appVerifyChallenge = '/api/embed/app-verify/challenge';
+  static const String appVerify = '/api/embed/app-verify';
 }

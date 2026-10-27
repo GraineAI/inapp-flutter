@@ -171,6 +171,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   /// the chat connects, gives up or is hung up.
   bool _remaking = false;
   String? _error;
+  GraineException? _refusal;
   Timer? _ping;
   Timer? _retry;
   Timer? _backgroundConfirm;
@@ -261,6 +262,17 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
 
   /// Why the last connect failed, for a log; null once connected.
   String? get error => _error;
+
+  /// WHY GRAINE REFUSED THE CHAT, when it refused it for the server token or
+  /// the publishable key — [GraineErrorCode.tokenRequired], `tokenInvalid`,
+  /// `tokenExpired` (the SDK already asked [GraineConfig.tokenProvider] again
+  /// and tried once more), `tokenScope` or `keyRevoked`, with
+  /// [GraineException.reason] saying which part failed; null otherwise. Such a
+  /// refusal is final for that try: [failed] is true, nothing reconnects by
+  /// itself, and what the customer typed waits, marked not sent — [open],
+  /// [send] or [retry] tries again. [GraineListener.onError] hears its
+  /// sentence too. New in 0.14.4.
+  GraineException? get refusal => _refusal;
 
   /// The customer is in the chat ([open] was called and [close] was not).
   bool get isOpen => _wanted;
@@ -576,6 +588,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _hangUp();
     _ladder.reset();
     _failed = false;
+    _refusal = null;
     _remaking = false;
     _endedByGraine = false;
     notifyListeners();
@@ -736,6 +749,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   void _retryNow() {
     if (_failed) {
       _failed = false;
+      _refusal = null;
       _ladder.reset();
       _transcript.retryFailed();
     }
@@ -759,8 +773,8 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
   Future<void> _openSocket(int generation) async {
     bool current() => generation == _generation && _wanted && !_disposed;
     try {
-      final session = await _graine.loadSession();
-      if (session == null) throw const GraineException('Could not load the agent.', code: GraineErrorCode.network);
+      // No session: its own refusal is why ([error]) — a key Graine rejected, an outage — not a generic one.
+      final session = await _graine._sessionOrThrow();
       if (!current()) return;
       final variables = _graine.currentVariables();
       final identity = await _graine._identityState(waitForSession: false);
@@ -788,6 +802,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       _connected = true;
       _error = null;
       _failed = false;
+      _refusal = null;
       _remaking = false;
       _ladder.reset();
       // A connection is where the idle time of a conversation starts.
@@ -810,10 +825,41 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
       unawaited(refreshUpcoming());
     } catch (e) {
       if (generation != _generation || _disposed) return;
+      // Refused for the server token or the publishable key — its ticket, or the agent's settings: final for this
+      // try. The direct socket would only be another way past that answer, and a reconnect would meet it again.
+      if (e is GraineException && ClientTokenRules.refusals.contains(e.code.wire)) {
+        _refused(e);
+        return;
+      }
       _error = e is GraineException ? e.message : 'The chat could not connect: $e';
       if (_graine.config.debug) debugPrint('[Graine] chat: $_error');
+      if (e is GraineException && e.code == GraineErrorCode.appNotAllowed) {
+        // Not one of the agent's apps: asking again cannot change that (APP-IDENTITY.md §2.3).
+        _cancelRetry();
+        _failed = true;
+        _remaking = false;
+        _transcript.failPending();
+        return;
+      }
       _scheduleReconnect();
     }
+  }
+
+  /// GRAINE REFUSED THE CONVERSATION for the server token or the publishable
+  /// key (CLIENT-TOKENS.md §2.5): the chat fails with that refusal —
+  /// [refusal] — and nothing reconnects by itself. What was waiting to go is
+  /// marked not sent; the customer's next open or message tries again.
+  void _refused(GraineException e) {
+    _cancelRetry();
+    _refusal = e;
+    _error = e.message;
+    _failed = true;
+    _remaking = false;
+    _transcript.failPending();
+    if (_graine.config.debug) {
+      debugPrint('[Graine] chat: refused (${e.code.wire}${e.reason == null ? '' : ', ${e.reason}'})');
+    }
+    _graine._report((GraineListener l) => l.onError(e.message));
   }
 
   void _onFrame(Object? raw) {
@@ -1013,6 +1059,7 @@ class GraineChatSession extends ChangeNotifier implements GraineChatState, Grain
     _ladder.reset();
     if (live && _wanted) {
       _failed = false;
+      _refusal = null;
       _transcript.retryFailed();
       _ensureConnected();
     }

@@ -20,7 +20,8 @@ export 'src/chat_view.dart' show GraineChat;
 export 'src/core/core.dart'
     hide Js, SocketTrace, SvgPath, PathCommand, PathMoveTo, PathLineTo, PathCubicTo, PathQuadTo, PathArcTo, PathClose,
         ChatPresentation, ChatClose, ChatWindowLayout, ChatMarks, BookingClock, ChatCloseDelay, PastSessionsWire,
-        PastSessionsPage;
+        PastSessionsPage, Workflows, AppIdentity, IssuedPass, ClientTokenRules, ClientTokens, ClientTokenWire, ClientTokenClaims,
+        ClientTokenTimer;
 export 'src/engine.dart' show GraineEngine, WebViewEnginePage;
 export 'src/graine.dart' hide ChatWindows, ChatSocketCloseCode;
 export 'src/launcher.dart' show GraineLauncher;

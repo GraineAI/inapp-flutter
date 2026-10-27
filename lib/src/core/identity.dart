@@ -238,17 +238,26 @@ abstract final class Identity {
   }
 
   /// THE IDENTITY FIELDS OF ONE REQUEST (§1.3), in the order every SDK sends
-  /// them: `identity: {value}` only when there is one; `installId` always;
-  /// `memory`, `timezone` and `callId` when known.
+  /// them: `identity: {value}` only when there is one — with the identity
+  /// [token] the app gave for that value and the user [pass] Graine issued
+  /// for it inside it, never anywhere else (APP-IDENTITY.md §1.3); `installId`
+  /// always; `memory`, `timezone` and `callId` when known.
   static Map<String, Object?> requestFields({
     String? value,
+    String? token,
+    String? pass,
     required String installId,
     bool? memory,
     String? timezone,
     String? callId,
   }) =>
       <String, Object?>{
-        if (value != null) 'identity': <String, Object?>{'value': value},
+        if (value != null)
+          'identity': <String, Object?>{
+            'value': value,
+            if (token != null && token.isNotEmpty) 'token': token,
+            if (pass != null && pass.isNotEmpty) 'pass': pass,
+          },
         'installId': installId,
         if (memory != null) 'memory': memory,
         if (timezone != null) 'timezone': timezone,

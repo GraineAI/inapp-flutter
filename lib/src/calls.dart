@@ -903,6 +903,10 @@ class GraineCallsOptions {
 /// that agent — the snapshot, the ring and the outcome say which
 /// ([GraineCallSnapshot.agent]), and the agent's actions run in its own
 /// handlers.
+///
+/// SERVER TOKENS: with a [GraineConfig.tokenProvider], the engine carries the
+/// tokens of the agent its call is with — each new one is handed over as it
+/// arrives, and one the engine was refused is refreshed when it asks.
 class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSnapshot> {
   GraineCalls._(this._channel, this._events);
 
@@ -956,6 +960,14 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
 
   /// The agent the last [startCall] named, while its call lasts.
   GraineInApp? _calling;
+
+  /// The agent whose server tokens the engine carries now, and how to stop hearing its new ones.
+  GraineInApp? _tokensOf;
+  void Function()? _untokens;
+
+  /// The last token handed to the engine (`setClientToken`); [_noTokenSent] before any.
+  Object? _tokenSent = _noTokenSent;
+  static const Object _noTokenSent = Object();
 
   /// The engine's own snapshot, before what this keeps beside it (the
   /// transcript, a missed ring, how the call ended) is added.
@@ -1067,6 +1079,8 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     }
     if (!isSupported) return;
     _listen();
+    // The server token goes first: the engine holds it until it is configured, so its first request carries it.
+    _followTokens();
     final engine = _engineAgents(options);
     await _channel.invokeMethod<void>('configure', _configureArgs(options, engine.agents));
     _options = options;
@@ -1356,8 +1370,9 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
 
   /// The agent whose variables, screen and actions the engine should hold:
   /// the one its call is with, else the attached one — none while no app is
-  /// attached.
+  /// attached. Its server tokens are the engine's too ([_followTokens]).
   void _follow() {
+    _followTokens();
     final attached = _attached;
     if (attached == null) {
       _hold(null);
@@ -1390,6 +1405,68 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
       offVariables();
       offContext();
     };
+  }
+
+  // ── server tokens (CLIENT-TOKENS.md §2.4) ────────────────────────────────
+
+  /// THE AGENT WHOSE SERVER TOKENS THE ENGINE CARRIES: the one its call is
+  /// with, else the one [startCall] is calling, else the attached one — else
+  /// the app's default agent. A token is one agent's, and the engine takes one
+  /// for all of its requests.
+  GraineInApp? get _tokenAgent {
+    final live = _snapshot.status.isLive ? GraineInApp._agentNamed(_snapshot.agent) : null;
+    return live ?? _calling ?? _attached ?? GraineInApp.maybeInstance;
+  }
+
+  /// HAND THE ENGINE THE TOKENS OF [_tokenAgent], and every new one it gets:
+  /// the engine sends the newest as `clientToken` on every request it makes
+  /// (a call's credential and ticket, device registration, call outcomes).
+  /// An agent with no token provider hands it none — and nothing at all while
+  /// no agent's token ever went: without a provider nothing changes.
+  void _followTokens() {
+    if (!isSupported) return;
+    final g = _tokenAgent;
+    if (!identical(g, _tokensOf)) {
+      _untokens?.call();
+      _untokens = null;
+      _tokensOf = g;
+      if (g != null) {
+        _untokens = g._clientTokens.onChange((String? token) {
+          if (identical(_tokensOf, g)) _sendToken(token);
+        });
+      }
+    }
+    final tokens = g?._clientTokens;
+    if (tokens != null && tokens.inPlay) {
+      _sendToken(tokens.newest);
+    } else if (_tokenSent != _noTokenSent && _tokenSent != null) {
+      _sendToken(null); // another agent's token is not this one's
+    }
+  }
+
+  /// `setClientToken` — when the token changed, or [always]: the engine waits
+  /// for the answer to its `needClientToken`, the same token or none included.
+  void _sendToken(String? token, {bool always = false}) {
+    if (!always && _tokenSent == token) return;
+    _tokenSent = token;
+    _tokenPushes++;
+    unawaited(_invokeOptional(ClientTokenRules.hostSetToken, token));
+  }
+
+  /// How many tokens were handed to the engine: an ask answered by a new token on its way needs no other answer.
+  int _tokenPushes = 0;
+
+  /// A REQUEST OF THE ENGINE'S WAS REFUSED for its server token
+  /// (`needClientToken`): the agent it carries tokens for asks for a fresh one
+  /// — the question under way joined, at most one asked anew in 5 s — and the
+  /// engine hears the newest, the same or none included. It waits at most
+  /// 5 s for it, then sends that request once more.
+  Future<void> _answerTokenNeed() async {
+    final g = _tokenAgent;
+    final pushes = _tokenPushes;
+    final token = g == null ? null : await g._clientTokens.refresh();
+    // A new token was handed over as it arrived: that was the answer.
+    if (_tokenPushes == pushes) _sendToken(token, always: true);
   }
 
   /// The configure arguments: the options, the app's [speakerByDefault] once
@@ -1455,25 +1532,52 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
   /// attached, the engine hears it from the default agent alone.
   static void _identityChanged(GraineInApp g) {
     final calls = instance;
-    final attached = calls._attached;
-    if (attached != null) {
-      if (!identical(attached, g)) return;
-    } else {
-      if (!calls._configured) return;
-      final primary = GraineInApp.maybeInstance;
-      if (primary != null && !identical(primary, g) && GraineInApp._everyAgent().contains(g)) return;
-    }
+    if (!calls._hears(g)) return;
     unawaited(calls._sendIdentity(g));
+  }
+
+  /// Whether the engine hears [g]'s user: [g] is the agent attached, or — with
+  /// none attached and the calls configured — the default agent.
+  bool _hears(GraineInApp g) {
+    final attached = _attached;
+    if (attached != null) return identical(attached, g);
+    if (!_configured) return false;
+    final primary = GraineInApp.maybeInstance;
+    return primary == null || identical(primary, g) || !GraineInApp._everyAgent().contains(g);
+  }
+
+  /// [g]'s user has a new identity token (or none): the engine hears it if it hears [g]'s user.
+  static void _identityTokenChanged(GraineInApp g) {
+    final calls = instance;
+    if (!calls._hears(g)) return;
+    unawaited(calls._sendIdentityToken(g));
+  }
+
+  /// The identity token last told to the engine: told again only when it changes.
+  String? _sentIdentityToken;
+
+  /// THE USER'S IDENTITY TOKEN, FOR THE NATIVE ENGINE (APP-IDENTITY.md §1.3)
+  /// — for the user its last identity named, on its own method: never in the
+  /// traits, which become the agent's variables.
+  Future<void> _sendIdentityToken(GraineInApp g) async {
+    final token = g._traits == null ? null : g._group.identityToken;
+    if (token == _sentIdentityToken) return;
+    _sentIdentityToken = token;
+    await _invokeOptional('setIdentityToken', token);
   }
 
   /// WHO THE USER IS, FOR THE NATIVE ENGINE: the traits as the app passed
   /// them — the engine masks them for the agent and keeps the identity raw
-  /// for Graine, exactly as the app's own `identify` would — and their memory
-  /// choice.
+  /// for Graine, exactly as the app's own `identify` would — their identity
+  /// token, and their memory choice.
   Future<void> _sendIdentity(GraineInApp g) async {
     if (!isSupported) return;
     final traits = g._traits;
     await _invoke('setIdentity', traits == null ? null : Protocol.toJson(traits));
+    // After the identity it belongs to: the engine drops a token when the user changes.
+    _sentIdentityToken = null;
+    final token = traits == null ? null : g._group.identityToken;
+    if (token != null) await _sendIdentityToken(g);
     // Not waiting for the session: when it arrives, the identity is announced
     // again with the choice that user made.
     final id = await g._identityState(waitForSession: false);
@@ -1505,7 +1609,17 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
             hosted: payload['hosted'] == true || payload['hosted'] == '1',
             agent: _string(payload['agent']));
         _ring = ring;
+        // A fresh server token for the agent ringing, in the background, before anyone answers.
+        (GraineInApp._agentNamed(ring.agent) ?? GraineInApp.maybeInstance)?._clientTokens.ring();
         _deliver(_incoming, _heldIncoming, ring);
+        // Before the person answers: the app's proof and the user's token, refreshed in the background.
+        GraineInApp._ringArrived(ring.agent);
+      case ClientTokenRules.hostNeedsToken:
+        unawaited(_answerTokenNeed());
+      case 'verification':
+        // What Graine made of this app and its user on the engine's own requests (a call's ticket, its
+        // credential): the client of that key takes what proves more than it knows — never less.
+        GraineInApp._nativeVerification(data is Map ? data : const <Object?, Object?>{});
       case 'voipToken':
         final token = _string(payload['token']);
         for (final w in List<void Function(String?)>.of(_tokenWatchers)) {
@@ -1724,10 +1838,15 @@ class GraineCalls extends ChangeNotifier implements ValueListenable<GraineCallSn
     _options = null;
     _agentsSent = const <String, Object?>{};
     _sameAsDefault = const <String>[];
+    _sentIdentityToken = null;
     _unhold?.call();
     _unhold = null;
     _held = null;
     _calling = null;
+    _untokens?.call();
+    _untokens = null;
+    _tokensOf = null;
+    _tokenSent = _noTokenSent;
     _setupTimer?.cancel();
     _setupTimer = null;
     _warned.clear();

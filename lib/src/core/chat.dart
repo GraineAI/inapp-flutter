@@ -89,18 +89,39 @@ abstract final class ChatWire {
         if (frame['seq'] != null) 'seq': frame['seq'],
       };
 
-  /// Something the agent may want to speak up about (or, `quiet`, only know).
+  /// The keys of an app event the runtime reads at the event's own level —
+  /// its pacing — beside its name and detail, which are the caller's own.
+  static const Set<String> eventKeys = <String>{'cooldown_seconds', 'max_per_session', 'quiet'};
+
+  /// Something the agent may want to speak up about (or, `quiet`, only know):
+  /// `{name, detail?, cooldown_seconds?, max_per_session?, quiet?, data?}`, the
+  /// shape every Graine SDK sends (iOS `ChatWire.appEventFrame`, React
+  /// Native's `AppEvent`). [name] and [detail] are the event's own — a `name`
+  /// or `detail` in [data] never replaces them; [eventKeys] go at the event's
+  /// level; every other key of [data] goes under `data`, joining a map [data]
+  /// carries under `data` (never over its keys; one that is not a map is kept
+  /// under `data` as it is). JSON-safe ([Protocol.toJson]).
   static Map<String, Object?> appEvent(String name,
-          {String? detail, Map<String, Object?> data = const <String, Object?>{}}) =>
-      <String, Object?>{
-        'type': 'app_event',
-        'event': <String, Object?>{
-          'name': name,
-          if (detail != null) 'detail': detail,
-          for (final e in data.entries)
-            if (e.key != 'name' && e.key != 'detail') e.key: Protocol.toJson(e.value),
-        },
-      };
+      {String? detail, Map<String, Object?> data = const <String, Object?>{}}) {
+    final event = <String, Object?>{'name': name, if (detail != null) 'detail': detail};
+    final nested = data['data'];
+    final inner = <String, Object?>{
+      if (nested is Map)
+        for (final e in nested.entries) e.key.toString(): Protocol.toJson(e.value)
+      else if (nested != null)
+        'data': Protocol.toJson(nested),
+    };
+    for (final e in data.entries) {
+      if (e.key == 'data') continue;
+      if (eventKeys.contains(e.key)) {
+        event[e.key] = Protocol.toJson(e.value);
+      } else {
+        inner.putIfAbsent(e.key, () => Protocol.toJson(e.value));
+      }
+    }
+    if (inner.isNotEmpty) event['data'] = inner;
+    return <String, Object?>{'type': 'app_event', 'event': event};
+  }
 }
 
 /// ONE `text` FRAME: the words to show, and what it says about the turn.

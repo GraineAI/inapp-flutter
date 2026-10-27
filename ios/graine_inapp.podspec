@@ -32,8 +32,9 @@ Pod::Spec.new do |s|
   # The SDK's privacy manifest: the required-reason APIs it calls, for the app's privacy report.
   # It declares everything the WebRTC module uses too (checked when the copy is made).
   s.resource_bundles = { "graine_inapp_privacy" => ["Classes/GraineInApp/PrivacyInfo.xcprivacy"] }
-  s.frameworks    = ["AVFoundation", "CallKit", "Combine", "CoreGraphics", "CoreText", "PushKit", "SwiftUI", "UIKit", "WebKit"] +
-                    (webrtc ? ["CryptoKit"] : [])
+  # CryptoKit and DeviceCheck: App Attest's proofs ("Require a verified app"); Security: the Keychain.
+  s.frameworks    = ["AVFoundation", "CallKit", "Combine", "CoreGraphics", "CoreText", "CryptoKit", "DeviceCheck", "PushKit",
+                     "Security", "SwiftUI", "UIKit", "WebKit"]
   s.dependency "Flutter"
   # A prebuilt, symbol-prefixed build of Google's libwebrtc, pinned exactly as the iOS SDK pins it.
   s.dependency "LiveKitWebRTC", "150.7871.03" if webrtc

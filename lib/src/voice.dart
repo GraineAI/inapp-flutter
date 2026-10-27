@@ -392,6 +392,11 @@ class GraineVoice extends ChangeNotifier
       _graine._onIdentity(() {
         if (_ready) _postIdentity();
       }),
+      // Every new server token reaches the page for its own requests; a call
+      // already up is never touched by it.
+      _graine._clientTokens.onChange((String? token) {
+        if (_ready) _postClientToken(token);
+      }),
       () => _graine._foregroundWatchers.remove(_foregroundChanged),
     ];
     _graine._foregroundWatchers.add(_foregroundChanged);
@@ -616,13 +621,19 @@ class GraineVoice extends ChangeNotifier
 
   /// Something happened that the agent may want to speak up about. Only
   /// during a call; the screen goes first, since the event is about it.
+  /// The event is the chat's ([ChatWire.appEvent]: [name] and [detail] its
+  /// own, the pacing at its level, the rest of [data] under `data`), handed to
+  /// the page as `{event}` — the form the page passes on as it is, so a key in
+  /// [data] never renames the event or replaces its detail.
   void reportEvent(String name,
       {String? detail, Map<String, Object?> data = const <String, Object?>{}}) {
     if (!_connected) return;
     final frame = _graine._currentContextFrame();
     if (frame != null) _postContext(frame);
-    final payload = <String, Object?>{...data, if (detail != null) 'detail': detail};
-    _post(Protocol.out(ProtocolOut.appEvent, <String, Object?>{'name': name, 'data': payload}));
+    _post(<String, Object?>{
+      'type': ProtocolOut.appEvent,
+      'event': ChatWire.appEvent(name, detail: detail, data: data)['event'],
+    });
   }
 
   /// Reload the page and start the retry ladder over. For a "Try again" button.
@@ -710,6 +721,29 @@ class GraineVoice extends ChangeNotifier
     });
   }
 
+  /// The server token, for the page's own requests (CLIENT-TOKENS.md §2.2) —
+  /// only while tokens are in play.
+  void _postClientToken(String? token) {
+    if (_graine._clientTokens.inPlay) _postClientTokenAnswer(token);
+  }
+
+  /// `graine:client-token` — also the answer to the page's
+  /// `graine:need-client-token`, with null when there is none, so it stops waiting.
+  void _postClientTokenAnswer(String? token) =>
+      _post(Protocol.out(ClientTokenRules.pageToken, <String, Object?>{'token': token}));
+
+  /// The page was refused for its server token (`graine:need-client-token`):
+  /// a fresh one by the refusal rule — the question under way joined, at most
+  /// one asked anew in 5 s — and the page hears the newest either way. It
+  /// waits at most 5 s, then sends that request once more.
+  void _onNeedsClientToken() {
+    final load = _loadToken;
+    _graine._clientTokens.refresh().then((String? token) {
+      if (_page == null || load != _loadToken) return;
+      _postClientTokenAnswer(token);
+    });
+  }
+
   /// Deliver one message into the page.
   void _post(Map<String, Object?> message) {
     final page = _page;
@@ -729,6 +763,14 @@ class GraineVoice extends ChangeNotifier
       case ProtocolOut.appContext:
         final c = m['context'];
         return 'screen=${c is Map ? c['screen'] : null}';
+      case ProtocolOut.identity:
+        // The identity token never reaches a log: only whether one went.
+        final shown = <String, Object?>{...m}..remove('token');
+        if (m.containsKey('token')) shown['token'] = '(set)';
+        return jsonEncode(shown);
+      case ClientTokenRules.pageToken:
+        // A token is never logged.
+        return 'token=${m['token'] == null ? 'none' : 'set'}';
       default:
         final s = jsonEncode(m);
         return s.length > 300 ? s.substring(0, 300) : s;
@@ -795,6 +837,11 @@ class GraineVoice extends ChangeNotifier
       final s = raw ?? '';
       debugPrint('[Graine] ← page ${s.length > 600 ? s.substring(0, 600) : s}');
     }
+    // Not a PageMessage, as the levels are not, so a `switch` over those written before it still covers them all.
+    if (_isType(raw, ClientTokenRules.pageNeedsToken)) {
+      _onNeedsClientToken();
+      return;
+    }
     final msg = Protocol.parse(raw);
     if (msg == null) return;
     _handle(msg);
@@ -816,6 +863,8 @@ class GraineVoice extends ChangeNotifier
         _post(Protocol.out(ProtocolOut.variables, <String, Object?>{'variables': _graine.currentVariables()}));
         _identityPosted = false;
         _postIdentity();
+        // The token the page's own ticket and call credential carry, before anything asks for one.
+        _postClientToken(_graine._clientTokens.newest);
         final frame = _graine._currentContextFrame();
         if (frame != null) _postContext(frame);
         if (_pendingStart && !_askingMic && _micGranted != false) {
@@ -1053,3 +1102,14 @@ class GraineVoice extends ChangeNotifier
 }
 
 const String _levelsType = 'graine:levels';
+
+/// [raw] is a page message of [type] — read only when it could be one.
+bool _isType(String? raw, String type) {
+  if (raw == null || !raw.contains(type)) return false;
+  try {
+    final decoded = jsonDecode(raw);
+    return decoded is Map && decoded['type'] == type;
+  } catch (_) {
+    return false;
+  }
+}
